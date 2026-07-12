@@ -40,12 +40,15 @@ final class DaemonClient {
         }
     }
 
-    /** Fire-and-forget: don't wait for the reply (used on the hot input path). */
-    synchronized void sendNoReply(String cmd) {
+    /**
+     * Fire-and-forget input on the hot path: write and return immediately. The
+     * daemon sends NO reply for input commands, so there's nothing to read and
+     * the caller (ScreenConnect's input thread) never blocks on an ack.
+     */
+    synchronized void input(String cmd) {
         try {
             ensure();
             ch.write(ByteBuffer.wrap((cmd + "\n").getBytes(StandardCharsets.US_ASCII)));
-            readLine(); // drain the OK so replies stay aligned with commands
         } catch (Exception e) {
             close();
         }

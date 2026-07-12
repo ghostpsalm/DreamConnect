@@ -263,27 +263,35 @@ class ControlServer(threading.Thread):
         parts = line.split()
         cmd, args = parts[0].upper(), parts[1:]
         s = self.session
+        # Input commands are fire-and-forget: they return None (no reply) so the
+        # agent's hot input path never waits for an ack. Errors are logged, not
+        # returned, to keep the reply stream aligned with control commands only.
+        try:
+            if cmd == "M":  # M x y  (absolute, in screen pixels)
+                s.motion_abs(float(args[0]), float(args[1]))
+                return None
+            if cmd == "B":  # B evdev_button state
+                s.button(int(args[0]), args[1] == "1")
+                return None
+            if cmd == "W":  # W axis steps  (axis 0=vertical 1=horizontal)
+                s.axis_discrete(int(args[0]), int(args[1]))
+                return None
+            if cmd == "K":  # K evdev_keycode state
+                s.key_code(int(args[0]), args[1] == "1")
+                return None
+            if cmd == "KS":  # KS keysym state
+                s.key_sym(int(args[0]), args[1] == "1")
+                return None
+        except Exception as e:  # noqa: BLE001
+            log(f"input error on '{line}': {e}")
+            return None
+        # Request/reply control commands (low frequency).
         if cmd == "PING":
             return "PONG"
         if cmd == "GEOM":
             return f"{s.width} {s.height}"
         if cmd == "NODE":
             return str(s.node_id)
-        if cmd == "M":  # M x y  (absolute, in screen pixels)
-            s.motion_abs(float(args[0]), float(args[1]))
-            return "OK"
-        if cmd == "B":  # B evdev_button state
-            s.button(int(args[0]), args[1] == "1")
-            return "OK"
-        if cmd == "W":  # W axis steps  (axis 0=vertical 1=horizontal)
-            s.axis_discrete(int(args[0]), int(args[1]))
-            return "OK"
-        if cmd == "K":  # K evdev_keycode state
-            s.key_code(int(args[0]), args[1] == "1")
-            return "OK"
-        if cmd == "KS":  # KS keysym state
-            s.key_sym(int(args[0]), args[1] == "1")
-            return "OK"
         return f"ERR unknown cmd {cmd}"
 
 

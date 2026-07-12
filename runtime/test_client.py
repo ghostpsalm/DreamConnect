@@ -13,8 +13,15 @@ SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid
 
 
 def cmd(sock, line):
+    """Control command: send and read the one-line reply."""
     sock.sendall((line + "\n").encode())
     return sock.makefile("rb").readline().decode().strip()
+
+
+def fire(sock, line):
+    """Input command: fire-and-forget (the daemon sends no reply)."""
+    sock.sendall((line + "\n").encode())
+    return "(sent)"
 
 
 def read_frame():
@@ -56,12 +63,15 @@ def main():
         print(f"first-100k nonzero bytes: {nz}")
 
     # input: move to two points, left click, type 'a' via evdev keycode 30
-    print("M 200 200 ->", cmd(s, "M 200 200"))
-    print("M 960 540 ->", cmd(s, "M 960 540"))
-    print("B left press ->", cmd(s, "B 272 1"))
-    print("B left release ->", cmd(s, "B 272 0"))
-    print("K a press ->", cmd(s, "K 30 1"))
-    print("K a release ->", cmd(s, "K 30 0"))
+    # (fire-and-forget — no reply expected)
+    print("M 200 200 ->", fire(s, "M 200 200"))
+    print("M 960 540 ->", fire(s, "M 960 540"))
+    print("B left press ->", fire(s, "B 272 1"))
+    print("B left release ->", fire(s, "B 272 0"))
+    print("K a press ->", fire(s, "K 30 1"))
+    print("K a release ->", fire(s, "K 30 0"))
+    # confirm the socket is still aligned: a control command still replies
+    print("PING (post-input) ->", cmd(s, "PING"))
 
 
 if __name__ == "__main__":

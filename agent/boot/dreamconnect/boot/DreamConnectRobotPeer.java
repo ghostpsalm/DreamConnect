@@ -20,32 +20,32 @@ public final class DreamConnectRobotPeer implements RobotPeer {
         this.frame = frame;
     }
 
-    // ---- input -------------------------------------------------------------
+    // ---- input (fire-and-forget on the hot path) ---------------------------
     @Override public void mouseMove(int x, int y) {
-        daemon.sendNoReply("M " + x + " " + y);
+        daemon.input("M " + x + " " + y);
     }
 
     @Override public void mousePress(int buttons) {
-        daemon.sendNoReply("B " + AwtEvdev.button(buttons) + " 1");
+        daemon.input("B " + AwtEvdev.button(buttons) + " 1");
     }
 
     @Override public void mouseRelease(int buttons) {
-        daemon.sendNoReply("B " + AwtEvdev.button(buttons) + " 0");
+        daemon.input("B " + AwtEvdev.button(buttons) + " 0");
     }
 
     @Override public void mouseWheel(int wheelAmt) {
         // AWT: positive = scroll toward user (down). Mutter axis 0 = vertical.
-        daemon.sendNoReply("W 0 " + wheelAmt);
+        daemon.input("W 0 " + wheelAmt);
     }
 
     @Override public void keyPress(int keycode) {
         int e = AwtEvdev.keycode(keycode);
-        if (e >= 0) daemon.sendNoReply("K " + e + " 1");
+        if (e >= 0) daemon.input("K " + e + " 1");
     }
 
     @Override public void keyRelease(int keycode) {
         int e = AwtEvdev.keycode(keycode);
-        if (e >= 0) daemon.sendNoReply("K " + e + " 0");
+        if (e >= 0) daemon.input("K " + e + " 0");
     }
 
     // ---- screen capture ----------------------------------------------------
