@@ -83,7 +83,12 @@ class FrameBuffer:
             self.mm.close()
         if self.fd is not None:
             os.close(self.fd)
-        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o644)
+        # 0600: the only intended reader is the root ScreenConnect JVM, which
+        # bypasses DAC — so owner-only keeps other local users from scraping the
+        # screen out of /dev/shm (which is world-traversable). fchmod overrides
+        # any inherited umask.
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.fchmod(self.fd, 0o600)
         os.ftruncate(self.fd, size)
         self.mm = mmap.mmap(self.fd, size)
         self.width, self.height, self.stride = width, height, stride
