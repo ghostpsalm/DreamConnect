@@ -117,6 +117,7 @@ class Session:
         self.node_id = None
         self.width = self.height = 0
         self.pipeline = None
+        self.active_clients = 0  # socket connections; gates idle frame copies
         self._lock = threading.Lock()
 
     def _rd(self, method, params=None, sig=None):
@@ -192,6 +193,10 @@ class Session:
         sample = sink.emit("pull-sample")
         if not sample:
             return Gst.FlowReturn.OK
+        # No agent attached: drain the sample (drop=true handles the queue) but
+        # skip the ~8 MB map+copy into shm — nothing is reading it.
+        if self.active_clients == 0:
+            return Gst.FlowReturn.OK
         buf = sample.get_buffer()
         caps = sample.get_caps().get_structure(0)
         w = caps.get_value("width")
@@ -255,14 +260,18 @@ class ControlServer(threading.Thread):
             threading.Thread(target=self._client, args=(conn,), daemon=True).start()
 
     def _client(self, conn):
-        with conn, conn.makefile("rwb", buffering=0) as f:
-            for raw in f:
-                try:
-                    reply = self.handle(raw.decode("ascii", "replace").strip())
-                except Exception as e:  # noqa: BLE001
-                    reply = f"ERR {e}"
-                if reply is not None:
-                    f.write((reply + "\n").encode("ascii"))
+        self.session.active_clients += 1
+        try:
+            with conn, conn.makefile("rwb", buffering=0) as f:
+                for raw in f:
+                    try:
+                        reply = self.handle(raw.decode("ascii", "replace").strip())
+                    except Exception as e:  # noqa: BLE001
+                        reply = f"ERR {e}"
+                    if reply is not None:
+                        f.write((reply + "\n").encode("ascii"))
+        finally:
+            self.session.active_clients -= 1
 
     def handle(self, line):
         if not line:
