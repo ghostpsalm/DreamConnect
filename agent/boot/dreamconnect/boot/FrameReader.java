@@ -71,13 +71,18 @@ final class FrameReader {
      */
     synchronized int[] pixels(int rx, int ry, int rw, int rh) {
         int[] out = new int[rw * rh];
-        for (int attempt = 0; attempt < 16; attempt++) {
+        for (int attempt = 0; attempt < 64; attempt++) {
             try {
                 ensure();
-                long end = map.getLong(32);
-                copyRect(out, rx, ry, rw, rh);
+                // Seqlock: skip the copy entirely if a write is in progress
+                // (begin != end) so we don't copy a whole frame mid-write.
                 long begin = map.getLong(24);
-                if (begin == end && begin != 0) return out;
+                if (begin == 0 || begin != map.getLong(32)) {
+                    Thread.onSpinWait();
+                    continue;
+                }
+                copyRect(out, rx, ry, rw, rh);
+                if (map.getLong(24) == begin) return out;  // no write started during the copy
             } catch (Exception e) {
                 // fall through to a fresh remap on next attempt
                 try { remap(); } catch (Exception ignored) {}
