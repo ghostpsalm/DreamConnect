@@ -2,8 +2,10 @@ package dreamconnect.boot;
 
 import java.io.RandomAccessFile;
 import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
 
 /**
  * Reads the daemon's shared-memory frame buffer (/dev/shm/dreamconnect.frame).
@@ -18,6 +20,7 @@ final class FrameReader {
     private final String path;
     private RandomAccessFile raf;
     private MappedByteBuffer map;
+    private IntBuffer mapInts;   // int-view of map, for bulk row copies
     private int width, height, stride;
 
     FrameReader(String path) {
@@ -41,6 +44,7 @@ final class FrameReader {
         long len = raf.length();
         map = raf.getChannel().map(FileChannel.MapMode.READ_ONLY, 0, len);
         map.order(ByteOrder.LITTLE_ENDIAN);
+        mapInts = map.asIntBuffer();   // inherits LITTLE_ENDIAN; index i == byte 4*i
         long magic = map.getInt(0) & 0xffffffffL;
         if (magic != MAGIC) throw new Exception("bad magic " + Long.toHexString(magic));
         width = map.getInt(8);
@@ -83,16 +87,32 @@ final class FrameReader {
     }
 
     private void copyRect(int[] out, int rx, int ry, int rw, int rh) {
+        final int pixBase = HEADER >> 2;        // header occupies ints [0, pixBase)
+        final int strideInts = stride >> 2;     // BGRx: stride is a multiple of 4
+        final boolean rowInBounds = rx >= 0 && rx + rw <= width;
         int i = 0;
         for (int y = 0; y < rh; y++) {
             int sy = ry + y;
-            if (sy < 0 || sy >= height) { i += rw; continue; }
-            int rowBase = HEADER + sy * stride;
-            for (int x = 0; x < rw; x++) {
-                int sx = rx + x;
-                if (sx < 0 || sx >= width) { out[i++] = 0xFF000000; continue; }
-                int bgrx = map.getInt(rowBase + sx * 4);
-                out[i++] = 0xFF000000 | (bgrx & 0x00FFFFFF);
+            if (sy < 0 || sy >= height) {        // whole row off-screen -> opaque black
+                Arrays.fill(out, i, i + rw, 0xFF000000);
+                i += rw;
+                continue;
+            }
+            int rowInt = pixBase + sy * strideInts;
+            if (rowInBounds) {
+                // Bulk-read the row in one call (no per-pixel bounds checks),
+                // then set alpha in a tight primitive loop.
+                mapInts.position(rowInt + rx);
+                mapInts.get(out, i, rw);
+                for (int k = i, end = i + rw; k < end; k++) out[k] = 0xFF000000 | (out[k] & 0x00FFFFFF);
+                i += rw;
+            } else {                              // rect extends past a screen edge
+                for (int x = 0; x < rw; x++) {
+                    int sx = rx + x;
+                    out[i++] = (sx < 0 || sx >= width)
+                            ? 0xFF000000
+                            : 0xFF000000 | (mapInts.get(rowInt + sx) & 0x00FFFFFF);
+                }
             }
         }
     }
