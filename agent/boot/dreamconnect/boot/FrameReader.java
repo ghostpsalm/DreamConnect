@@ -25,9 +25,14 @@ final class FrameReader {
     }
 
     private synchronized void ensure() throws Exception {
-        long fileLen = new java.io.File(path).length();
-        if (map != null && raf != null && raf.length() == fileLen) return;
-        remap();
+        if (map == null) { remap(); return; }
+        // Cheap in-memory check (no syscall on the hot path): remap only if the
+        // daemon changed the frame geometry — e.g. a resolution change, which
+        // the old size-stat check missed because a same-inode ftruncate left
+        // File.length() and raf.length() equal.
+        if (map.getInt(8) != width || map.getInt(12) != height || map.getInt(16) != stride) {
+            remap();
+        }
     }
 
     private void remap() throws Exception {
