@@ -84,6 +84,39 @@ headless admin without spinning up the full capture/input bridge.
 - Whether it should be a login/session option surfaced by DreamConnect or simply
   documented as already-working ScreenConnect behavior.
 
+#### F3 — Wake lock / stay-awake (idle & lock inhibitor)
+**Status:** potential · **Priority:** medium
+
+During a session the desktop can idle-blank or auto-lock, turning the operator's
+view into a blank/lock screen and breaking input focus. Take an inhibitor while
+an operator is connected and release it on disconnect. The daemon already knows
+when a client is attached (the `active_clients` counter from P-04), so it has the
+right signal to grab/drop the inhibitor.
+
+*Mechanism:* a D-Bus inhibitor — `org.freedesktop.login1.Manager.Inhibit`
+(idle/sleep), and/or the GNOME session / `org.freedesktop.ScreenSaver` inhibit
+for blanking. Language-agnostic (a D-Bus call), so **not** a Rust-specific win.
+*Open question:* whether capture/input should also keep working while the session
+is *locked* — that's a separate path (see F4).
+
+#### F4 — Other candidate features (unverified under the bridge)
+**Status:** potential · **Priority:** low–medium
+
+ScreenConnect capabilities that may or may not work through the Robot-peer
+bridge and are worth checking or building:
+- **Insert clipboard text** — tracked separately as [F1](#f1--insert-clipboard-text).
+- **Through-the-lock-screen** capture/control — today capture would just show the
+  GNOME screen shield; driving a locked session likely needs a separate path.
+- **SAS / Ctrl-Alt-Del** injection — the secure-attention sequence; may require
+  direct evdev/`uinput` injection rather than Mutter's RemoteDesktop API.
+- **Local privacy** — blank the local monitor and/or lock the local
+  keyboard/mouse for the duration of a session.
+- **Multi-monitor** — see [H2](#h2--multi-monitor).
+
+The lower-level ones (SAS via `uinput`, direct device control) are where a Rust
+daemon could genuinely help (see [V2-1](#v2-1--rust-daemon-rewrite)); the rest
+(inhibitors, clipboard) are plumbing any language handles.
+
 ### Bugfixes & investigations
 
 #### B1 — Broken Xwayland `:1` display
@@ -134,6 +167,36 @@ events.
 Exercise daemon restart, Mutter session `Closed` recovery, and ScreenConnect
 update survival end to end; make sure the agent re-attaches cleanly after a
 daemon bounce.
+
+---
+
+## Larger bets (v2)
+
+#### V2-1 — Rust daemon rewrite
+**Status:** discussion · **Priority:** low (revisit if the drivers below appear)
+
+Rewrite the Python runtime daemon in Rust. Framed as an **architecture** change,
+not a performance fix: the hot path is already a native `memcpy` plus
+GStreamer/PipeWire in C, and the GIL isn't a factor here, so a like-for-like
+port buys essentially nothing in speed. The real motivations are:
+
+- **Robustness / safety** — compile-time guarantees on the shared-memory layout,
+  the seqlock, and protocol parsing (exactly the fiddly, offset-based code where
+  Rust's types shine), and a single self-contained binary instead of a
+  `python3-gobject` + GStreamer + PipeWire binding stack to install.
+- **Fewer moving parts** — potentially consume **PipeWire directly**
+  (`pipewire-rs`) and drop GStreamer, opening a path to zero-copy DMABUF capture
+  and tighter buffer/latency control.
+- **Enables lower-level features** — direct evdev/`uinput` input (SAS keys and
+  other items in [F4](#f4--other-candidate-features-unverified-under-the-bridge))
+  and finer device control that are awkward through Mutter's D-Bus API.
+
+*Trade-offs:* more code than today (PyGObject maps the C API 1:1, which is why
+the daemon is ~340 terse lines); `pipewire-rs` / `zbus` are less mature than
+PyGObject; and it still dynamically links the same native libraries. Do it as a
+deliberate v2 pass **if/when** we want the dependency reduction, zero-copy
+capture, or `uinput`-level features — not as a "scripting is slow" fix. The
+**agent stays Java** regardless — it lives inside ScreenConnect's JVM.
 
 ---
 
