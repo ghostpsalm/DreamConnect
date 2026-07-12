@@ -1,225 +1,98 @@
-# dreamconnect
+# DreamConnect
 
-A shim that makes the **ConnectWise ScreenConnect** Linux client work under
-**Wayland** — without waiting on ConnectWise to ship native support, and without
-abandoning the ScreenConnect ecosystem (relay-from-anywhere access, unattended
-sessions, the existing `screenconnect.com` estate).
+**Make the ConnectWise ScreenConnect Linux client work under Wayland GNOME.**
 
-Host of record: a headless GNOME/Wayland workstation (Fedora 44, GNOME/mutter 50, Wayland).
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/ghostpsalm/DreamConnect)](https://github.com/ghostpsalm/DreamConnect/releases)
 
----
+ScreenConnect's Linux client does all screen capture and input through Java AWT
+`Robot`, which the JRE implements over X11. On a modern Wayland GNOME desktop
+(no X11 session since GNOME 49) that means **black screens and dead
+mouse/keyboard** — by Wayland's security design, not a bug.
 
-## Why this exists
+DreamConnect is a small Java agent + helper daemon that transparently reroutes
+those `Robot` calls onto Wayland's own capture/input APIs (PipeWire ScreenCast +
+Mutter RemoteDesktop). The ScreenConnect client is **not modified** — it keeps
+working exactly as before, including through client updates, because it's
+ultimately just a Java shim we intercept. You keep the whole ScreenConnect
+ecosystem (relay-brokered, no-VPN, unattended access); it just gets its eyes and
+hands back.
 
-The ScreenConnect Linux client is a **Java** application
-(`ScreenConnect.Client.jar` + `ScreenConnect.Core.jar`; the bundled `.so` files
-are only webp/zstd codecs). It performs **all** screen capture and input
-injection through **Java AWT `Robot`**, which the JRE implements over **X11**
-(`sun.awt.X11` XToolkit): `XGetImage`/MIT-SHM for capture, **XTEST** for input.
+> DreamConnect is an independent, unofficial project. "ConnectWise" and
+> "ScreenConnect" are trademarks of their respective owners.
 
-Under Wayland this breaks, by design:
+## How it works (in one paragraph)
 
-- The client connects to **rootless Xwayland**. `Robot.createScreenCapture()`
-  grabs the X11 **root window**, but Wayland compositors do **not** composite
-  native Wayland surfaces into that root — so capture returns **black**.
-- **XTEST** input injected into Xwayland does **not** reach native Wayland
-  surfaces — so clicks/keys go nowhere.
+A [`javaagent`](agent/) injected via `JAVA_TOOL_OPTIONS` swaps `java.awt.Robot`'s
+internal peer, so every capture/input call is served from the Wayland side by a
+[runtime daemon](runtime/): capture comes from a PipeWire ScreenCast written to a
+shared-memory frame buffer, and input goes out through Mutter's RemoteDesktop
+API. Crucially, it drives the low-level `org.gnome.Mutter.*` D-Bus interfaces
+directly, so there is **no per-session "Allow" consent dialog** — it works fully
+headless/unattended. Full details in [`docs/design.md`](docs/design.md).
 
-This is the Wayland security model (X clients must not screenshot or drive other
-apps), not a bug. The sanctioned way to capture/inject on Wayland is
-`xdg-desktop-portal` + **PipeWire** (ScreenCast) and **RemoteDesktop** (input via
-libEI).
+## Requirements
 
-### Why not just force an Xorg session?
-The classic ScreenConnect-on-Linux fix — run GNOME on Xorg, where AWT Robot
-works natively — is **unavailable here**. GNOME removed the X11 session in
-GNOME 49; this box runs GNOME/mutter **50**. `WaylandEnable=false` is already set
-in `/etc/gdm/custom.conf` and is silently ignored because there is no GNOME Xorg
-session to fall back to. That escape hatch is closed.
-
-### Why not just use RDP?
-`gnome-remote-desktop` (RDP) is Wayland-native and works (with a monitor / dummy
-plug present). It is the right tool if all you need is remote *pixels*. It does
-**not** give you the ScreenConnect ecosystem — the relay-brokered
-"reach-from-anywhere, no-VPN, unattended fleet" model that the rest of the estate
-is built around. **dreamconnect keeps ScreenConnect; it just fixes its eyes and
-hands.**
-
----
-
-## Design — Option B: hook AWT `Robot`, skip X11 entirely
-
-Rather than emulate an X server (Option A — writing a special-purpose X server
-backed by the portal; correct but weeks-to-months of work because AWT probes
-RANDR/SHM/XDamage/XFixes/visuals on startup), **intercept the handful of `Robot`
-methods ScreenConnect actually calls** and reimplement them against the Wayland
-portals. ScreenConnect never knows it left X11.
-
-### Surface area to intercept
-ScreenConnect's capture/input reduces to a small set of AWT calls:
-
-| AWT call                              | dreamconnect implementation                              |
-|---------------------------------------|----------------------------------------------------------|
-| `Robot.createScreenCapture(Rect)`     | Pull latest frame from a **PipeWire ScreenCast** stream, crop to `Rect`, return `BufferedImage` |
-| `Robot.getPixelColor(x,y)`            | Sample the cached frame                                  |
-| `Robot.mouseMove(x,y)`                | `portal.RemoteDesktop.NotifyPointerMotionAbsolute`       |
-| `Robot.mousePress/Release(buttons)`   | `NotifyPointerButton`                                    |
-| `Robot.mouseWheel(amt)`               | `NotifyPointerAxis`                                       |
-| `Robot.keyPress/keyRelease(keycode)`  | `NotifyKeyboardKeycode` (AWT vk → evdev keycode map)     |
-| `GraphicsEnvironment` / screen size   | Report the ScreenCast stream geometry                    |
-
-### Injection mechanism
-The client runs from a **systemd unit we control**
-(`connectwisecontrol-<id>.service`), so we own its environment. Inject a Java
-agent without touching the ConnectWise install:
-
-```
-Environment=JAVA_TOOL_OPTIONS=-javaagent:/opt/dreamconnect/dreamconnect-agent.jar
-```
-
-The agent uses bytecode instrumentation (ByteBuddy/ASM) to replace the bodies of
-the `Robot`/`GraphicsEnvironment` methods above with calls into the
-dreamconnect runtime.
-
-### Architecture
-
-```
-  Real Wayland GNOME session (ptyxis tabs, the actual desktop)
-        │  capture                              ▲  input
-        ▼                                       │
-  xdg-desktop-portal ─ ScreenCast (PipeWire)    │ RemoteDesktop (libEI)
-        │                                       │
-        ▼                                       │
-  ┌───────────────────── dreamconnect runtime ──────────────────┐
-  │  PipeWire consumer → frame cache      evdev/portal injector  │
-  └───────────────▲─────────────────────────────▲───────────────┘
-                  │ javaagent hooks              │
-        java.awt.Robot.createScreenCapture / mouseMove / keyPress …
-                  │
-        ScreenConnect.Client.jar (unmodified)
-                  │  outbound TLS
-                  ▼
-        instance-*.relay.screenconnect.com  →  operator's browser
-```
-
-Net effect: ScreenConnect sees a normal X11-ish `Robot` that happens to be
-wired to the real Wayland session through the sanctioned portal path.
-
----
-
-## The hard parts (read before committing effort)
-
-1. **Portal consent.** `portal.RemoteDesktop` / `ScreenCast` normally require an
-   interactive "Allow" click per session — hostile to an unattended headless
-   agent. Options, roughly in order of effort:
-   - Reuse the **gnome-remote-desktop system daemon**'s already-granted
-     RemoteDesktop session instead of opening our own (investigate its D-Bus
-     surface / whether a session handle can be shared).
-   - Persist the portal permission grant (portal `remember` where supported).
-   - Worst case: a headless auto-approve backend for `xdg-desktop-portal-gnome`
-     (fragile, updates-sensitive).
-   This is the single biggest risk and should be spiked **first**.
-
-2. **A capture source must exist.** ScreenCast of the *existing* session needs a
-   monitor → the **HDMI dummy plug** (already fitted, connector `HDMI-2`). The
-   headless virtual-monitor mode spawns a *new* session (no ptyxis tabs), so the
-   dummy plug is the right source for sharing the real desktop.
-
-3. **Keymap fidelity.** AWT virtual keycodes → evdev keycodes is not 1:1
-   (modifiers, layout, keypad). Needs a tested mapping table.
-
-4. **Frame pacing / latency.** PipeWire is push (damage-driven); `Robot`
-   capture is pull (synchronous). Maintain a latest-frame cache the hook reads
-   instantly; don't block the client thread on a frame.
-
-5. **Maintenance.** This bridge tracks GNOME/portal/JRE internals and will need
-   care across updates. Budget for it.
-
----
-
-## Build plan (spikes, in dependency order)
-
-- [x] **Spike 0 — consent:** persistent headless `RemoteDesktop` + `ScreenCast`
-      session with no consent dialog; frames arrive, input accepted. Done via
-      the low-level `org.gnome.Mutter.*` API (`spikes/SPIKE0_RESULTS.md`).
-- [x] **Spike 1 — capture:** PipeWire → shared-memory frame → Java `BufferedImage`;
-      pixels match the real desktop. Runtime writes the frame; the agent's peer
-      turns it into the `Robot.createScreenCapture` result.
-- [x] **Spike 2 — input:** AWT vk/button → evdev map (`agent/.../AwtEvdev.java`),
-      forwarded to Mutter's `Notify*`; `Robot.mouseMove` moves the real cursor.
-- [x] **Spike 3 — agent:** ByteBuddy javaagent swaps the `Robot` peer; verified
-      end to end against a real `Robot` under the agent.
-- [x] **Integrate:** systemd user service for the daemon + drop-in that injects
-      `JAVA_TOOL_OPTIONS` into the ScreenConnect unit (`install.sh`). *Live
-      relay connection is the remaining manual verification.*
-- [ ] **Harden:** keymap edge cases, multi-monitor, wheel direction/units,
-      reconnect, update-survival.
-
----
+- A GNOME **Wayland** session that stays logged in (autologin), with a capture
+  source present — a real monitor or an **HDMI dummy plug**.
+- The **ScreenConnect Linux client** already installed and enrolled
+  (`connectwisecontrol-*.service`).
+- A **JDK** (built/tested on JDK 25), `python3` with GObject + GStreamer PipeWire,
+  and `systemd`. On Fedora the installer pulls the few missing bits automatically.
 
 ## Install
 
+One line (fetches the latest release and installs):
+
 ```sh
-sudo ./install.sh            # detects the desktop user, SC unit, and monitor;
-                             # builds the agent, deploys to /opt/dreamconnect,
-                             # starts the daemon, injects the agent into SC.
-sudo ./install.sh --uninstall
-```
-Then connect to the machine from the ScreenConnect relay as usual — you now get
-the real Wayland desktop, and your mouse/keyboard drive it. See each component's
-README for details and manual validation.
-
-## Repo layout
-
-```
-dreamconnect/
-├── README.md              ← this file
-├── install.sh             ← detects host specifics and wires up both halves
-├── agent/                 ← Java agent: swaps java.awt.Robot's peer (ByteBuddy)
-│   ├── src/               ← premain + Robot.init advice
-│   └── boot/              ← bootstrap peer, daemon client, frame reader, keymap
-├── runtime/               ← Python daemon: Mutter session + PipeWire capture + input
-├── systemd/               ← daemon user service + SC agent-injection drop-in
-└── spikes/                ← proofs for the go/no-go gates
+curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh | sudo bash
 ```
 
-## Status
-**Working end to end.** An operator connecting from the ScreenConnect relay
-sees the live Wayland desktop and drives it with mouse + keyboard, through the
-unmodified client. All spikes pass; the daemon + agent are deployed via
-`install.sh`.
+The installer auto-detects the desktop user, the ScreenConnect unit, and the
+capture monitor; builds the agent; deploys to `/opt/dreamconnect`; starts the
+runtime daemon; and injects the agent into the ScreenConnect service.
 
-- Spike 0 (consent): PASS — headless `org.gnome.Mutter.{RemoteDesktop,ScreenCast}`,
-  no dialog (`spikes/SPIKE0_RESULTS.md`).
-- Runtime daemon (`runtime/`): persistent session + PipeWire→shm capture + input.
-- Java agent (`agent/`): swaps `java.awt.Robot`'s peer; verified serving a real
-  operator session (capture non-black, mouse/keyboard live).
+<details>
+<summary>From a source checkout instead</summary>
 
-Planned work (Insert-clipboard-text, Backstage terminal, keymap/multi-monitor
-hardening, and the `:1` root-cause investigation) is tracked in
-[`ROADMAP.md`](ROADMAP.md). Current release: **v1.0**.
+```sh
+git clone https://github.com/ghostpsalm/DreamConnect
+cd DreamConnect
+sudo ./install.sh
+```
+Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path>`.
+</details>
 
-A plain `gnome-remote-desktop` (RDP) path remains as a fallback.
+## Use
 
-## Troubleshooting host quirks
+After installing, connect to the machine from your ScreenConnect relay/portal as
+usual. You'll see the live Wayland desktop and can drive it with mouse and
+keyboard. Copy/paste works via clipboard sharing.
 
-This host has a broken GNOME **Xwayland `:1`** display whose socket accepts X
-connections but never completes the handshake. ScreenConnect's own display
-detection (`getDisplayInfos`) probes every display it finds with
-`xdpyinfo`/`xrandr`/`xwininfo`/`xrdb` and **hangs on `:1`**, which:
-- at startup, blocks the client from connecting → **agent offline on the portal**;
-- periodically at runtime, freezes the session for ~20–30 s on a repeating cycle.
+## Uninstall
 
-This is a pre-existing Xwayland quirk, unrelated to the agent (it hangs
-identically with the daemon stopped, and no Java is in that path). `install.sh`
-works around it by installing the probe tools and a `host-fixes/` wrapper that
-makes `:1` probes fail instantly while `:0` works normally. If the client ever
-hangs offline after a restart before the wrapper is in place, recover with
-`sudo pkill -9 xrdb`.
+```sh
+sudo ./install.sh --uninstall     # from a source checkout
+```
 
-## Non-goals
-- Modifying the ConnectWise client binaries (injection is external, via env +
-  javaagent only).
-- Replacing RDP where plain remote pixels suffice.
-- Bypassing Wayland security for anything other than this one sanctioned,
-  operator-consented remote-support path.
+## Limitations
+
+- **"Insert clipboard text"** doesn't work (it uses a native code path that
+  bypasses `Robot`); share clipboards and paste manually instead.
+- Keymap assumes a US-ish physical layout; single-monitor only.
+- Some hosts need a workaround for a broken Xwayland `:1` display (the installer
+  applies it) — see [Troubleshooting](docs/troubleshooting.md).
+
+These and planned work (clipboard typing, Backstage terminal, hardening) are
+tracked in [`ROADMAP.md`](ROADMAP.md).
+
+## Documentation
+
+- [`docs/design.md`](docs/design.md) — how and why it works, architecture, internals
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — offline/freeze fixes, status checks
+- [`ROADMAP.md`](ROADMAP.md) — releases and planned features
+- Component docs: [`agent/`](agent/README.md), [`runtime/`](runtime/README.md)
+
+## License
+
+[MIT](LICENSE).
