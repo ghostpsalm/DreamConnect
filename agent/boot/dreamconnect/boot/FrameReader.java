@@ -49,7 +49,7 @@ final class FrameReader {
     }
 
     /** ARGB of a single pixel (for Robot.getPixelColor). */
-    int pixel(int x, int y) {
+    synchronized int pixel(int x, int y) {
         try {
             ensure();
             if (x < 0 || y < 0 || x >= width || y >= height) return 0xFF000000;
@@ -65,7 +65,7 @@ final class FrameReader {
      * ARGB pixels for a rectangle (for Robot.createScreenCapture, which calls
      * RobotPeer.getRGBPixels). Seqlock-guarded: retries on a torn read.
      */
-    int[] pixels(int rx, int ry, int rw, int rh) {
+    synchronized int[] pixels(int rx, int ry, int rw, int rh) {
         int[] out = new int[rw * rh];
         for (int attempt = 0; attempt < 16; attempt++) {
             try {
