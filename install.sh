@@ -132,4 +132,19 @@ else
   echo "   Set JAVA_TOOL_OPTIONS manually per systemd/dreamconnect-agent.conf."
 fi
 
+# --- reboot-survival check: the graphical session must autostart ------------
+# The daemon is WantedBy=graphical-session.target, which only fires when a
+# graphical session logs in. Without GDM autologin, a reboot leaves the login
+# screen up and the bridge down until someone logs in at the console.
+if ! grep -qiE '^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' \
+       /etc/gdm/custom.conf 2>/dev/null; then
+  echo "!! WARNING: GDM autologin is not enabled — the bridge will NOT survive a reboot."
+  echo "   The daemon needs a graphical Wayland session at boot. To run unattended,"
+  echo "   enable autologin for $USER_NAME in /etc/gdm/custom.conf:"
+  echo "       [daemon]"
+  echo "       AutomaticLoginEnable=true"
+  echo "       AutomaticLogin=$USER_NAME"
+  echo "   (then reboot to verify)."
+fi
+
 echo ">> done. Check:  ${RUN_USER[*]} systemctl --user status dreamconnect-daemon"
