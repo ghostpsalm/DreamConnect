@@ -195,9 +195,9 @@ unmodified client. All spikes pass; the daemon + agent are deployed via
 - Java agent (`agent/`): swaps `java.awt.Robot`'s peer; verified serving a real
   operator session (capture non-black, mouse/keyboard live).
 
-Remaining polish: input-path latency (make the peer's sends fire-and-forget
-rather than one synchronous round-trip per event), keymap edge cases, wheel
-units/direction, multi-monitor.
+Planned work (Insert-clipboard-text, Backstage terminal, keymap/multi-monitor
+hardening, and the `:1` root-cause investigation) is tracked in
+[`ROADMAP.md`](ROADMAP.md). Current release: **v1.0**.
 
 A plain `gnome-remote-desktop` (RDP) path remains as a fallback.
 
