@@ -11,6 +11,10 @@
 # This script is published as a release asset, so the URL above stays the same
 # across versions and always installs the newest release. To uninstall, run
 # `sudo ./install.sh --uninstall` from a source checkout of the repo.
+#
+# SECURITY: this downloads and runs code as root, trusting GitHub + TLS with no
+# further integrity check (standard for the curl|bash pattern). Review it first
+# if that matters to you — download, read, then `sudo bash dreamconnect-install.sh`.
 set -euo pipefail
 
 REPO="ghostpsalm/DreamConnect"

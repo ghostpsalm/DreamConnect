@@ -52,6 +52,14 @@ The installer auto-detects the desktop user, the ScreenConnect unit, and the
 capture monitor; builds the agent; deploys to `/opt/dreamconnect`; starts the
 runtime daemon; and injects the agent into the ScreenConnect service.
 
+> **This runs code as root.** Piping to `sudo bash` trusts GitHub + TLS with no
+> further integrity check. If you'd rather read it first:
+> ```sh
+> curl -fsSLO https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh
+> less dreamconnect-install.sh          # review
+> sudo bash dreamconnect-install.sh
+> ```
+
 <details>
 <summary>From a source checkout instead</summary>
 
