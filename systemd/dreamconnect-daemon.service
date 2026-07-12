@@ -1,0 +1,18 @@
+[Unit]
+Description=dreamconnect runtime daemon (Wayland capture/input bridge for ScreenConnect)
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# Needs the GNOME/Wayland session (Mutter D-Bus, PipeWire) to be up.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# @INSTALL_DIR@ and @MONITOR@ are substituted by install.sh.
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py --monitor @MONITOR@
+Restart=always
+RestartSec=2
+# Keep the shared-memory frame world-readable so the root SC JVM can mmap it.
+UMask=0022
+
+[Install]
+WantedBy=graphical-session.target

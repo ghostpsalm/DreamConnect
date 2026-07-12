@@ -139,30 +139,48 @@ wired to the real Wayland session through the sanctioned portal path.
 
 ## Build plan (spikes, in dependency order)
 
-- [ ] **Spike 0 — consent:** open a persistent `portal.RemoteDesktop` +
-      `ScreenCast` session headless from a systemd user service; prove input
-      injection reaches a native Wayland app and frames arrive. *Go/no-go gate.*
-- [ ] **Spike 1 — capture:** PipeWire consumer → `BufferedImage` at the plug's
-      resolution; verify pixels match the real desktop.
-- [ ] **Spike 2 — input:** AWT vk → evdev map; drive a Wayland app end-to-end.
-- [ ] **Spike 3 — agent:** ByteBuddy javaagent that swaps the `Robot` methods in
-      a toy JVM; confirm interception.
-- [ ] **Integrate:** point the agent's hooks at the runtime; inject via
-      `JAVA_TOOL_OPTIONS` into the ScreenConnect unit; connect from the relay.
-- [ ] **Harden:** keymap edge cases, multi-monitor, reconnect, update-survival.
+- [x] **Spike 0 — consent:** persistent headless `RemoteDesktop` + `ScreenCast`
+      session with no consent dialog; frames arrive, input accepted. Done via
+      the low-level `org.gnome.Mutter.*` API (`spikes/SPIKE0_RESULTS.md`).
+- [x] **Spike 1 — capture:** PipeWire → shared-memory frame → Java `BufferedImage`;
+      pixels match the real desktop. Runtime writes the frame; the agent's peer
+      turns it into the `Robot.createScreenCapture` result.
+- [x] **Spike 2 — input:** AWT vk/button → evdev map (`agent/.../AwtEvdev.java`),
+      forwarded to Mutter's `Notify*`; `Robot.mouseMove` moves the real cursor.
+- [x] **Spike 3 — agent:** ByteBuddy javaagent swaps the `Robot` peer; verified
+      end to end against a real `Robot` under the agent.
+- [x] **Integrate:** systemd user service for the daemon + drop-in that injects
+      `JAVA_TOOL_OPTIONS` into the ScreenConnect unit (`install.sh`). *Live
+      relay connection is the remaining manual verification.*
+- [ ] **Harden:** keymap edge cases, multi-monitor, wheel direction/units,
+      reconnect, update-survival.
 
 ---
 
-## Repo layout (planned)
+## Install
+
+```sh
+sudo ./install.sh            # detects the desktop user, SC unit, and monitor;
+                             # builds the agent, deploys to /opt/dreamconnect,
+                             # starts the daemon, injects the agent into SC.
+sudo ./install.sh --uninstall
+```
+Then connect to the machine from the ScreenConnect relay as usual — you now get
+the real Wayland desktop, and your mouse/keyboard drive it. See each component's
+README for details and manual validation.
+
+## Repo layout
 
 ```
 dreamconnect/
 ├── README.md              ← this file
-├── agent/                 ← Java agent (bytecode hooks into Robot/GraphicsEnvironment)
-├── runtime/               ← PipeWire capture + portal RemoteDesktop injection (JNI/native)
-├── keymap/                ← AWT vk ↔ evdev tables
-├── systemd/               ← drop-in that injects JAVA_TOOL_OPTIONS into the SC unit
-└── spikes/                ← throwaway proofs for the gates above
+├── install.sh             ← detects host specifics and wires up both halves
+├── agent/                 ← Java agent: swaps java.awt.Robot's peer (ByteBuddy)
+│   ├── src/               ← premain + Robot.init advice
+│   └── boot/              ← bootstrap peer, daemon client, frame reader, keymap
+├── runtime/               ← Python daemon: Mutter session + PipeWire capture + input
+├── systemd/               ← daemon user service + SC agent-injection drop-in
+└── spikes/                ← proofs for the go/no-go gates
 ```
 
 ## Status
