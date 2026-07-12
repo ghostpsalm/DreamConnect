@@ -56,7 +56,11 @@ uninstall() {
     systemctl daemon-reload
     systemctl restart "$SC_UNIT" || true
   fi
-  echo ">> removed service wiring (left $INSTALL_DIR in place)"
+  for t in xdpyinfo xrandr xwininfo xrdb; do
+    [ -L "/usr/local/bin/$t" ] && rm -f "/usr/local/bin/$t"
+  done
+  rm -f /usr/local/bin/.dc-xprobe-wrapper
+  echo ">> removed service wiring + probe wrappers (left $INSTALL_DIR in place)"
   exit 0
 }
 [ "$ACTION" = "--uninstall" ] && uninstall
@@ -89,6 +93,19 @@ echo ">> deploying to $INSTALL_DIR"
 install -d "$INSTALL_DIR/runtime"
 install -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
 install -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
+
+# --- host fix: display-detection tools + broken-:1 skip wrapper --------------
+# ScreenConnect detects screen geometry with xdpyinfo/xrandr/xwininfo; without
+# them it reports "no display information". And this host's Xwayland :1 hangs
+# X probes, freezing the session periodically. See host-fixes/ for the why.
+echo ">> installing display-probe tools + broken-display skip wrapper"
+if command -v dnf >/dev/null 2>&1; then
+  dnf install -y xdpyinfo xrandr xwininfo >/dev/null 2>&1 || \
+    echo "!! could not install xdpyinfo/xrandr/xwininfo; install them manually"
+fi
+install -m 0755 "$HERE/host-fixes/xprobe-skip-broken-display.sh" \
+  /usr/local/bin/.dc-xprobe-wrapper
+for t in xdpyinfo xrandr xwininfo xrdb; do ln -sf .dc-xprobe-wrapper "/usr/local/bin/$t"; done
 
 # --- user daemon service ----------------------------------------------------
 echo ">> installing user service"

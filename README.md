@@ -184,25 +184,38 @@ dreamconnect/
 ```
 
 ## Status
-**Spike 0 (consent) — PASS.** The go/no-go gate cleared: a persistent
-RemoteDesktop + ScreenCast session can be opened, driven, and captured from
-headlessly with **no consent dialog** by using the low-level
-`org.gnome.Mutter.{RemoteDesktop,ScreenCast}` D-Bus interfaces directly (see
-`spikes/SPIKE0_RESULTS.md`). Captured frames are the real desktop, non-black;
-input injection is accepted.
+**Working end to end.** An operator connecting from the ScreenConnect relay
+sees the live Wayland desktop and drives it with mouse + keyboard, through the
+unmodified client. All spikes pass; the daemon + agent are deployed via
+`install.sh`.
 
-**Runtime daemon — working.** `runtime/dreamconnect_daemon.py` holds the
-persistent session, captures the shared monitor via PipeWire into a
-shared-memory frame buffer, and injects input over a Unix socket (see
-`runtime/README.md`). This is Spike 1 (capture) + Spike 2 (input) proven at the
-runtime layer.
+- Spike 0 (consent): PASS — headless `org.gnome.Mutter.{RemoteDesktop,ScreenCast}`,
+  no dialog (`spikes/SPIKE0_RESULTS.md`).
+- Runtime daemon (`runtime/`): persistent session + PipeWire→shm capture + input.
+- Java agent (`agent/`): swaps `java.awt.Robot`'s peer; verified serving a real
+  operator session (capture non-black, mouse/keyboard live).
 
-Next: the in-JVM Java agent (`agent/`) that swaps AWT's `Robot` peer to read
-frames from the daemon and forward input — then systemd wiring + keymap
-hardening.
+Remaining polish: input-path latency (make the peer's sends fire-and-forget
+rather than one synchronous round-trip per event), keymap edge cases, wheel
+units/direction, multi-monitor.
 
-A plain `gnome-remote-desktop` (RDP) path already works as a fallback if this
-bridge ever proves not worth maintaining.
+A plain `gnome-remote-desktop` (RDP) path remains as a fallback.
+
+## Troubleshooting host quirks
+
+This host has a broken GNOME **Xwayland `:1`** display whose socket accepts X
+connections but never completes the handshake. ScreenConnect's own display
+detection (`getDisplayInfos`) probes every display it finds with
+`xdpyinfo`/`xrandr`/`xwininfo`/`xrdb` and **hangs on `:1`**, which:
+- at startup, blocks the client from connecting → **agent offline on the portal**;
+- periodically at runtime, freezes the session for ~20–30 s on a repeating cycle.
+
+This is a pre-existing Xwayland quirk, unrelated to the agent (it hangs
+identically with the daemon stopped, and no Java is in that path). `install.sh`
+works around it by installing the probe tools and a `host-fixes/` wrapper that
+makes `:1` probes fail instantly while `:0` works normally. If the client ever
+hangs offline after a restart before the wrapper is in place, recover with
+`sudo pkill -9 xrdb`.
 
 ## Non-goals
 - Modifying the ConnectWise client binaries (injection is external, via env +
