@@ -245,7 +245,9 @@ class ControlServer(threading.Thread):
             os.unlink(self.sock_path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(self.sock_path)
-        os.chmod(self.sock_path, 0o666)
+        # 0600, not 0666: the root SC JVM connects via DAC override. Don't rely
+        # solely on the 0700 XDG_RUNTIME_DIR parent to gate access.
+        os.chmod(self.sock_path, 0o600)
         srv.listen(8)
         log(f"control socket at {self.sock_path}")
         while True:
