@@ -43,9 +43,6 @@ final class FrameReader {
         stride = map.getInt(16);
     }
 
-    int width() { try { ensure(); } catch (Exception e) { return width; } return width; }
-    int height() { try { ensure(); } catch (Exception e) { return height; } return height; }
-
     /** ARGB of a single pixel (for Robot.getPixelColor). */
     int pixel(int x, int y) {
         try {
