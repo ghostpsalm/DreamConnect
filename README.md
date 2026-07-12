@@ -5,7 +5,7 @@ A shim that makes the **ConnectWise ScreenConnect** Linux client work under
 abandoning the ScreenConnect ecosystem (relay-from-anywhere access, unattended
 sessions, the existing `screenconnect.com` estate).
 
-Host of record: `the-host` (Fedora 44, GNOME/mutter 50, Wayland).
+Host of record: a headless GNOME/Wayland workstation (Fedora 44, GNOME/mutter 50, Wayland).
 
 ---
 
@@ -74,7 +74,7 @@ The client runs from a **systemd unit we control**
 agent without touching the ConnectWise install:
 
 ```
-Environment=JAVA_TOOL_OPTIONS=-javaagent:/home/user/dreamconnect/dist/dreamconnect-agent.jar
+Environment=JAVA_TOOL_OPTIONS=-javaagent:/opt/dreamconnect/dreamconnect-agent.jar
 ```
 
 The agent uses bytecode instrumentation (ByteBuddy/ASM) to replace the bodies of
@@ -121,7 +121,7 @@ wired to the real Wayland session through the sanctioned portal path.
    This is the single biggest risk and should be spiked **first**.
 
 2. **A capture source must exist.** ScreenCast of the *existing* session needs a
-   monitor → the **HDMI dummy plug** (already fitted on `the-host`, HDMI-A-2). The
+   monitor → the **HDMI dummy plug** (already fitted, connector `HDMI-2`). The
    headless virtual-monitor mode spawns a *new* session (no ptyxis tabs), so the
    dummy plug is the right source for sharing the real desktop.
 
@@ -166,10 +166,25 @@ dreamconnect/
 ```
 
 ## Status
-Design only. **Spike 0 (portal consent) is the go/no-go gate** — nothing else
-matters until headless portal sessions are proven. See
-`~/.claude` memory `scaim1-headless-rdp-dummyplug` for the RDP fallback that
-already works if this proves not worth the effort.
+**Spike 0 (consent) — PASS.** The go/no-go gate cleared: a persistent
+RemoteDesktop + ScreenCast session can be opened, driven, and captured from
+headlessly with **no consent dialog** by using the low-level
+`org.gnome.Mutter.{RemoteDesktop,ScreenCast}` D-Bus interfaces directly (see
+`spikes/SPIKE0_RESULTS.md`). Captured frames are the real desktop, non-black;
+input injection is accepted.
+
+**Runtime daemon — working.** `runtime/dreamconnect_daemon.py` holds the
+persistent session, captures the shared monitor via PipeWire into a
+shared-memory frame buffer, and injects input over a Unix socket (see
+`runtime/README.md`). This is Spike 1 (capture) + Spike 2 (input) proven at the
+runtime layer.
+
+Next: the in-JVM Java agent (`agent/`) that swaps AWT's `Robot` peer to read
+frames from the daemon and forward input — then systemd wiring + keymap
+hardening.
+
+A plain `gnome-remote-desktop` (RDP) path already works as a fallback if this
+bridge ever proves not worth maintaining.
 
 ## Non-goals
 - Modifying the ConnectWise client binaries (injection is external, via env +

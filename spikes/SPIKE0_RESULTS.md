@@ -1,6 +1,6 @@
 # Spike 0 — Headless portal consent — **PASS** ✅ (go/no-go gate)
 
-Date: 2026-07-12 · Host: `the-host` (Fedora 44, GNOME/mutter **50.2**, Wayland)
+Date: 2026-07-12 · Host: a headless GNOME/Wayland workstation (Fedora 44, GNOME/mutter **50.2**, Wayland)
 
 ## Result
 
