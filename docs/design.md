@@ -143,6 +143,24 @@ Built in dependency order, each proven before the next:
 - **Integrate:** systemd user service for the daemon + drop-in that injects
   `JAVA_TOOL_OPTIONS`; verified against a live operator session.
 
+## Security model
+
+- **Transports are owner-only (`0600`).** The shared-memory frame buffer and the
+  control socket are created mode `0600`, owned by the desktop user. The only
+  intended consumer is the **root** ScreenConnect JVM, which reads them via DAC
+  override — so `0600` loses no functionality while preventing other local users
+  from scraping the screen (the frame lives in world-traversable `/dev/shm`) or
+  injecting input.
+- **The deployed agent is a root-trust boundary.** The agent runs inside the
+  root ScreenConnect JVM, so **write access to `/opt/dreamconnect/dreamconnect-agent.jar`
+  (or the daemon script) is equivalent to root code execution.** `install.sh`
+  deploys them `root:root`, non-writable by others; keep them that way.
+- **Least-privilege module opening.** The agent opens only `java.awt.peer` and
+  `sun.awt`, and only to its own bootstrap module — not `ALL-UNNAMED`.
+- **The daemon never touches ScreenConnect secrets.** It only relays frames and
+  input; it does not read the client's launch parameters or relay keys, and the
+  agent logs no ScreenConnect configuration.
+
 ## Non-goals
 - Modifying the ConnectWise client binaries (injection is external, via env +
   javaagent only).

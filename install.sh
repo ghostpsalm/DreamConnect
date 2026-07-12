@@ -89,10 +89,14 @@ AGENT_JAR="$HERE/agent/target/dist/dreamconnect-agent.jar"
 [ -f "$AGENT_JAR" ] || { echo ">> building agent"; bash "$HERE/agent/build.sh" >/dev/null; }
 
 # --- deploy files -----------------------------------------------------------
+# Root-owned, not group/other-writable on purpose: anyone able to write the
+# agent jar gets root code execution inside the ScreenConnect JVM, and anyone
+# able to write the daemon script runs code in the desktop session. Keep these
+# paths root:root and non-writable by others.
 echo ">> deploying to $INSTALL_DIR"
-install -d "$INSTALL_DIR/runtime"
-install -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
-install -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
+install -d -o root -g root -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/runtime"
+install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
+install -o root -g root -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
 
 # --- host fix: display-detection tools + broken-:1 skip wrapper --------------
 # ScreenConnect detects screen geometry with xdpyinfo/xrandr/xwininfo; without
