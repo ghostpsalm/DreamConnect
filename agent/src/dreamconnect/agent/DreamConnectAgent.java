@@ -31,6 +31,17 @@ public final class DreamConnectAgent {
 
     public static void premain(String args, Instrumentation inst) {
         try {
+            // JAVA_TOOL_OPTIONS is inherited by any child JVM ScreenConnect
+            // spawns. Only instrument the client itself (its classpath carries
+            // the ScreenConnect jars); skip unrelated child JVMs quietly — they
+            // never construct a Robot, so this only avoids setup + log noise.
+            String cp = System.getProperty("java.class.path", "");
+            String cmd = System.getProperty("sun.java.command", "");
+            if (!cp.contains("ScreenConnect") && !cmd.contains("ScreenConnect")
+                    && !cmd.contains("connectwise")) {
+                return;
+            }
+
             // ByteBuddy: tolerate class-file versions newer than it knows.
             System.setProperty("net.bytebuddy.experimental", "true");
 
