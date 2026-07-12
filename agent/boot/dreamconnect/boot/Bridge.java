@@ -30,6 +30,12 @@ public final class Bridge {
         if (e != null) return e;
         String xdg = System.getenv("XDG_RUNTIME_DIR");
         if (xdg != null) return xdg + "/dreamconnect.sock";
+        // Last resort. The agent runs as root, so it can't derive the desktop
+        // user's uid itself; install.sh always passes an explicit socket=. If
+        // this fires, the socket is unconfigured — warn loudly instead of
+        // silently guessing wrong on a host where the user isn't uid 1000.
+        log("WARN: no socket=, DREAMCONNECT_SOCKET, or XDG_RUNTIME_DIR set; "
+                + "guessing /run/user/1000/dreamconnect.sock — set socket= if the desktop user isn't uid 1000");
         return "/run/user/1000/dreamconnect.sock";
     }
 
