@@ -13,3 +13,7 @@
 ClientLaunchParameters.txt
 *.key
 .env
+
+# agent build
+/agent/lib/
+/agent/target/
