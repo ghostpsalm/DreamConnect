@@ -1,0 +1,15 @@
+# build output
+/dist/
+/agent/target/
+/runtime/target/
+*.class
+*.o
+*.so
+
+# spikes are throwaway; keep the dir but ignore scratch binaries
+/spikes/**/build/
+
+# secrets — never commit ScreenConnect launch params / relay keys
+ClientLaunchParameters.txt
+*.key
+.env
