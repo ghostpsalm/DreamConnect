@@ -3,6 +3,8 @@ package dreamconnect.boot;
 import java.net.StandardProtocolFamily;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 
@@ -13,6 +15,8 @@ import java.nio.charset.StandardCharsets;
  * restart doesn't wedge the client.
  */
 final class DaemonClient {
+    private static final long READ_TIMEOUT_MS = 2000;
+
     private final String path;
     private SocketChannel ch;
     private final ByteBuffer rbuf = ByteBuffer.allocate(256);
@@ -54,15 +58,33 @@ final class DaemonClient {
         }
     }
 
+    /**
+     * Read one reply line, bounded by READ_TIMEOUT_MS so a daemon that accepts
+     * but never replies can't wedge the caller (the SC thread constructing the
+     * Robot at attach). Uses a temporary selector; send() is low-frequency
+     * (control commands only), so the per-call selector cost is irrelevant.
+     */
     private String readLine() throws Exception {
-        StringBuilder sb = new StringBuilder();
-        while (true) {
-            rbuf.clear();
-            rbuf.limit(1);
-            if (ch.read(rbuf) < 0) throw new Exception("eof");
-            char c = (char) rbuf.array()[0];
-            if (c == '\n') return sb.toString();
-            sb.append(c);
+        ch.configureBlocking(false);
+        try (Selector sel = Selector.open()) {
+            ch.register(sel, SelectionKey.OP_READ);
+            StringBuilder sb = new StringBuilder();
+            long deadlineNanos = System.nanoTime() + READ_TIMEOUT_MS * 1_000_000L;
+            while (true) {
+                long remainMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+                if (remainMs <= 0) throw new Exception("read timeout");
+                sel.select(remainMs);
+                rbuf.clear();
+                rbuf.limit(1);
+                int n = ch.read(rbuf);
+                if (n < 0) throw new Exception("eof");
+                if (n == 0) continue;
+                char c = (char) rbuf.array()[0];
+                if (c == '\n') return sb.toString();
+                sb.append(c);
+            }
+        } finally {
+            if (ch != null) ch.configureBlocking(true);
         }
     }
 
