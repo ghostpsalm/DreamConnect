@@ -4,6 +4,9 @@ Documentation=https://github.com/ghostpsalm/DreamConnect
 # Needs the GNOME/Wayland session (Mutter D-Bus, PipeWire) to be up.
 After=graphical-session.target
 PartOf=graphical-session.target
+# Retry forever: never let a fast crash-loop trip the default start rate-limit
+# (5 starts / 10s) and leave the bridge permanently stopped on an unattended box.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
