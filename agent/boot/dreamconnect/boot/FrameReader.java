@@ -71,24 +71,35 @@ final class FrameReader {
      */
     synchronized int[] pixels(int rx, int ry, int rw, int rh) {
         int[] out = new int[rw * rh];
-        for (int attempt = 0; attempt < 64; attempt++) {
+        // Try to return a clean, tear-free frame. A writer holds the seqlock
+        // only for a single ~1-2ms memcpy, so a fixed spin count could finish in
+        // microseconds and never catch a stable frame — falling back to an empty
+        // (black) buffer. Instead, spin up to a time budget that comfortably
+        // outlasts a write, and if we still can't get a clean frame, return the
+        // latest pixels (at worst a small tear) rather than black.
+        long deadline = System.nanoTime() + 12_000_000L; // 12ms
+        boolean copied = false;
+        while (true) {
             try {
                 ensure();
-                // Seqlock: skip the copy entirely if a write is in progress
-                // (begin != end) so we don't copy a whole frame mid-write.
                 long begin = map.getLong(24);
-                if (begin == 0 || begin != map.getLong(32)) {
-                    Thread.onSpinWait();
-                    continue;
+                if (begin != 0 && begin == map.getLong(32)) {   // frame stable, not mid-write
+                    copyRect(out, rx, ry, rw, rh);
+                    copied = true;
+                    if (map.getLong(24) == begin) return out;   // no write started during the copy
                 }
-                copyRect(out, rx, ry, rw, rh);
-                if (map.getLong(24) == begin) return out;  // no write started during the copy
             } catch (Exception e) {
-                // fall through to a fresh remap on next attempt
                 try { remap(); } catch (Exception ignored) {}
             }
+            if (System.nanoTime() >= deadline) break;
+            Thread.onSpinWait();
         }
-        return out; // best-effort: return whatever we last copied
+        // Never return an all-zero (black) frame: make sure `out` holds real
+        // pixels, even if a perfectly tear-free capture wasn't achievable.
+        if (!copied) {
+            try { ensure(); copyRect(out, rx, ry, rw, rh); } catch (Exception ignored) {}
+        }
+        return out;
     }
 
     private void copyRect(int[] out, int rx, int ry, int rw, int rh) {

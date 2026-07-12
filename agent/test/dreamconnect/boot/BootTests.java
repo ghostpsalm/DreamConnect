@@ -25,6 +25,7 @@ public class BootTests {
     public static void main(String[] args) throws Exception {
         testAwtEvdev();
         testFrameReader();
+        testFrameReaderNeverBlackMidWrite();
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -75,5 +76,39 @@ public class BootTests {
         check(px[0] == 0xFF000000, "unset pixel (0,0) == opaque black");
         check(fr.pixel(1, 0) == 0xFF332211, "pixel(1,0) == 0xFF332211");
         check(fr.pixel(99, 99) == 0xFF000000, "out-of-bounds pixel -> opaque black");
+    }
+
+    /**
+     * Regression for the "flashes black every couple of seconds" bug: a capture
+     * landing while the writer holds the seqlock (begin != end) must return the
+     * real (at worst torn) pixels, never a fresh all-zero (black) buffer.
+     */
+    private static void testFrameReaderNeverBlackMidWrite() throws Exception {
+        int w = 4, h = 2, stride = w * 4;
+        int size = 64 + stride * h;
+        ByteBuffer bb = ByteBuffer.allocate(size).order(ByteOrder.LITTLE_ENDIAN);
+        bb.putInt(0, 0x31464344);
+        bb.putInt(4, 1);
+        bb.putInt(8, w);
+        bb.putInt(12, h);
+        bb.putInt(16, stride);
+        bb.putInt(20, 0);
+        bb.putLong(24, 2);   // seq_begin != seq_end  => perpetual "mid-write"
+        bb.putLong(32, 1);
+        int off = 64 + 1 * 4; // pixel (1,0) = 0xFF332211
+        bb.put(off, (byte) 0x11);
+        bb.put(off + 1, (byte) 0x22);
+        bb.put(off + 2, (byte) 0x33);
+        bb.put(off + 3, (byte) 0x44);
+
+        File f = File.createTempFile("dctest-midwrite", ".frame");
+        f.deleteOnExit();
+        try (FileOutputStream fos = new FileOutputStream(f)) {
+            fos.write(bb.array());
+        }
+
+        FrameReader fr = new FrameReader(f.getAbsolutePath());
+        int[] px = fr.pixels(0, 0, w, h);
+        check(px[1] == 0xFF332211, "mid-write pixels() returns real pixels, not black (got 0x" + Integer.toHexString(px[1]) + ")");
     }
 }
