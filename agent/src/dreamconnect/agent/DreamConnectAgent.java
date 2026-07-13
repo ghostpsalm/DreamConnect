@@ -73,11 +73,16 @@ public final class DreamConnectAgent {
                             builder.visit(Advice.to(RobotInitAdvice.class)
                                     .on(named("init")
                                             .and(takesArgument(0, named("java.awt.GraphicsDevice"))))))
+                    // Wake lock: base OSToolkit (Linux inherits the no-op base).
                     .type(named("com.screenconnect.OSToolkit"))
                     .transform((builder, type, cl, module, pd) -> builder
                             .visit(Advice.to(WakeLockAdvice.Acquire.class).on(named("acquireWakeLock")))
                             .visit(Advice.to(WakeLockAdvice.Release.class).on(named("releaseWakeLock")))
-                            .visit(Advice.to(WakeLockAdvice.CanAcquire.class).on(named("canAcquireWakeLock")))
+                            .visit(Advice.to(WakeLockAdvice.CanAcquire.class).on(named("canAcquireWakeLock"))))
+                    // Clipboard keystrokes: the real (console-only, no-op on the
+                    // desktop) override lives in OSToolkit$LinuxPackageToolkit.
+                    .type(named("com.screenconnect.OSToolkit$LinuxPackageToolkit"))
+                    .transform((builder, type, cl, module, pd) -> builder
                             .visit(Advice.to(ClipboardKeystrokeAdvice.Send.class)
                                     .on(named("sendStringAsKeystrokes")))
                             .visit(Advice.to(ClipboardKeystrokeAdvice.CanSend.class)
