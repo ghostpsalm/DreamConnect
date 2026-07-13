@@ -13,6 +13,7 @@ import java.awt.peer.RobotPeer;
  * rather than crashing the support session.
  */
 public final class Bridge {
+    private static volatile boolean socketExplicit;  // set by env or socket= arg
     private static volatile String shmPath = defaultShm();
     private static volatile String socketPath = defaultSocket();
     private static volatile boolean debug = false;
@@ -29,13 +30,13 @@ public final class Bridge {
 
     private static String defaultSocket() {
         String e = System.getenv("DREAMCONNECT_SOCKET");
-        if (e != null) return e;
+        if (e != null) { socketExplicit = true; return e; }
         String xdg = System.getenv("XDG_RUNTIME_DIR");
-        if (xdg != null) return xdg + "/dreamconnect.sock";
+        if (xdg != null) { socketExplicit = true; return xdg + "/dreamconnect.sock"; }
         // Last resort (the agent runs as root and can't derive the desktop uid).
-        // Return silently here — the "still unconfigured" warning is emitted from
-        // logConfig() AFTER configure() has had a chance to apply an explicit
-        // socket=, so it doesn't fire spuriously during static init.
+        // Warn from logConfig() only if nothing ever set the socket explicitly —
+        // note the socket= arg value may legitimately equal this fallback string,
+        // so we track explicitness rather than comparing values.
         return FALLBACK_SOCKET;
     }
 
@@ -49,7 +50,7 @@ public final class Bridge {
             String v = kv.substring(eq + 1).trim();
             switch (k) {
                 case "shm" -> shmPath = v;
-                case "socket" -> socketPath = v;
+                case "socket" -> { socketPath = v; socketExplicit = true; }
                 case "debug" -> debug = Boolean.parseBoolean(v);
                 default -> {}
             }
@@ -59,9 +60,7 @@ public final class Bridge {
 
     private static void logConfig() {
         log("configured shm=" + shmPath + " socket=" + socketPath);
-        if (FALLBACK_SOCKET.equals(socketPath)
-                && System.getenv("DREAMCONNECT_SOCKET") == null
-                && System.getenv("XDG_RUNTIME_DIR") == null) {
+        if (!socketExplicit) {
             log("WARN: socket unconfigured; guessing " + FALLBACK_SOCKET
                     + " — pass socket= if the desktop user isn't uid 1000");
         }
