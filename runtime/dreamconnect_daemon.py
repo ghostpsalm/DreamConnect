@@ -20,11 +20,14 @@ process; and keeping libpipewire/GStreamer out of the client JVM means a capture
 crash can't take down the remote-support session. It also survives SC updates.
 """
 import argparse
+import base64
 import os
 import socket
 import struct
+import subprocess
 import sys
 import threading
+import time
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -292,6 +295,44 @@ class Session:
         with self._lock:
             self._rd("NotifyKeyboardKeysym", (keysym, state), "(ub)")
 
+    # ---- clipboard-text typing (ScreenConnect SendClipboardKeystrokes) ------
+    @staticmethod
+    def _keymappable(c):
+        # Printable ASCII (+ newline/tab) — the keys the layout can produce.
+        return c in "\n\t" or 0x20 <= ord(c) < 0x7f
+
+    def type_string(self, text):
+        """Type a string on the remote. Keymappable text goes via keysym
+        injection (works even in paste-blocked fields, which is the point of
+        'insert clipboard text'); text containing characters Mutter's keysym
+        injection can't reach (non-ASCII/Unicode) falls back to a clipboard
+        paste."""
+        if not text:
+            return
+        if all(self._keymappable(c) for c in text):
+            for c in text:
+                ks = 0xff0d if c == "\n" else 0xff09 if c == "\t" else ord(c)
+                self.key_sym(ks, True)
+                self.key_sym(ks, False)
+                time.sleep(0.005)  # pacing so fast keysyms aren't dropped
+            log(f"typed {len(text)} chars via keysym")
+        else:
+            self._paste_text(text)
+
+    def _paste_text(self, text):
+        env = dict(os.environ,
+                   WAYLAND_DISPLAY=os.environ.get("WAYLAND_DISPLAY", "wayland-0"))
+        try:
+            subprocess.run(["wl-copy"], input=text.encode(), env=env,
+                           timeout=3, check=True)
+        except Exception as e:  # noqa: BLE001
+            log(f"wl-copy failed; cannot paste non-ASCII text: {e}")
+            return
+        # Ctrl+V via evdev keycodes (LEFTCTRL=29, V=47).
+        for kc, st in ((29, True), (47, True), (47, False), (29, False)):
+            self.key_code(kc, st)
+        log(f"pasted {len(text)} chars via clipboard (contained non-keymappable chars)")
+
 
 class ControlServer(threading.Thread):
     """Line-based Unix socket protocol. See handle() for the grammar."""
@@ -358,6 +399,9 @@ class ControlServer(threading.Thread):
                 return None
             if cmd == "WAKELOCK":  # WAKELOCK 1|0 (operator AcquireWakeLock command)
                 s.set_wake_lock(args[0] == "1")
+                return None
+            if cmd == "TYPE":  # TYPE <base64-utf8> (SendClipboardKeystrokes)
+                s.type_string(base64.b64decode(args[0]).decode("utf-8", "replace"))
                 return None
         except Exception as e:  # noqa: BLE001
             log(f"input error on '{line}': {e}")

@@ -77,7 +77,11 @@ public final class DreamConnectAgent {
                     .transform((builder, type, cl, module, pd) -> builder
                             .visit(Advice.to(WakeLockAdvice.Acquire.class).on(named("acquireWakeLock")))
                             .visit(Advice.to(WakeLockAdvice.Release.class).on(named("releaseWakeLock")))
-                            .visit(Advice.to(WakeLockAdvice.CanAcquire.class).on(named("canAcquireWakeLock"))))
+                            .visit(Advice.to(WakeLockAdvice.CanAcquire.class).on(named("canAcquireWakeLock")))
+                            .visit(Advice.to(ClipboardKeystrokeAdvice.Send.class)
+                                    .on(named("sendStringAsKeystrokes")))
+                            .visit(Advice.to(ClipboardKeystrokeAdvice.CanSend.class)
+                                    .on(named("canSendStringAsKeystrokes"))))
                     .installOn(inst);
 
             System.err.println("[dreamconnect-agent] installed; Robot peer + OSToolkit wake-lock hooks armed");

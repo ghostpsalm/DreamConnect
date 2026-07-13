@@ -94,6 +94,25 @@ public final class Bridge {
     }
 
     /**
+     * Driven by the agent's hook on ScreenConnect's
+     * OSToolkit.sendStringAsKeystrokes — the operator's "insert clipboard text"
+     * (SendClipboardKeystrokes) command, whose native path doesn't work under
+     * Wayland. Forwards the text (base64 UTF-8) to the daemon, which types it.
+     */
+    public static void typeString(String text) {
+        try {
+            if (text == null || text.isEmpty()) return;
+            init();
+            String b64 = java.util.Base64.getEncoder()
+                    .encodeToString(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            daemon.input("TYPE " + b64);
+            log("clipboard keystrokes forwarded (" + text.length() + " chars)");
+        } catch (Throwable t) {
+            log("typeString failed: " + t);
+        }
+    }
+
+    /**
      * Called from the instrumented Robot.init exit. Returns our peer, or the
      * original on any failure.
      */
