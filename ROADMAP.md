@@ -73,6 +73,17 @@ Wayland.
    via `Robot.keyPress`/`keyRelease`, which already works through the peer.
    Cheaper if such a fallback exists; needs bytecode spelunking to confirm.
 
+**Feasibility (probed 2026-07-13):** `libscnative`'s `sendStringAsKeystrokes`
+links no X/uinput libs and sits next to the console-framebuffer exports — it
+looks **console-oriented** (raw VT), which is why it never reaches the Wayland
+desktop. Best path: intercept that one native method (`setNativeMethodPrefix`)
+and reroute to a new daemon "type string" command built on Mutter's
+`NotifyKeyboardKeysym` — which types **arbitrary Unicode, layout-independent**,
+sidestepping the US-keymap limit entirely. Approach 2's caller wasn't obvious via
+`javap` (likely obfuscated), so approach 1 is preferred.
+· **Time: ~2–4 days (M).** · **Likelihood: ~70% (medium-high).** Risk is in the
+native-method interception mechanics and keysym timing, not the typing itself.
+
 #### F2 — Backstage terminal as a login option
 **Status:** idea · **Priority:** medium
 
@@ -88,6 +99,20 @@ headless admin without spinning up the full capture/input bridge.
 - Whether it should be a login/session option surfaced by DreamConnect or simply
   documented as already-working ScreenConnect behavior.
 
+**Feasibility (probed 2026-07-13):** the client advertises the capability flags
+`BACKSTAGE_LOGON_SESSION` / `CAN_ENABLE_BACKSTAGE_LOGON_SESSION`, and the native
+lib exposes console-framebuffer + console-keystroke primitives — so SC's Linux
+"backstage" looks like a **raw text-console (VT)** session, not graphical. That's
+actually a plus: it would work independent of the desktop (even at the login
+screen). `tmux` is already installed, so wrapping a persistent, reattachable
+shell on that VT is trivial **once the SC side is proven**. The whole risk is
+whether SC's Linux backstage actually functions (it may be Windows-centric or
+stubbed) — if it's a no-op on Linux, this becomes "build a whole out-of-band
+channel," which is a much larger effort. **Needs a spike to enable + test SC
+backstage first.**
+· **Time: ~1 day to spike; ~3–6 days if SC backstage works, much more if not.**
+· **Likelihood: ~45% (low-medium)** — gated almost entirely on the SC-side unknown.
+
 #### F3 — Wake lock / stay-awake (idle & lock inhibitor)
 **Status:** potential · **Priority:** medium
 
@@ -102,6 +127,13 @@ right signal to grab/drop the inhibitor.
 for blanking. Language-agnostic (a D-Bus call), so **not** a Rust-specific win.
 *Open question:* whether capture/input should also keep working while the session
 is *locked* — that's a separate path (see F4).
+
+**Feasibility (probed 2026-07-13):** all the interfaces are present on the box —
+`org.gnome.SessionManager` (idle inhibit), `org.freedesktop.ScreenSaver`, and
+system `org.freedesktop.login1`. The daemon already tracks `active_clients`, so
+it grabs an inhibit on 0→1 and drops it on →0. Cleanest quick win here.
+· **Time: ~0.5–1 day (S).** · **Likelihood: ~90% (high).** Minor tuning: pick the
+inhibit flag(s) that stop the *lock*, not just blanking.
 
 #### F4 — Other candidate features (unverified under the bridge)
 **Status:** potential · **Priority:** low–medium
