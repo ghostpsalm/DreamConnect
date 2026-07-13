@@ -21,6 +21,25 @@ hands back.
 > DreamConnect is an independent, unofficial project. "ConnectWise" and
 > "ScreenConnect" are trademarks of their respective owners.
 
+### Scope & maturity — read this first
+
+DreamConnect is a young project, proven end-to-end on a **Fedora + GNOME/Wayland**
+box. Today it targets exactly that:
+
+- **GNOME/Mutter only.** The headless, no-consent path uses GNOME's
+  `org.gnome.Mutter.*` D-Bus API. **KDE/KWin and wlroots (Sway, etc.) are not
+  supported yet.**
+- **Fedora-tested.** The installer is Fedora-shaped (uses `dnf`, assumes GDM).
+  The agent + daemon themselves aren't distro-specific, but on other distros you
+  install dependencies and configure autologin by hand for now.
+- **The machine must be logged in.** It attaches to an existing graphical
+  session and can't drive the login greeter — so **you can't log in through
+  ScreenConnect after a reboot unless autologin is enabled** (the installer
+  warns you).
+
+Broadening to other compositors and distros is explicitly on the
+[roadmap](ROADMAP.md). See [Limitations](#limitations) for the full list.
+
 ## How it works (in one paragraph)
 
 A [`javaagent`](agent/) injected via `JAVA_TOOL_OPTIONS` swaps `java.awt.Robot`'s
@@ -33,12 +52,17 @@ headless/unattended. Full details in [`docs/design.md`](docs/design.md).
 
 ## Requirements
 
-- A GNOME **Wayland** session that stays logged in (autologin), with a capture
-  source present — a real monitor or an **HDMI dummy plug**.
+- **GNOME on Wayland** (uses GNOME's Mutter D-Bus interfaces — see
+  [Scope](#scope--maturity--read-this-first)), with a session that stays logged
+  in — **autologin** for unattended/reboot survival.
+- A capture source: a real monitor or an **HDMI dummy plug**.
 - The **ScreenConnect Linux client** already installed and enrolled
   (`connectwisecontrol-*.service`).
-- A **JDK** (built/tested on JDK 25), `python3` with GObject + GStreamer PipeWire,
-  and `systemd`. On Fedora the installer pulls the few missing bits automatically.
+- `systemd`, a **JDK** (built/tested on JDK 25), and `python3` with GObject +
+  GStreamer PipeWire.
+- **Tested on Fedora**, where the installer pulls missing dependencies via `dnf`.
+  Other distros: the agent + daemon work the same, but you install the deps and
+  set up autologin yourself for now.
 
 ## Install
 
@@ -85,14 +109,26 @@ sudo ./install.sh --uninstall     # from a source checkout
 
 ## Limitations
 
-- **"Insert clipboard text"** doesn't work (it uses a native code path that
-  bypasses `Robot`); share clipboards and paste manually instead.
-- Keymap assumes a US-ish physical layout; single-monitor only.
+Environment (see [Scope](#scope--maturity--read-this-first)):
+- **GNOME/Mutter only** — no KDE/KWin or wlroots (Sway, …) support yet. Those
+  need the generic `xdg-desktop-portal` path, where avoiding the per-session
+  "Allow" consent prompt is a separate problem. *(Roadmap.)*
+- **Fedora-tested; the installer is Fedora-shaped** (`dnf`, GDM). The core is
+  distro-agnostic; other distros need manual dependency install + autologin
+  setup for now. *(Roadmap.)*
+- **Must be logged in** — can't drive the GDM login greeter, so no logging in
+  through ScreenConnect after a reboot without **autologin**.
+
+Features:
+- **"Insert clipboard text"** doesn't work (native code path that bypasses
+  `Robot`); share clipboards and paste manually instead.
+- **Single monitor** only, and the keymap assumes a **US-ish physical layout**.
 - Some hosts need a workaround for a broken Xwayland `:1` display (the installer
   applies it) — see [Troubleshooting](docs/troubleshooting.md).
 
-These and planned work (clipboard typing, Backstage terminal, hardening) are
-tracked in [`ROADMAP.md`](ROADMAP.md).
+All of the above — plus broader compositor/distro support, clipboard typing, a
+Backstage terminal, and hardening — is tracked in [`ROADMAP.md`](ROADMAP.md).
+It's early; issues and PRs (especially other compositors/distros) are welcome.
 
 ## Documentation
 

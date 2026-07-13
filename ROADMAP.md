@@ -34,6 +34,10 @@ the real ScreenConnect client.
 - **Clipboard** — copy/paste works via ScreenConnect's clipboard sharing.
 
 ### Known limitations (tracked below)
+- **GNOME/Mutter only** — no KDE/wlroots yet → [V2-2](#v2-2--wayland-everywhere-other-compositors).
+- **Fedora-tested**; installer is Fedora-shaped → [H5](#h5--distro-agnostic-install).
+- **Must be logged in**; no login through the greeter after reboot without
+  autologin → [H6](#h6--reboot-survival--autologin).
 - "Insert clipboard text" does not work → [F1](#f1--insert-clipboard-text).
 - Keymap assumes a US-ish physical layout; non-US layouts, dead keys, and some
   keypad keys may be imperfect → [H1](#h1--keymap-fidelity).
@@ -168,6 +172,24 @@ Exercise daemon restart, Mutter session `Closed` recovery, and ScreenConnect
 update survival end to end; make sure the agent re-attaches cleanly after a
 daemon bounce.
 
+#### H5 — Distro-agnostic install
+**Status:** planned · **Priority:** medium
+
+`install.sh` is Fedora-shaped: `dnf` for the probe tools, and GDM assumptions in
+the autologin warning. The agent + daemon are distro-neutral. Detect the package
+manager (apt/dnf/pacman/zypper) and install deps accordingly, generalise the
+display-manager/autologin guidance, and document the manual steps per distro.
+The `:1` probe wrapper and systemd wiring are already portable.
+
+#### H6 — Reboot survival / autologin
+**Status:** planned · **Priority:** medium
+
+The bridge needs a logged-in graphical session; it can't drive the GDM greeter,
+so a reboot without autologin leaves it unreachable (v1.x prints a warning only).
+Offer to configure display-manager autologin during install (with explicit
+consent, given the security trade-off), and verify reboot survival end to end.
+See also F3 (wake lock) for the idle/lock case.
+
 ---
 
 ## Larger bets (v2)
@@ -197,6 +219,28 @@ PyGObject; and it still dynamically links the same native libraries. Do it as a
 deliberate v2 pass **if/when** we want the dependency reduction, zero-copy
 capture, or `uinput`-level features — not as a "scripting is slow" fix. The
 **agent stays Java** regardless — it lives inside ScreenConnect's JVM.
+
+#### V2-2 — Wayland everywhere (other compositors)
+**Status:** discussion · **Priority:** medium (most-requested direction)
+
+Today the daemon acquires its capture/input session via GNOME's
+`org.gnome.Mutter.{RemoteDesktop,ScreenCast}` D-Bus API — which is why it's
+**GNOME/Mutter only**. Supporting **KDE/KWin** and **wlroots** (Sway, Hyprland,
+…) means acquiring the session through the compositor-neutral
+`xdg-desktop-portal` `RemoteDesktop` + `ScreenCast` interfaces instead.
+
+The rest of DreamConnect is already portable: the agent's `Robot`-peer swap is
+compositor-agnostic, and the shm/socket transports don't care. Only the daemon's
+session-acquisition layer is GNOME-specific, so this is a **pluggable backend**
+(Mutter today; portal-based backends for KDE/wlroots).
+
+*The hard part is consent.* The portal path normally shows an interactive
+"Allow" prompt per session — the exact thing the Mutter backend sidesteps. Each
+compositor handles unattended/persistent grants differently (restore tokens,
+KDE's remote-desktop config, wlroots portal backends), so this needs a per-
+compositor spike on headless consent before it's genuinely unattended. Structure
+the daemon around a backend interface first, then add backends one compositor at
+a time.
 
 ---
 
