@@ -124,17 +124,26 @@ class Session:
 
     # ---- client accounting + wake lock -------------------------------------
     def client_connected(self):
-        """A control client attached; hold a wake lock while any are connected."""
         with self._client_lock:
             self.active_clients += 1
-            if self.active_clients == 1:
-                self._acquire_wake_lock()
 
     def client_disconnected(self):
         with self._client_lock:
             self.active_clients -= 1
             if self.active_clients <= 0:
                 self.active_clients = 0
+                # Safety: if a session drops without releasing, don't leak the
+                # inhibit and leave the box permanently awake.
+                self._release_wake_lock()
+
+    def set_wake_lock(self, on):
+        """Driven by ScreenConnect's AcquireWakeLock/release command (via the
+        agent hook on OSToolkit.acquireWakeLock/releaseWakeLock), not by mere
+        connection presence — so it respects the operator's explicit action."""
+        with self._client_lock:
+            if on:
+                self._acquire_wake_lock()
+            else:
                 self._release_wake_lock()
 
     def _acquire_wake_lock(self):
@@ -346,6 +355,9 @@ class ControlServer(threading.Thread):
                 return None
             if cmd == "KS":  # KS keysym state
                 s.key_sym(int(args[0]), args[1] == "1")
+                return None
+            if cmd == "WAKELOCK":  # WAKELOCK 1|0 (operator AcquireWakeLock command)
+                s.set_wake_lock(args[0] == "1")
                 return None
         except Exception as e:  # noqa: BLE001
             log(f"input error on '{line}': {e}")

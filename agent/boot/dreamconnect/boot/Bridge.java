@@ -25,18 +25,18 @@ public final class Bridge {
         return e != null ? e : "/dev/shm/dreamconnect.frame";
     }
 
+    private static final String FALLBACK_SOCKET = "/run/user/1000/dreamconnect.sock";
+
     private static String defaultSocket() {
         String e = System.getenv("DREAMCONNECT_SOCKET");
         if (e != null) return e;
         String xdg = System.getenv("XDG_RUNTIME_DIR");
         if (xdg != null) return xdg + "/dreamconnect.sock";
-        // Last resort. The agent runs as root, so it can't derive the desktop
-        // user's uid itself; install.sh always passes an explicit socket=. If
-        // this fires, the socket is unconfigured — warn loudly instead of
-        // silently guessing wrong on a host where the user isn't uid 1000.
-        log("WARN: no socket=, DREAMCONNECT_SOCKET, or XDG_RUNTIME_DIR set; "
-                + "guessing /run/user/1000/dreamconnect.sock — set socket= if the desktop user isn't uid 1000");
-        return "/run/user/1000/dreamconnect.sock";
+        // Last resort (the agent runs as root and can't derive the desktop uid).
+        // Return silently here — the "still unconfigured" warning is emitted from
+        // logConfig() AFTER configure() has had a chance to apply an explicit
+        // socket=, so it doesn't fire spuriously during static init.
+        return FALLBACK_SOCKET;
     }
 
     /** Parse agent args: comma-separated key=value (shm=…, socket=…, debug=true). */
@@ -59,6 +59,12 @@ public final class Bridge {
 
     private static void logConfig() {
         log("configured shm=" + shmPath + " socket=" + socketPath);
+        if (FALLBACK_SOCKET.equals(socketPath)
+                && System.getenv("DREAMCONNECT_SOCKET") == null
+                && System.getenv("XDG_RUNTIME_DIR") == null) {
+            log("WARN: socket unconfigured; guessing " + FALLBACK_SOCKET
+                    + " — pass socket= if the desktop user isn't uid 1000");
+        }
     }
 
     static void log(String msg) {
@@ -70,6 +76,22 @@ public final class Bridge {
     private static synchronized void init() {
         if (daemon == null) daemon = new DaemonClient(socketPath);
         if (frame == null) frame = new FrameReader(shmPath);
+    }
+
+    /**
+     * Driven by the agent's hook on ScreenConnect's
+     * OSToolkit.acquireWakeLock/releaseWakeLock — i.e. the operator's
+     * AcquireWakeLock command. Forwards to the daemon, which holds a GNOME
+     * idle+suspend inhibit for the duration. Best-effort; never throws into SC.
+     */
+    public static void setWakeLock(boolean on) {
+        try {
+            init();
+            daemon.input("WAKELOCK " + (on ? "1" : "0"));
+            log("wake lock " + (on ? "acquire" : "release") + " forwarded (operator command)");
+        } catch (Throwable t) {
+            log("setWakeLock failed: " + t);
+        }
     }
 
     /**

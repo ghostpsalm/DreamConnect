@@ -61,7 +61,8 @@ public final class DreamConnectAgent {
             // 3. Configure the bridge from agent args (shm=…,socket=…,debug=…).
             bridge.getMethod("configure", String.class).invoke(null, args);
 
-            // 4. Instrument java.awt.Robot.init(GraphicsDevice).
+            // 4. Instrument java.awt.Robot.init (peer swap) and ScreenConnect's
+            //    OSToolkit wake-lock methods (operator AcquireWakeLock command).
             new AgentBuilder.Default()
                     .disableClassFormatChanges()
                     .with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
@@ -72,9 +73,14 @@ public final class DreamConnectAgent {
                             builder.visit(Advice.to(RobotInitAdvice.class)
                                     .on(named("init")
                                             .and(takesArgument(0, named("java.awt.GraphicsDevice"))))))
+                    .type(named("com.screenconnect.OSToolkit"))
+                    .transform((builder, type, cl, module, pd) -> builder
+                            .visit(Advice.to(WakeLockAdvice.Acquire.class).on(named("acquireWakeLock")))
+                            .visit(Advice.to(WakeLockAdvice.Release.class).on(named("releaseWakeLock")))
+                            .visit(Advice.to(WakeLockAdvice.CanAcquire.class).on(named("canAcquireWakeLock"))))
                     .installOn(inst);
 
-            System.err.println("[dreamconnect-agent] installed; Robot peer will be swapped on next Robot()");
+            System.err.println("[dreamconnect-agent] installed; Robot peer + OSToolkit wake-lock hooks armed");
         } catch (Throwable t) {
             // Never take down the client: log and let ScreenConnect run as-is.
             System.err.println("[dreamconnect-agent] premain failed; ScreenConnect continues on X11: " + t);
