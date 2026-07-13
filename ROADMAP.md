@@ -51,7 +51,21 @@ the real ScreenConnect client.
 ### Features
 
 #### F1 — Insert clipboard text
-**Status:** planned · **Priority:** medium
+**Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
+
+**Implemented 2026-07-13.** SC's `SendClipboardKeystrokes` is handled by
+`OSToolkit$LinuxPackageToolkit.sendStringAsKeystrokes`, which is **console-only**
+(guards on `getCurrentTerminalName`, then calls the native) — a silent no-op on
+the Wayland desktop. The agent hooks that method (skips it) and forwards the text
+to the daemon's new `TYPE` command: keymappable text is typed via
+`NotifyKeyboardKeysym` (works even in paste-blocked fields); text with characters
+keysym injection can't reach falls back to `wl-copy` + Ctrl+V. **Both paths
+verified live** through the operator's actual "insert clipboard text" command
+(ASCII via keysym; a 472- and 275-char Unicode payload via the paste fallback).
+`canSendStringAsKeystrokes` is forced true so the command is offered. Original
+notes below.
+
+---
 
 ScreenConnect's "Insert clipboard text" (type the operator's clipboard as
 keystrokes on the remote) does nothing under the bridge. It bypasses
