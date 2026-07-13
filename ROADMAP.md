@@ -170,20 +170,34 @@ inhibit flag(s) that stop the *lock*, not just blanking.
 #### F4 — Other candidate features (unverified under the bridge)
 **Status:** potential · **Priority:** low–medium
 
-ScreenConnect capabilities that may or may not work through the Robot-peer
-bridge and are worth checking or building:
-- **Insert clipboard text** — tracked separately as [F1](#f1--insert-clipboard-text).
-- **Through-the-lock-screen** capture/control — today capture would just show the
-  GNOME screen shield; driving a locked session likely needs a separate path.
-- **SAS / Ctrl-Alt-Del** injection — the secure-attention sequence; may require
-  direct evdev/`uinput` injection rather than Mutter's RemoteDesktop API.
-- **Local privacy** — blank the local monitor and/or lock the local
-  keyboard/mouse for the duration of a session.
-- **Multi-monitor** — see [H2](#h2--multi-monitor).
+**Command-set audit (2026-07-13):** the client `Command` enum has 58 values, but
+~35 are **host-side operator UI** (zoom, dock, annotation, audio-device pickers,
+video record, participant mgmt, chat) that never touch the guest. Only a handful
+act on the Linux guest; of those, `SendClipboardKeystrokes` ([F1](#f1--insert-clipboard-text)),
+`AcquireWakeLock` ([F3](#f3--wake-lock--stay-awake-idle--lock-inhibitor)),
+`ShareClipboard`, and `BlockGuestInput` work, and the `SelectLogonSession`
+picker's bare `:0` label is rewritten to the logged-in user's name. Remaining
+guest-affecting commands:
 
-The lower-level ones (SAS via `uinput`, direct device control) are where a Rust
-daemon could genuinely help (see [V2-1](#v2-1--rust-daemon-rewrite)); the rest
-(inhibitors, clipboard) are plumbing any language handles.
+- **`BlankGuestMonitor`** — ❌ **spiked, not feasible in v1** (see
+  [`spikes/SPIKE1_RESULTS.md`](spikes/SPIKE1_RESULTS.md)). The Linux client impl
+  is a hard no-op; more importantly, no Wayland mechanism blanks the *physical*
+  panel while our capture keeps working — we capture the composited physical
+  monitor, inseparable from the scanout. `PowerSaveMode` (DPMS) is honoured but
+  the CRTC stays lit under an active ScreenCast; overlays/screensaver black the
+  operator's view too. Real fix needs virtual-framebuffer capture → tie to
+  [V2-2](#v2-2--wayland-everywhere-other-compositors). Low value on Linux anyway.
+- **`SendSystemKeyCode`** — this is a fixed **Ctrl-Alt-Del** (the message carries
+  no payload) with no clean toolkit seam (handled in SC's generic dispatch). On
+  GNOME Wayland Ctrl-Alt-Del has no meaningful binding, so injecting it is an
+  almost-certain no-op — **not worth building**. (If ever needed, SAS-style keys
+  would go via direct evdev/`uinput`, a [V2-1](#v2-1--rust-daemon-rewrite) item.)
+- **Likely-work-as-root, unverified** — `Reboot`, `Send/Receive Files & Folders`,
+  `RunTool`, `TakeScreenshotTo{File,Clipboard}`, `OpenUrl`. These use root FS/
+  process access or the Robot peer; worth a spot-check pass, not a build.
+- **Through-the-lock-screen** capture/control — capture would show the GNOME
+  screen shield; driving a locked session needs a separate path.
+- **Multi-monitor** — see [H2](#h2--multi-monitor).
 
 ### Bugfixes & investigations
 
