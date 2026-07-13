@@ -116,12 +116,14 @@ backstage first.**
 #### F3 — Wake lock / stay-awake (idle & lock inhibitor)
 **Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
 
-**Implemented 2026-07-13.** The daemon takes a GNOME SessionManager inhibit
-(idle + suspend, flags `12`) when the first client attaches and releases it when
-the last disconnects — verified: `InhibitedActions` 0 → 12 → 0 across connect /
-disconnect. So the desktop no longer blanks, auto-locks, or suspends mid-session
-(remote input alone doesn't reset GNOME's idle timer, which was the problem).
-Original notes below.
+**Implemented 2026-07-13.** Driven by the operator's actual **AcquireWakeLock**
+command — the agent hooks `com.screenconnect.OSToolkit.acquireWakeLock` /
+`releaseWakeLock` (a Linux no-op; only macOS/Windows implement it) and forces
+`canAcquireWakeLock()` → true so ScreenConnect offers the command. The hook
+tells the daemon (`WAKELOCK 1|0`) to grab/drop a GNOME SessionManager idle+suspend
+inhibit — verified `InhibitedActions` 0 → 12 → 0. So it respects the operator's
+explicit action rather than firing for any open session; the daemon also releases
+on last-client-disconnect as a safety net. Original notes below.
 
 ---
 
