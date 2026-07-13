@@ -17,3 +17,7 @@ ClientLaunchParameters.txt
 # agent build
 /agent/lib/
 /agent/target/
+
+# python bytecode
+__pycache__/
+*.pyc
