@@ -1,60 +1,55 @@
-# Spike 1 — BlankGuestMonitor under Wayland — **NOT FEASIBLE** ❌ (current architecture)
+# Spike 1 — BlankGuestMonitor under Wayland — **FEASIBLE** ✅ (via CRTC gamma)
 
 Date: 2026-07-13 · Host: GNOME/Wayland workstation (Fedora, GNOME/mutter, Wayland),
 capturing physical monitor `HDMI-2`.
 
 ## Question
 
-ScreenConnect's **BlankGuestMonitor** command darkens the guest's physical screen
-for privacy *while the operator keeps seeing the real desktop*. On Windows a
-mirror driver decouples the two. Can we do the same on Wayland/Mutter — blank the
-physical panel while our PipeWire capture keeps delivering real frames?
+ScreenConnect's **BlankGuestMonitor** darkens the guest's physical screen for
+privacy *while the operator keeps seeing the real desktop* (on Windows a mirror
+driver decouples the two). Can we do that on Wayland/Mutter — blank the physical
+panel while our PipeWire capture keeps delivering real frames? (The Linux client
+impl is a hard no-op: `ClientOSToolkit.isBlankingMonitorsSupported()` → false,
+`blankMonitorsOrWallpapers()` → null, so we must implement it ourselves.)
 
-(The Linux client's own implementation is a hard no-op: `ClientOSToolkit`
-`isBlankingMonitorsSupported()` → `return false`, `blankMonitorsOrWallpapers()` →
-`return null`. So making it work means implementing the blank ourselves.)
+## Answer: yes — zero the CRTC gamma ramp
 
-## Result — no clean mechanism
+Gamma is applied at **scanout**, per-CRTC, *after* compositing; the Mutter
+ScreenCast captures the **composited framebuffer**, *before* gamma. So setting a
+CRTC's gamma ramp to all-zero blacks the **physical** output while leaving the
+**captured** stream full-colour. Measured with `SetCrtcGamma(serial, crtc, 0…)`:
 
-The cleanest candidate, **`org.gnome.Mutter.DisplayConfig.PowerSaveMode`** (DPMS),
-was set to `3` (OFF) and **held** (read back as `3` for 4–6s, wake-lock inhibit
-released first), while the shm capture buffer kept advancing with real content.
-**But the physical panel never went dark** (confirmed visually, twice). The active
-ScreenCast keeps the CRTC page-flipping, so Mutter reports the power-save mode yet
-the scanout stays lit. Even if it *did* blank with capture stopped, that is
-mutually exclusive with the operator seeing anything.
-
-Every other mechanism hits the same wall — we capture the **composited physical
-monitor**, which is inseparable from the physical scanout:
-
-| Mechanism | Verdict |
+| Requirement | Result |
 |---|---|
-| `PowerSaveMode` (DPMS off) | Mode honored, panel stays lit while capturing. ✗ |
-| Black fullscreen overlay | Blacks the operator's capture too (same composited output). ✗ |
-| `ScreenSaver.SetActive` / lock | Shield shows in capture too; also locks. ✗ |
-| `SetBacklight` → 0 | Keeps framebuffer, would blank — but only laptop eDP panels expose it; external HDMI does not. ✗ (this host) |
-| `ApplyMonitorsConfig` (disable output) | Mutter stops compositing that monitor → capture dies. ✗ |
+| Operator keeps seeing desktop | ✅ **measured** — capture stayed live (`mean=251`, seq advancing) with gamma zeroed |
+| Holds through operator input | ✅ **measured** — gamma stayed `0` for 6s under injected motion; nothing (input, `gsd-color`, night-light) restored it |
+| Clean restore | ✅ **measured** — original ramp reapplied; detached watchdog backup worked |
+| Physical panel dark | ✅ inferred — zero ramps ⇒ black scanout (well-established); on-device eyeball pending |
 
-## Root cause & the only real path
+Repro: [`spike1b_blank_gamma.py`](spike1b_blank_gamma.py) (zeros gamma, samples the
+capture, injects motion, restores; a detached watchdog restores after 8s).
 
-We capture the **physical monitor's composited output**; on Mutter that content
-is inseparable from the physical scanout. The one clean fix is to capture a
-**virtual monitor / headless framebuffer** decoupled from the physical output,
-then blank (or leave unplugged) the physical panel independently. That is the
-**V2-2** architectural direction (portal/virtual-monitor backends), not a small
-hook — and this host already has flaky virtual-display (`:1`) behaviour (see B1).
+## What did NOT work (and a measurement trap)
 
-## Recommendation
+- **DPMS (`Mutter.DisplayConfig.PowerSaveMode=3`)** — Mutter honours the mode and
+  the physical output goes `dpms=Off` (confirmed via `/sys/class/drm/*/dpms`), and
+  the capture *does* stay live. **But injected input instantly wakes the panel**
+  (`Off`→`On` on the first pointer event), so the blank can't hold during active
+  control. Dead end for BlankGuestMonitor.
+- **Output-config disable (`ApplyMonitorsConfig` empty layout)** — Mutter rejects
+  it: *"Monitors config incomplete"*; it won't disable the only monitor.
+- **Overlay window / screensaver** — black the operator's capture too (same
+  composited output). **Backlight-off** — eDP-only, n/a on external HDMI.
+- **Measurement trap:** the operator's captured view is *pre-gamma* (and, for
+  DPMS, is a separate consumer), so it can't reveal the physical panel's state.
+  An early misread (watching the SC view, assuming it was the physical screen)
+  produced a false "not feasible"; the fix was to measure the physical side
+  directly via DRM sysfs (`dpms`) and the gamma readback.
 
-**Won't do in v1.** Revisit only alongside V2-2 virtual-framebuffer capture.
-Low value on Linux anyway (no equivalent privacy-driver expectation).
+## Implemented
 
-## Facts learned (reusable)
-
-- `Mutter.DisplayConfig.PowerSaveMode` is writable (`0` on, `3` off) and Mutter
-  honours the set, but an active ScreenCast keeps the CRTC lit — DPMS is not a
-  usable blank while capturing.
-- Injected input via RemoteDesktop is independent of scanout power (would still
-  work while blanked, if blanking were possible).
-- Repro: `spikes/spike1_blank_monitor.py` (holds a daemon connection to force
-  capture, samples the shm seqlock + pixel brightness, toggles PowerSaveMode).
+Daemon `BLANK 1|0` command (`Session.set_blank` → `SetCrtcGamma` zero/restore over
+all active CRTCs), restoring on unblank, last-client-disconnect, and SIGTERM.
+Agent hooks `ClientOSToolkit.isBlankingMonitorsSupported`/`blankMonitorsOrWallpapers`/
+`unblankMonitorsOrWallpapers`. Daemon path verified end-to-end; SC operator-command
+flow + physical-dark confirmation are the on-device test.

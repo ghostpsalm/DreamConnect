@@ -174,9 +174,11 @@ Full per-command coverage lives in
 [`docs/screenconnect-commands.md`](docs/screenconnect-commands.md) (of 58 enum
 values, ~35 are host-side UI; only a handful act on the guest). Open items:
 
-- **`BlankGuestMonitor`** — ❌ won't do in v1 (spiked; no Wayland way to blank the
-  physical panel while capturing). Revisit with virtual-FB capture →
-  [V2-2](#v2-2--wayland-everywhere-other-compositors).
+- **`BlankGuestMonitor`** — ✅ done via **CRTC gamma zeroing** (the ScreenCast is
+  pre-gamma, so the operator keeps seeing the desktop while the physical panel
+  goes black; holds through input, unlike DPMS). See
+  [`spikes/SPIKE1_RESULTS.md`](spikes/SPIKE1_RESULTS.md). On-device physical-dark
+  confirmation pending.
 - **`SendSystemKeyCode`** — ❌ not worth it (fixed Ctrl-Alt-Del; a GNOME no-op).
 - **Spot-check as-root commands** — `Reboot`, file transfer, `RunTool`,
   screenshots, `OpenUrl` (likely already work; verify, don't build).

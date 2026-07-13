@@ -25,6 +25,7 @@ Operator-window UI: `SelectQuality`, `ZoomToScale`, `Dock/UndockControlPanel`,
 | `AcquireWakeLock` | Agent hook → daemon GNOME idle+suspend inhibit. |
 | `ShareClipboard` | Works via ScreenConnect's own clipboard sharing. |
 | `BlockGuestInput` | Works as-is through the client (no bridge changes needed). |
+| `BlankGuestMonitor` | Agent hook forces support on + routes to daemon, which zeroes the CRTC gamma to black the physical panel; the ScreenCast is pre-gamma so the operator keeps seeing the desktop. See [`../spikes/SPIKE1_RESULTS.md`](../spikes/SPIKE1_RESULTS.md). |
 | `SelectLogonSession` | Works; the picker's bare `:0` label is rewritten to the logged-in user's name (agent hook on `getAvailableLogonSession*` → daemon `WHO`). |
 
 ## Guest-affecting — likely work as root, unverified
@@ -35,12 +36,6 @@ peer, so they should already function — worth a spot-check pass, not a build.
 
 ## Guest-affecting — investigated, not doing
 
-- **`BlankGuestMonitor`** — not feasible in the current architecture. The Linux
-  client impl is a hard no-op, and no Wayland mechanism blanks the *physical*
-  panel while our capture keeps working (we capture the composited physical
-  monitor, inseparable from the scanout). Full analysis:
-  [`../spikes/SPIKE1_RESULTS.md`](../spikes/SPIKE1_RESULTS.md). Real fix needs
-  virtual-framebuffer capture (a v2 direction).
 - **`SendSystemKeyCode`** — a fixed **Ctrl-Alt-Del** (the message carries no
   payload), handled in SC's generic dispatch with no clean toolkit seam. GNOME
   Wayland has no meaningful binding for it, so injecting it is an almost-certain
