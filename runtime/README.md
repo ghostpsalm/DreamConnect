@@ -18,6 +18,10 @@ file permissions on both).
    reads by the agent's `Robot.createScreenCapture` hook.
 3. Serves a **Unix-socket control channel** for input injection and geometry
    queries, forwarding to Mutter's `Notify*` methods.
+4. Holds a **wake lock** while any client is connected — a GNOME SessionManager
+   idle+suspend inhibit — so the desktop doesn't blank, auto-lock, or suspend
+   during a support session (remote input alone doesn't reset GNOME's idle
+   timer). Acquired on the first connection, released when the last drops.
 
 ## Transports
 

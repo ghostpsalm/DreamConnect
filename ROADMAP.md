@@ -114,7 +114,16 @@ backstage first.**
 · **Likelihood: ~45% (low-medium)** — gated almost entirely on the SC-side unknown.
 
 #### F3 — Wake lock / stay-awake (idle & lock inhibitor)
-**Status:** potential · **Priority:** medium
+**Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
+
+**Implemented 2026-07-13.** The daemon takes a GNOME SessionManager inhibit
+(idle + suspend, flags `12`) when the first client attaches and releases it when
+the last disconnects — verified: `InhibitedActions` 0 → 12 → 0 across connect /
+disconnect. So the desktop no longer blanks, auto-locks, or suspends mid-session
+(remote input alone doesn't reset GNOME's idle timer, which was the problem).
+Original notes below.
+
+---
 
 During a session the desktop can idle-blank or auto-lock, turning the operator's
 view into a blank/lock screen and breaking input focus. Take an inhibitor while

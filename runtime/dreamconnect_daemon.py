@@ -119,6 +119,55 @@ class Session:
         self.pipeline = None
         self.active_clients = 0  # socket connections; gates idle frame copies
         self._lock = threading.Lock()
+        self._client_lock = threading.Lock()
+        self._inhibit_cookie = None  # GNOME SessionManager wake-lock cookie
+
+    # ---- client accounting + wake lock -------------------------------------
+    def client_connected(self):
+        """A control client attached; hold a wake lock while any are connected."""
+        with self._client_lock:
+            self.active_clients += 1
+            if self.active_clients == 1:
+                self._acquire_wake_lock()
+
+    def client_disconnected(self):
+        with self._client_lock:
+            self.active_clients -= 1
+            if self.active_clients <= 0:
+                self.active_clients = 0
+                self._release_wake_lock()
+
+    def _acquire_wake_lock(self):
+        # Remote input doesn't reset GNOME's idle timer, so without this the
+        # session would blank + auto-lock mid-support-session. Inhibit idle (8)
+        # and suspend (4) via GNOME SessionManager for the duration of the
+        # connection. Best-effort: capture works regardless if this fails.
+        if self._inhibit_cookie is not None:
+            return
+        try:
+            res = self.bus.call_sync(
+                "org.gnome.SessionManager", "/org/gnome/SessionManager",
+                "org.gnome.SessionManager", "Inhibit",
+                GLib.Variant("(susu)", ("dreamconnect", 0, "remote support session active", 12)),
+                GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, -1, None)
+            self._inhibit_cookie = res.unpack()[0]
+            log(f"wake lock acquired (idle+suspend inhibited), cookie={self._inhibit_cookie}")
+        except Exception as e:  # noqa: BLE001
+            log(f"wake lock inhibit failed (session may still blank/lock): {e}")
+
+    def _release_wake_lock(self):
+        if self._inhibit_cookie is None:
+            return
+        try:
+            self.bus.call_sync(
+                "org.gnome.SessionManager", "/org/gnome/SessionManager",
+                "org.gnome.SessionManager", "Uninhibit",
+                GLib.Variant("(u)", (self._inhibit_cookie,)), None,
+                Gio.DBusCallFlags.NONE, -1, None)
+            log("wake lock released")
+        except Exception as e:  # noqa: BLE001
+            log(f"wake lock uninhibit failed: {e}")
+        self._inhibit_cookie = None
 
     def _rd(self, method, params=None, sig=None):
         v = GLib.Variant(sig, params) if sig else None
@@ -260,7 +309,7 @@ class ControlServer(threading.Thread):
             threading.Thread(target=self._client, args=(conn,), daemon=True).start()
 
     def _client(self, conn):
-        self.session.active_clients += 1
+        self.session.client_connected()
         try:
             with conn, conn.makefile("rwb", buffering=0) as f:
                 for raw in f:
@@ -271,7 +320,7 @@ class ControlServer(threading.Thread):
                     if reply is not None:
                         f.write((reply + "\n").encode("ascii"))
         finally:
-            self.session.active_clients -= 1
+            self.session.client_disconnected()
 
     def handle(self, line):
         if not line:
