@@ -21,3 +21,6 @@ ClientLaunchParameters.txt
 # python bytecode
 __pycache__/
 *.pyc
+
+# local-only code review reports
+CODE_REVIEW_*.md
