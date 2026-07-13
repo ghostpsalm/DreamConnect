@@ -99,33 +99,40 @@ sidestepping the US-keymap limit entirely. Approach 2's caller wasn't obvious vi
 native-method interception mechanics and keysym timing, not the typing itself.
 
 #### F2 — Backstage terminal as a login option
-**Status:** idea · **Priority:** medium
+**Status:** ❌ won't do (spiked 2026-07-13) · **Priority:** —
 
-Offer ScreenConnect **Backstage**-style access (a command shell + file transfer
-without joining the graphical desktop) as a first-class option, so an operator
-can get a terminal even when the graphical session isn't available, or for quick
-headless admin without spinning up the full capture/input bridge.
+**Not pursuing.** ScreenConnect has no native backstage terminal on the Linux
+client, so building one would mean re-creating a whole out-of-band channel SC
+itself doesn't provide — and a root shell is already available today (see below).
 
-*Open questions to scope:*
-- How ScreenConnect's Backstage mode is triggered/served on the Linux client,
-  and whether it works today independent of the AWT `Robot` path (Backstage may
-  not need the display bridge at all).
-- Whether it should be a login/session option surfaced by DreamConnect or simply
-  documented as already-working ScreenConnect behavior.
+**Spike result (jar decompile, 2026-07-13):**
+- **No interactive backstage on the Linux client.** SC's "Logon Session" concept
+  is implemented on Linux as a **display picker**, not a shell:
+  `ClientOSToolkit$LinuxClientToolkit.getAvailableLogonSessionInfosAsClientService()`
+  just walks `getDisplayInfos()` and emits one `Messages$LogonSessionInfo2` per
+  display/framebuffer (tagging the active console `USER_LOGON_SESSION`). The
+  `BACKSTAGE_LOGON_SESSION` capability flags exist in the shared protocol, but the
+  Linux graphical client never implements a text-console backstage. So the
+  dashboard showing nothing backstage-like is a **client-implementation limit,
+  not an account/role entitlement** — no config flip surfaces it.
+- **A root shell already exists — SC's Commands feature.** This device runs as a
+  persistent **Access agent, as root**, and the Commands tab / command bar runs
+  every line via `Extensions.runCommandMessage` → `OSToolkit$UnixToolkit`, i.e.
+  `["/bin/sh", "-c", <text>]` **as root** (`getDefaultInterpreterPath()` → `/bin/sh`).
+  It works today with **zero DreamConnect code**, in-window, independent of the
+  capture/input bridge — but it is **one-shot** commands with returned output, not
+  an interactive PTY.
 
-**Feasibility (probed 2026-07-13):** the client advertises the capability flags
-`BACKSTAGE_LOGON_SESSION` / `CAN_ENABLE_BACKSTAGE_LOGON_SESSION`, and the native
-lib exposes console-framebuffer + console-keystroke primitives — so SC's Linux
-"backstage" looks like a **raw text-console (VT)** session, not graphical. That's
-actually a plus: it would work independent of the desktop (even at the login
-screen). `tmux` is already installed, so wrapping a persistent, reattachable
-shell on that VT is trivial **once the SC side is proven**. The whole risk is
-whether SC's Linux backstage actually functions (it may be Windows-centric or
-stubbed) — if it's a no-op on Linux, this becomes "build a whole out-of-band
-channel," which is a much larger effort. **Needs a spike to enable + test SC
-backstage first.**
-· **Time: ~1 day to spike; ~3–6 days if SC backstage works, much more if not.**
-· **Likelihood: ~45% (low-medium)** — gated almost entirely on the SC-side unknown.
+**Why we're not building an interactive terminal:** the only SC-served surface
+that's both in-window *and* headless is the Commands tab, which is one-shot by
+protocol — we can't inject a new "console" panel into the operator's web UI (it's
+server-rendered; the client speaks a fixed message protocol). So an interactive
+terminal could only be either (a) a **terminal app on the shared desktop** —
+in-window but needs the graphical session up (just use the existing bridge), or
+(b) an **out-of-band `ttyd`/tmux over a port** — headless but reached *outside*
+the SC window, a new network + auth surface. Neither is "SC backstage," and the
+Commands tab covers the root-shell need. Revisit only if a concrete need for a
+persistent headless PTY appears; it'd be option (b) as a deliberate feature.
 
 #### F3 — Wake lock / stay-awake (idle & lock inhibitor)
 **Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
