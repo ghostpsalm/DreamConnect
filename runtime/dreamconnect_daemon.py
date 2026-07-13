@@ -21,7 +21,9 @@ crash can't take down the remote-support session. It also survives SC updates.
 """
 import argparse
 import base64
+import getpass
 import os
+import signal
 import socket
 import struct
 import subprocess
@@ -124,6 +126,8 @@ class Session:
         self._lock = threading.Lock()
         self._client_lock = threading.Lock()
         self._inhibit_cookie = None  # GNOME SessionManager wake-lock cookie
+        self._blank_lock = threading.Lock()
+        self._saved_gamma = None  # {crtc_id: (r,g,b)} while the monitor is blanked
 
     # ---- client accounting + wake lock -------------------------------------
     def client_connected(self):
@@ -136,8 +140,10 @@ class Session:
             if self.active_clients <= 0:
                 self.active_clients = 0
                 # Safety: if a session drops without releasing, don't leak the
-                # inhibit and leave the box permanently awake.
+                # inhibit and leave the box permanently awake, or leave the
+                # monitor blanked (gamma zeroed) with no operator attached.
                 self._release_wake_lock()
+                self.set_blank(False)
 
     def set_wake_lock(self, on):
         """Driven by ScreenConnect's AcquireWakeLock/release command (via the
@@ -180,6 +186,69 @@ class Session:
         except Exception as e:  # noqa: BLE001
             log(f"wake lock uninhibit failed: {e}")
         self._inhibit_cookie = None
+
+    # ---- monitor blanking (BlankGuestMonitor) ------------------------------
+    def _dc(self, method, params=None):
+        """Call org.gnome.Mutter.DisplayConfig."""
+        return self.bus.call_sync(
+            "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+            "org.gnome.Mutter.DisplayConfig", method, params, None,
+            Gio.DBusCallFlags.NONE, -1, None)
+
+    def set_blank(self, on):
+        """Driven by ScreenConnect's BlankGuestMonitor command (agent hook on
+        ClientOSToolkit.blankMonitorsOrWallpapers). Blanks the *physical* panel
+        by zeroing each active CRTC's gamma ramp. The ScreenCast captures the
+        composited framebuffer (pre-gamma), so the operator keeps seeing the real
+        desktop while a local bystander sees black. Unlike DPMS, gamma is CRTC
+        state, not a wake-able power mode, so the blank holds through operator
+        input. Best-effort; never raises into the control loop."""
+        with self._blank_lock:
+            if on:
+                self._blank_on()
+            else:
+                self._blank_off()
+
+    def _blank_on(self):
+        if self._saved_gamma is not None:
+            return  # already blanked
+        saved = {}  # crtc_id -> original (r,g,b); populated as we blank each
+        try:
+            serial, crtcs = self._dc("GetResources").unpack()[:2]
+            for cr in crtcs:
+                cid, cur_mode = cr[0], cr[6]
+                if cur_mode < 0:
+                    continue  # inactive CRTC
+                r, g, b = self._dc(
+                    "GetCrtcGamma", GLib.Variant("(uu)", (serial, cid))).unpack()
+                saved[cid] = (list(r), list(g), list(b))
+                z = [0] * len(r)
+                s = self._dc("GetResources").unpack()[0]  # fresh serial per set
+                self._dc("SetCrtcGamma",
+                         GLib.Variant("(uuaqaqaq)", (s, cid, z, z, z)))
+            if saved:
+                self._saved_gamma = saved
+                log(f"monitor blanked (zeroed gamma on {len(saved)} crtc(s))")
+            else:
+                log("blank requested but no active CRTC found")
+        except Exception as e:  # noqa: BLE001
+            log(f"blank failed: {e}")
+            # roll back any CRTCs we already zeroed before the failure
+            self._saved_gamma = saved or None
+            self._blank_off()
+
+    def _blank_off(self):
+        if self._saved_gamma is None:
+            return
+        for cid, (r, g, b) in self._saved_gamma.items():
+            try:
+                s = self._dc("GetResources").unpack()[0]
+                self._dc("SetCrtcGamma",
+                         GLib.Variant("(uuaqaqaq)", (s, cid, r, g, b)))
+            except Exception as e:  # noqa: BLE001
+                log(f"unblank crtc {cid} failed: {e}")
+        log("monitor unblanked (gamma restored)")
+        self._saved_gamma = None
 
     def _rd(self, method, params=None, sig=None):
         v = GLib.Variant(sig, params) if sig else None
@@ -400,6 +469,9 @@ class ControlServer(threading.Thread):
             if cmd == "WAKELOCK":  # WAKELOCK 1|0 (operator AcquireWakeLock command)
                 s.set_wake_lock(args[0] == "1")
                 return None
+            if cmd == "BLANK":  # BLANK 1|0 (operator BlankGuestMonitor command)
+                s.set_blank(args[0] == "1")
+                return None
             if cmd == "TYPE":  # TYPE <base64-utf8> (SendClipboardKeystrokes)
                 s.type_string(base64.b64decode(args[0]).decode("utf-8", "replace"))
                 return None
@@ -413,6 +485,12 @@ class ControlServer(threading.Thread):
             return f"{s.width} {s.height}"
         if cmd == "NODE":
             return str(s.node_id)
+        if cmd == "WHO":
+            # The desktop user's login name. The daemon runs as that user; the
+            # agent (root, inside ScreenConnect's JVM) can't derive it, so it
+            # asks us — it uses this to relabel the ":0" logon session in the
+            # operator's session picker with a friendlier name.
+            return getpass.getuser()
         return f"ERR unknown cmd {cmd}"
 
 
@@ -432,14 +510,29 @@ def main():
     ControlServer(args.socket, session).start()
 
     loop = GLib.MainLoop()
+
+    def _stop(*_):
+        log("shutting down")
+        loop.quit()
+        return GLib.SOURCE_REMOVE
+
+    # systemd stops us with SIGTERM (not KeyboardInterrupt), so handle both —
+    # otherwise a stop/restart while the monitor is blanked would leave the
+    # panel dark (gamma still zeroed).
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _stop)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _stop)
     try:
         loop.run()
-    except KeyboardInterrupt:
-        log("shutting down")
-        try:
-            session._rd("Stop")
-        except Exception:  # noqa: BLE001
-            pass
+    finally:
+        # Restore any local blank + wake lock before releasing the session, so
+        # we never leave the box blanked/awake after the daemon exits.
+        for cleanup in (lambda: session.set_blank(False),
+                        session._release_wake_lock,
+                        lambda: session._rd("Stop")):
+            try:
+                cleanup()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 if __name__ == "__main__":

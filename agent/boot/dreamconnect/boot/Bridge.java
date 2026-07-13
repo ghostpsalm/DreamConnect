@@ -17,6 +17,8 @@ public final class Bridge {
     private static volatile String shmPath = defaultShm();
     private static volatile String socketPath = defaultSocket();
     private static volatile boolean debug = false;
+    private static volatile String labelOverride;    // label= arg, wins over WHO
+    private static volatile String logonLabel;        // cached daemon WHO reply
 
     private static volatile DaemonClient daemon;
     private static volatile FrameReader frame;
@@ -52,6 +54,7 @@ public final class Bridge {
                 case "shm" -> shmPath = v;
                 case "socket" -> { socketPath = v; socketExplicit = true; }
                 case "debug" -> debug = Boolean.parseBoolean(v);
+                case "label" -> labelOverride = v;
                 default -> {}
             }
         }
@@ -110,6 +113,95 @@ public final class Bridge {
         } catch (Throwable t) {
             log("typeString failed: " + t);
         }
+    }
+
+    /**
+     * Driven by the agent's hook on ScreenConnect's
+     * ClientOSToolkit.blankMonitorsOrWallpapers / unblankMonitorsOrWallpapers —
+     * the operator's BlankGuestMonitor command, a no-op on the Linux client.
+     * Forwards to the daemon, which blanks the physical panel by zeroing the
+     * CRTC gamma (the ScreenCast is pre-gamma, so the operator keeps seeing the
+     * desktop). Best-effort; never throws into SC.
+     */
+    public static void setBlank(boolean on) {
+        try {
+            init();
+            daemon.input("BLANK " + (on ? "1" : "0"));
+            log("blank monitor " + (on ? "on" : "off") + " forwarded (operator command)");
+        } catch (Throwable t) {
+            log("setBlank failed: " + t);
+        }
+    }
+
+    /**
+     * The friendly name shown for the local logon session in the operator's
+     * ScreenConnect session picker, replacing the bare X display name (":0").
+     * Prefers a label= agent arg; otherwise asks the daemon (which runs as the
+     * desktop user) for the login name via WHO and caches it. Returns null if
+     * neither is available, in which case the original name is left untouched.
+     */
+    private static String logonLabel() {
+        String o = labelOverride;
+        if (o != null && !o.isEmpty()) return o;
+        String cached = logonLabel;
+        if (cached != null) return cached;
+        try {
+            init();
+            String who = daemon.send("WHO");
+            if (who != null) {
+                who = who.trim();
+                if (!who.isEmpty() && !who.startsWith("ERR")) {
+                    logonLabel = who;
+                    return who;
+                }
+            }
+        } catch (Throwable t) {
+            log("logon label fetch failed: " + t);
+        }
+        return null;
+    }
+
+    /**
+     * Driven by the agent's hook on ScreenConnect's
+     * LinuxClientToolkit.getAvailableLogonSession*(): rewrites the visible name
+     * of each returned Messages$LogonSessionInfo(2) — a bare display like ":0"
+     * or a framebuffer path — to the logged-in user's name, so the Linux
+     * session doesn't show up as a cryptic ":0" in the picker. The
+     * logonSessionID (used to actually select the session) is left untouched.
+     * Reflection, because the boot module can't compile against SC's classes.
+     * Best-effort; never throws into SC.
+     */
+    public static void relabelLogonSessions(Object ret) {
+        try {
+            if (ret == null) return;
+            String label = logonLabel();
+            if (label == null || label.isEmpty()) return;
+            if (ret instanceof Object[]) {
+                Object[] arr = (Object[]) ret;
+                boolean many = arr.length > 1;
+                for (Object e : arr) relabelOne(e, label, many);
+            } else {
+                relabelOne(ret, label, false);
+            }
+        } catch (Throwable t) {
+            log("relabelLogonSessions failed: " + t);
+        }
+    }
+
+    private static void relabelOne(Object e, String label, boolean disambiguate) throws Exception {
+        if (e == null) return;
+        java.lang.reflect.Field f = e.getClass().getField("logonSessionName");
+        Object orig = f.get(e);
+        String cur = orig == null ? null : orig.toString();
+        // Only rewrite machine-y names (a display like ":0" or a device path),
+        // never a name that's already human-readable.
+        boolean machineName = cur == null || cur.isEmpty()
+                || cur.startsWith(":") || cur.contains("/");
+        if (!machineName) return;
+        // With multiple sessions, keep them distinguishable by appending the
+        // original display so operators can still tell them apart.
+        f.set(e, disambiguate && cur != null && !cur.isEmpty()
+                ? label + " (" + cur + ")" : label);
     }
 
     /**

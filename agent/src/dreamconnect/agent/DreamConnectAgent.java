@@ -87,9 +87,29 @@ public final class DreamConnectAgent {
                                     .on(named("sendStringAsKeystrokes")))
                             .visit(Advice.to(ClipboardKeystrokeAdvice.CanSend.class)
                                     .on(named("canSendStringAsKeystrokes"))))
+                    // Logon-session labels: rename the bare ":0" display shown in
+                    // the operator's session picker to the logged-in user's name.
+                    .type(named("com.screenconnect.client.ClientOSToolkit$LinuxClientToolkit"))
+                    .transform((builder, type, cl, module, pd) -> builder
+                            .visit(Advice.to(LogonSessionAdvice.Infos.class)
+                                    .on(named("getAvailableLogonSessionInfosAsClientService")))
+                            .visit(Advice.to(LogonSessionAdvice.One.class)
+                                    .on(named("getAvailableLogonSessionAsClient"))))
+                    // Blank guest monitor: the Linux base is a hard no-op; enable
+                    // it and route to the daemon (zeroes CRTC gamma). Methods live
+                    // on base ClientOSToolkit (LinuxClientToolkit doesn't override).
+                    .type(named("com.screenconnect.client.ClientOSToolkit"))
+                    .transform((builder, type, cl, module, pd) -> builder
+                            .visit(Advice.to(BlankMonitorAdvice.Supported.class)
+                                    .on(named("isBlankingMonitorsSupported")))
+                            .visit(Advice.to(BlankMonitorAdvice.Blank.class)
+                                    .on(named("blankMonitorsOrWallpapers")))
+                            .visit(Advice.to(BlankMonitorAdvice.Unblank.class)
+                                    .on(named("unblankMonitorsOrWallpapers"))))
                     .installOn(inst);
 
-            System.err.println("[dreamconnect-agent] installed; Robot peer + OSToolkit wake-lock hooks armed");
+            System.err.println("[dreamconnect-agent] installed; Robot peer + command hooks armed "
+                    + "(wake lock, clipboard type, logon labels, blank monitor)");
         } catch (Throwable t) {
             // Never take down the client: log and let ScreenConnect run as-is.
             System.err.println("[dreamconnect-agent] premain failed; ScreenConnect continues on X11: " + t);
