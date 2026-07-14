@@ -28,11 +28,21 @@ Operator-window UI: `SelectQuality`, `ZoomToScale`, `Dock/UndockControlPanel`,
 | `BlankGuestMonitor` | Agent hook forces support on + routes to daemon, which zeroes the CRTC gamma to black the physical panel; the ScreenCast is pre-gamma so the operator keeps seeing the desktop. See [`../spikes/SPIKE1_RESULTS.md`](../spikes/SPIKE1_RESULTS.md). |
 | `SelectLogonSession` | Works; the picker's bare `:0` label is rewritten to the logged-in user's name (agent hook on `getAvailableLogonSession*` → daemon `WHO`). |
 
-## Guest-affecting — likely work as root, unverified
+## Guest-affecting — work as-is (verified by mechanism, 2026-07-14)
 
-`Reboot`, `Send/Receive Files & Folders`, `RunTool`, `TakeScreenshotTo{File,
-Clipboard}`, `OpenUrl`. These rely on root filesystem/process access or the Robot
-peer, so they should already function — worth a spot-check pass, not a build.
+Spot-checked by inspecting each Linux handler in the jars — all ride a mechanism
+we know works under the bridge, none go through a broken native path:
+
+| Command | Linux mechanism | How verified |
+|---|---|---|
+| `TakeScreenshotTo{File,Clipboard}` | `ClientScreenCapturer$AwtMonitorManager` builds a `java.awt.Robot` → `createScreenCapture` → our peer's shm frames; `canCaptureScreen()` → `true` | code path (same as the live view) |
+| `OpenUrl` | `LinuxClientToolkit`: `xdg-open "<url>" &` | code + `xdg-open` present on host |
+| `Reboot` | root process action (SC runs as root) | code; not live-triggered |
+| `RunTool` | toolbox item run as root via shell (same class as the Commands `/bin/sh -c` path) | code |
+| `Send/Receive Files & Folders` | client file I/O as root | code (root FS access) |
+
+Screenshot and OpenUrl are strongest-verified (peer path + `xdg-open` confirmed);
+Reboot/RunTool/file-transfer are verified by code, not a live operator click.
 
 ## Guest-affecting — investigated, not doing
 
