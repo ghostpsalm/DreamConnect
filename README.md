@@ -98,8 +98,21 @@ Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path
 ## Use
 
 After installing, connect to the machine from your ScreenConnect relay/portal as
-usual. You'll see the live Wayland desktop and can drive it with mouse and
-keyboard. Copy/paste works via clipboard sharing.
+usual — you'll see the live Wayland desktop and can drive it with low-latency
+mouse and keyboard (correct scroll direction included).
+
+Operator commands that work through the bridge:
+
+- **Screen capture + mouse/keyboard control** — the real desktop, not black.
+- **Copy/paste** (clipboard sharing) and **Insert clipboard text** — types the
+  operator's clipboard on the remote, including non-US/Unicode text (via a
+  clipboard-paste fallback).
+- **Wake lock** — keeps the session from idle-blanking or auto-locking mid-session.
+- **Blank guest monitor** — darkens the physical panel for local privacy while
+  you keep seeing the desktop (via CRTC gamma, so it holds through input).
+- **Block guest input**, **screenshots**, **Open URL**, **Reboot**, **Run tool**,
+  and **file transfer** all work as usual.
+- The session/display picker shows the **logged-in user's name** instead of `:0`.
 
 ## Uninstall
 
@@ -120,15 +133,13 @@ Environment (see [Scope](#scope--maturity--read-this-first)):
   through ScreenConnect after a reboot without **autologin**.
 
 Features:
-- **"Insert clipboard text"** doesn't work (native code path that bypasses
-  `Robot`); share clipboards and paste manually instead.
 - **Single monitor** only, and the keymap assumes a **US-ish physical layout**.
 - Some hosts need a workaround for a broken Xwayland `:1` display (the installer
   applies it) — see [Troubleshooting](docs/troubleshooting.md).
 
-All of the above — plus broader compositor/distro support, clipboard typing, a
-Backstage terminal, and hardening — is tracked in [`ROADMAP.md`](ROADMAP.md).
-It's early; issues and PRs (especially other compositors/distros) are welcome.
+Broader compositor/distro support and further hardening are tracked in
+[`ROADMAP.md`](ROADMAP.md). It's early; issues and PRs (especially other
+compositors/distros) are welcome.
 
 ## Documentation
 

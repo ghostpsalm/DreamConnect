@@ -7,12 +7,12 @@ and what's planned.
 
 ---
 
-## v1.0 — current (shipped)
+## Shipped (current — v1.2)
 
-The core bridge, deployed and verified against a live operator session through
-the real ScreenConnect client.
+The core bridge plus the operator-command set, deployed and verified against a
+live operator session through the real ScreenConnect client.
 
-### Features
+### Core (v1.0)
 - **Headless capture + input, no consent dialog** — drives the low-level
   `org.gnome.Mutter.{RemoteDesktop,ScreenCast}` D-Bus API directly, so no
   interactive "Allow" is ever required (Spike 0).
@@ -33,12 +33,24 @@ the real ScreenConnect client.
   both systemd services. `--uninstall` reverses it.
 - **Clipboard** — copy/paste works via ScreenConnect's clipboard sharing.
 
+### Operator commands (v1.2)
+See [`docs/screenconnect-commands.md`](docs/screenconnect-commands.md) for the
+full per-command coverage.
+- **Insert clipboard text** ([F1](#f1--insert-clipboard-text)) — types the
+  operator's clipboard on the remote, incl. non-US/Unicode via a paste fallback.
+- **Wake lock** ([F3](#f3--wake-lock--stay-awake-idle--lock-inhibitor)) — the
+  operator AcquireWakeLock command inhibits idle-blank/auto-lock for the session.
+- **Blank guest monitor** — darkens the physical panel for local privacy while
+  the operator keeps seeing the desktop, via CRTC gamma (holds through input).
+- **Logon-session rename** — the picker shows the logged-in user's name, not `:0`.
+- **Verified working as-is** — block guest input, screenshots, Open URL, reboot,
+  run tool, and file transfer.
+
 ### Known limitations (tracked below)
 - **GNOME/Mutter only** — no KDE/wlroots yet → [V2-2](#v2-2--wayland-everywhere-other-compositors).
 - **Fedora-tested**; installer is Fedora-shaped → [H5](#h5--distro-agnostic-install).
 - **Must be logged in**; no login through the greeter after reboot without
   autologin → [H6](#h6--reboot-survival--autologin).
-- "Insert clipboard text" does not work → [F1](#f1--insert-clipboard-text).
 - Keymap assumes a US-ish physical layout; non-US layouts, dead keys, and some
   keypad keys may be imperfect → [H1](#h1--keymap-fidelity).
 - Single monitor only; multi-monitor is untested → [H2](#h2--multi-monitor).
@@ -51,7 +63,7 @@ the real ScreenConnect client.
 ### Features
 
 #### F1 — Insert clipboard text
-**Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
+**Status:** ✅ DONE (v1.2) · **Priority:** medium
 
 **Implemented 2026-07-13.** SC's `SendClipboardKeystrokes` is handled by
 `OSToolkit$LinuxPackageToolkit.sendStringAsKeystrokes`, which is **console-only**
@@ -135,7 +147,7 @@ Commands tab covers the root-shell need. Revisit only if a concrete need for a
 persistent headless PTY appears; it'd be option (b) as a deliberate feature.
 
 #### F3 — Wake lock / stay-awake (idle & lock inhibitor)
-**Status:** ✅ DONE (in `main`, unreleased) · **Priority:** medium
+**Status:** ✅ DONE (v1.2) · **Priority:** medium
 
 **Implemented 2026-07-13.** Driven by the operator's actual **AcquireWakeLock**
 command — the agent hooks `com.screenconnect.OSToolkit.acquireWakeLock` /
@@ -309,5 +321,11 @@ a time.
 ---
 
 ## Version history
+- **v1.2** (2026-07-15) — operator commands: insert clipboard text (F1), wake
+  lock (F3), blank guest monitor (CRTC gamma), logon-session rename; spot-checked
+  screenshot/OpenUrl/reboot/run-tool/file-transfer as working. Closed backstage
+  (F2) and Ctrl-Alt-Del as not-applicable on Linux.
+- **v1.1** (2026-07-13) — public release polish: MIT license, release-ready
+  README, curl|bash network installer, docs split out.
 - **v1.0** (2026-07-13) — first working release: headless capture + input,
   low-latency control, systemd install, `:1` host workaround.
