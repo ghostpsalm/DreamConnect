@@ -122,6 +122,8 @@ class Session:
         self.node_id = None
         self.width = self.height = 0
         self.pipeline = None
+        self._sub_ids = []          # D-Bus signal subscriptions, cleared on restart
+        self._restarting = False    # guards against overlapping session restarts
         self.active_clients = 0  # socket connections; gates idle frame copies
         self._lock = threading.Lock()
         self._client_lock = threading.Lock()
@@ -256,6 +258,17 @@ class Session:
                                   v, None, Gio.DBusCallFlags.NONE, -1, None)
 
     def start(self):
+        # Drop any signal subscriptions from a previous session — start() is
+        # re-entered on Mutter-close recovery, and the old rd_path/stream_path
+        # are gone, so leaving them subscribed would leak and (worse) let a
+        # future Closed fire _on_closed multiple times, cascading restarts.
+        for sid in self._sub_ids:
+            try:
+                self.bus.signal_unsubscribe(sid)
+            except Exception:  # noqa: BLE001
+                pass
+        self._sub_ids = []
+
         self.rd_path = self.bus.call_sync(
             RD_DEST, RD_PATH, RD_IFACE, "CreateSession", None, None,
             Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
@@ -276,18 +289,23 @@ class Session:
             None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
         log(f"ScreenCast session {self.sc_path} stream {self.stream_path} monitor={self.monitor}")
 
-        self.bus.signal_subscribe(
+        self._sub_ids.append(self.bus.signal_subscribe(
             SC_DEST, SC_STREAM_IFACE, "PipeWireStreamAdded", self.stream_path, None,
-            Gio.DBusSignalFlags.NONE, self._on_stream_added)
-        self.bus.signal_subscribe(
+            Gio.DBusSignalFlags.NONE, self._on_stream_added))
+        self._sub_ids.append(self.bus.signal_subscribe(
             RD_DEST, RD_SESSION_IFACE, "Closed", self.rd_path, None,
-            Gio.DBusSignalFlags.NONE, self._on_closed)
+            Gio.DBusSignalFlags.NONE, self._on_closed))
 
         # Start the RD session; the linked ScreenCast session starts with it.
         self._rd("Start")
         log("session started (awaiting PipeWireStreamAdded)")
 
     def _on_closed(self, *_):
+        # Re-entrancy guard: one Closed should schedule exactly one restart, even
+        # if duplicate/late signals arrive before the new session is up.
+        if self._restarting:
+            return
+        self._restarting = True
         log("!! Mutter session closed; restarting in 1s")
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
@@ -297,6 +315,7 @@ class Session:
     def _restart(self):
         try:
             self.start()
+            self._restarting = False
         except Exception as e:  # noqa: BLE001
             log(f"restart failed: {e}; retrying in 2s")
             GLib.timeout_add_seconds(2, self._restart)
