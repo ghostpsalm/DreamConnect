@@ -335,6 +335,10 @@ a time.
 ---
 
 ## Version history
+- **v1.3** (2026-07-19) — hardening: distro-agnostic dependency install
+  (apt/dnf/zypper/pacman) (H5), opt-in GDM autologin for reboot survival (H6),
+  and reconnect/resilience fixes — session-restart subscription leak + restart
+  guard, verified daemon-bounce recovery (H4).
 - **v1.2** (2026-07-15) — operator commands: insert clipboard text (F1), wake
   lock (F3), blank guest monitor (CRTC gamma), logon-session rename; spot-checked
   screenshot/OpenUrl/reboot/run-tool/file-transfer as working. Closed backstage
