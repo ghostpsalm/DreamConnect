@@ -48,9 +48,10 @@ full per-command coverage.
 
 ### Known limitations (tracked below)
 - **GNOME/Mutter only** — no KDE/wlroots yet → [V2-2](#v2-2--wayland-everywhere-other-compositors).
-- **Fedora-tested**; installer is Fedora-shaped → [H5](#h5--distro-agnostic-install).
-- **Must be logged in**; no login through the greeter after reboot without
-  autologin → [H6](#h6--reboot-survival--autologin).
+- **Fedora-tested**; installer supports apt/dnf/zypper/pacman but only Fedora is
+  verified end to end → [H5](#h5--distro-agnostic-install).
+- **Must be logged in**; the installer can enable autologin (opt-in) for reboot
+  survival → [H6](#h6--reboot-survival--autologin).
 - Keymap assumes a US-ish physical layout; non-US layouts, dead keys, and some
   keypad keys may be imperfect → [H1](#h1--keymap-fidelity).
 - Single monitor only; multi-monitor is untested → [H2](#h2--multi-monitor).
@@ -244,27 +245,40 @@ Confirm scroll step units/granularity match operator expectations across apps
 events.
 
 #### H4 — Reconnect & resilience
-Exercise daemon restart, Mutter session `Closed` recovery, and ScreenConnect
-update survival end to end; make sure the agent re-attaches cleanly after a
-daemon bounce.
+**Status:** ✅ DONE · **Priority:** medium
+
+Verified end to end: a daemon bounce recovers (capture resumes, a client
+reconnects to live frames); the shm inode is stable across restart so the agent's
+long-lived mmap survives, and the socket is rebound so `DaemonClient.ensure()`
+reconnects on the next command; the unit is `Restart=always` with
+`StartLimitIntervalSec=0` for crash recovery. Fixed a real bug in the Mutter
+`Closed` recovery path: `start()` re-subscribed the D-Bus signals on every
+restart without dropping the old ones (leak → duplicate `_on_closed` → cascading
+restarts); now subscriptions are tracked/unsubscribed and a `_restarting` guard
+makes one close schedule exactly one restart. SC update survival rides the
+`JAVA_TOOL_OPTIONS` drop-in, which persists across client package updates.
 
 #### H5 — Distro-agnostic install
-**Status:** planned · **Priority:** medium
+**Status:** ✅ DONE (Fedora tested; others best-effort) · **Priority:** medium
 
-`install.sh` is Fedora-shaped: `dnf` for the probe tools, and GDM assumptions in
-the autologin warning. The agent + daemon are distro-neutral. Detect the package
-manager (apt/dnf/pacman/zypper) and install deps accordingly, generalise the
-display-manager/autologin guidance, and document the manual steps per distro.
-The `:1` probe wrapper and systemd wiring are already portable.
+`install.sh` now detects the package manager (apt/dnf/zypper/pacman) and installs
+the full runtime dep set — X11 probe tools, python3 + GObject, GStreamer PipeWire
++ base plugins, wl-clipboard — plus a JDK fallback when `javac` is missing for the
+source build. Best-effort: failures warn with the manual package list rather than
+aborting; `DREAMCONNECT_SKIP_DEPS=1` opts out. Per-distro package names are
+documented in [`docs/troubleshooting.md`](docs/troubleshooting.md). Only Fedora is
+tested end to end; other distros' names are best-effort.
 
 #### H6 — Reboot survival / autologin
-**Status:** planned · **Priority:** medium
+**Status:** ✅ DONE · **Priority:** medium
 
-The bridge needs a logged-in graphical session; it can't drive the GDM greeter,
-so a reboot without autologin leaves it unreachable (v1.x prints a warning only).
-Offer to configure display-manager autologin during install (with explicit
-consent, given the security trade-off), and verify reboot survival end to end.
-See also F3 (wake lock) for the idle/lock case.
+`install.sh` configures GDM autologin on explicit opt-in
+(`DREAMCONNECT_AUTOLOGIN=1`) — a section-aware, idempotent edit of
+`/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up, and
+is reverted on `--uninstall`. Without the opt-in it warns and points at it. Warns
+if `WaylandEnable=false` (the bridge needs a Wayland session at boot). Reboot
+survival itself is the operator's on-device verification. See F3 (wake lock) for
+the idle/lock case.
 
 ---
 

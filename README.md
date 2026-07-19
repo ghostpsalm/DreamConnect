@@ -36,8 +36,9 @@ box. Today it targets exactly that:
   [per-distro packages](docs/troubleshooting.md)).
 - **The machine must be logged in.** It attaches to an existing graphical
   session and can't drive the login greeter — so **you can't log in through
-  ScreenConnect after a reboot unless autologin is enabled** (the installer
-  warns you).
+  ScreenConnect after a reboot unless autologin is enabled**. The installer can
+  configure GDM autologin for you on explicit opt-in
+  (`DREAMCONNECT_AUTOLOGIN=1`); otherwise it just warns.
 
 Broadening to other compositors and distros is explicitly on the
 [roadmap](ROADMAP.md). See [Limitations](#limitations) for the full list.
@@ -77,7 +78,15 @@ curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/d
 
 The installer auto-detects the desktop user, the ScreenConnect unit, and the
 capture monitor; builds the agent; deploys to `/opt/dreamconnect`; starts the
-runtime daemon; and injects the agent into the ScreenConnect service.
+runtime daemon; and injects the agent into the ScreenConnect service. It installs
+dependencies via your package manager (`apt`/`dnf`/`zypper`/`pacman`).
+
+For **unattended / reboot survival**, opt into autologin — a security trade-off,
+since the box then boots straight into the desktop with no login prompt:
+
+```sh
+curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh | sudo DREAMCONNECT_AUTOLOGIN=1 bash
+```
 
 > **This runs code as root.** Piping to `sudo bash` trusts GitHub + TLS with no
 > further integrity check. If you'd rather read it first:
@@ -133,7 +142,8 @@ Environment (see [Scope](#scope--maturity--read-this-first)):
   distro-agnostic; other distros need manual dependency install + autologin
   setup for now. *(Roadmap.)*
 - **Must be logged in** — can't drive the GDM login greeter, so no logging in
-  through ScreenConnect after a reboot without **autologin**.
+  through ScreenConnect after a reboot without **autologin** (the installer can
+  set this up for you with `DREAMCONNECT_AUTOLOGIN=1`).
 
 Features:
 - **Single monitor** only, and the keymap assumes a **US-ish physical layout**.

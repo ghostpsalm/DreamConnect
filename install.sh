@@ -13,6 +13,8 @@
 #   MONITOR=<connector>        capture source (default: auto-detected / HDMI-2)
 #   INSTALL_DIR=<path>         default /opt/dreamconnect
 #   DREAMCONNECT_SKIP_DEPS=1   don't touch the package manager (deps preinstalled)
+#   DREAMCONNECT_AUTOLOGIN=1   configure GDM autologin so the bridge survives a
+#                              reboot unattended (security trade-off — opt-in)
 #
 # Dependencies are installed via the detected package manager (apt/dnf/zypper/
 # pacman); see docs/troubleshooting.md for the per-distro package list if your
@@ -50,6 +52,45 @@ RUN_USER=(sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
 SC_UNIT="$(systemctl list-unit-files --no-legend 'connectwisecontrol-*.service' 2>/dev/null \
            | awk '{print $1}' | head -1)"
 
+# --- GDM autologin (reboot survival) helpers --------------------------------
+gdm_conf() {  # path to the GDM config, or empty if GDM isn't present
+  local c
+  for c in /etc/gdm/custom.conf /etc/gdm3/custom.conf; do
+    [ -f "$c" ] && { echo "$c"; return; }
+  done
+}
+
+# Set AutomaticLoginEnable/AutomaticLogin under [daemon], preserving the rest of
+# the file (comments included). Idempotent: strips any prior autologin keys in
+# the section first. Backs up once to <conf>.dreamconnect.bak.
+enable_autologin() {
+  local conf="$1" user="$2" tmp
+  [ -f "$conf.dreamconnect.bak" ] || cp -a "$conf" "$conf.dreamconnect.bak"
+  tmp="$(mktemp)"
+  awk -v user="$user" '
+    BEGIN { in_daemon = 0; done = 0 }
+    /^\[.*\]$/ {
+      in_daemon = ($0 == "[daemon]"); print
+      if (in_daemon) { print "AutomaticLoginEnable=true"; print "AutomaticLogin=" user; done = 1 }
+      next
+    }
+    { if (in_daemon && $0 ~ /^[[:space:]]*#?[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
+    END { if (!done) { print ""; print "[daemon]"; print "AutomaticLoginEnable=true"; print "AutomaticLogin=" user } }
+  ' "$conf" > "$tmp" && cat "$tmp" > "$conf"
+  rm -f "$tmp"
+}
+
+# Undo: drop the autologin keys we set under [daemon]. Leaves the rest intact.
+disable_autologin() {
+  local conf="$1" tmp
+  tmp="$(mktemp)"
+  awk '
+    /^\[.*\]$/ { in_daemon = ($0 == "[daemon]"); print; next }
+    { if (in_daemon && $0 ~ /^[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
+  ' "$conf" > "$tmp" && cat "$tmp" > "$conf"
+  rm -f "$tmp"
+}
+
 uninstall() {
   echo ">> uninstalling"
   "${RUN_USER[@]}" systemctl --user disable --now dreamconnect-daemon.service 2>/dev/null || true
@@ -65,6 +106,12 @@ uninstall() {
     [ -L "/usr/local/bin/$t" ] && rm -f "/usr/local/bin/$t"
   done
   rm -f /usr/local/bin/.dc-xprobe-wrapper
+  # Revert autologin only if we set it up (our backup marker exists).
+  local conf; conf="$(gdm_conf)"
+  if [ -n "$conf" ] && [ -f "$conf.dreamconnect.bak" ]; then
+    disable_autologin "$conf"
+    echo ">> disabled the autologin we configured in $conf (backup: $conf.dreamconnect.bak)"
+  fi
   echo ">> removed service wiring + probe wrappers (left $INSTALL_DIR in place)"
   exit 0
 }
@@ -191,19 +238,36 @@ else
   echo "   Set JAVA_TOOL_OPTIONS manually per systemd/dreamconnect-agent.conf."
 fi
 
-# --- reboot-survival check: the graphical session must autostart ------------
-# The daemon is WantedBy=graphical-session.target, which only fires when a
-# graphical session logs in. Without GDM autologin, a reboot leaves the login
-# screen up and the bridge down until someone logs in at the console.
-if ! grep -qiE '^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' \
-       /etc/gdm/custom.conf 2>/dev/null; then
-  echo "!! WARNING: GDM autologin is not enabled — the bridge will NOT survive a reboot."
-  echo "   The daemon needs a graphical Wayland session at boot. To run unattended,"
-  echo "   enable autologin for $USER_NAME in /etc/gdm/custom.conf:"
-  echo "       [daemon]"
-  echo "       AutomaticLoginEnable=true"
-  echo "       AutomaticLogin=$USER_NAME"
-  echo "   (then reboot to verify)."
+# --- reboot survival: display-manager autologin -----------------------------
+# The daemon is WantedBy=graphical-session.target, which only fires once a
+# graphical session logs in; the bridge can't drive the GDM greeter. So an
+# unattended box must autologin at boot. That's a security trade-off (physical
+# access -> an already-unlocked session), so we only configure it on explicit
+# opt-in (DREAMCONNECT_AUTOLOGIN=1); otherwise we warn and point at the opt-in.
+GDM_CONF="$(gdm_conf)"
+if [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
+  if [ -n "$GDM_CONF" ]; then
+    echo ">> enabling GDM autologin for $USER_NAME in $GDM_CONF (DREAMCONNECT_AUTOLOGIN=1)"
+    enable_autologin "$GDM_CONF" "$USER_NAME"
+    echo "   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt."
+    echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
+    if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' "$GDM_CONF"; then
+      echo "   NOTE: WaylandEnable=false is set — the bridge needs a *Wayland* session."
+      echo "   Make sure $USER_NAME's default session is GNOME on Wayland, not Xorg."
+    fi
+  else
+    echo "!! DREAMCONNECT_AUTOLOGIN=1 but no GDM found (/etc/gdm{,3}/custom.conf)."
+    echo "   DreamConnect targets GNOME/GDM; enable autologin for $USER_NAME on your"
+    echo "   display manager by hand to survive reboots."
+  fi
+elif [ -n "$GDM_CONF" ] \
+     && grep -qiE '^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' "$GDM_CONF"; then
+  echo ">> autologin already enabled in $GDM_CONF — the bridge will survive a reboot."
+else
+  echo "!! WARNING: autologin is not enabled — the bridge will NOT survive a reboot."
+  echo "   It needs a graphical Wayland session at boot but can't drive the greeter."
+  echo "   Re-run with DREAMCONNECT_AUTOLOGIN=1 to configure GDM autologin for $USER_NAME"
+  echo "   (security trade-off: physical access -> an unlocked session), or set it up manually."
 fi
 
 echo ">> done. Check:  ${RUN_USER[*]} systemctl --user status dreamconnect-daemon"
