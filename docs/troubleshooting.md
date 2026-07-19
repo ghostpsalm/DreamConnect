@@ -36,11 +36,31 @@ The client's display probe then gets EOF and proceeds to connect within seconds.
 
 ## "Insert clipboard text" does nothing
 
-Expected in v1.0. That feature uses ScreenConnect's native
-`LinuxNative.sendStringAsKeystrokes` (in `libscnative`), which bypasses
-`java.awt.Robot` — so the agent's peer never sees it — and doesn't function under
-Wayland. **Workaround:** enable clipboard sharing and paste manually (Ctrl+V),
-which works. Tracked as ROADMAP item **F1**.
+Works as of **v1.2** (ROADMAP **F1**): the agent hooks the console-only native
+path and routes the text to the daemon, which types it via Mutter — keymappable
+characters directly, and anything else (non-US/Unicode) via a `wl-copy` + Ctrl+V
+paste fallback. If it does nothing:
+
+- Confirm **`wl-clipboard`** is installed (the paste fallback needs `wl-copy`).
+- Check the client log for `clipboard keystrokes forwarded (<n> chars)` and the
+  daemon log for `pasted <n> chars` / typed output.
+
+## Dependencies (per distro)
+
+`install.sh` installs these via the detected package manager. If your distro or a
+package name isn't covered, install the equivalents by hand and re-run with
+`DREAMCONNECT_SKIP_DEPS=1`:
+
+| Need | Fedora (`dnf`) | Debian/Ubuntu (`apt`) | Arch (`pacman`) | openSUSE (`zypper`) |
+|---|---|---|---|---|
+| X11 probe tools | `xdpyinfo xrandr xwininfo` | `x11-utils x11-xserver-utils` | `xorg-xdpyinfo xorg-xrandr xorg-xwininfo` | `xdpyinfo xrandr xwininfo` |
+| Python + GObject | `python3-gobject` | `python3-gi gir1.2-gstreamer-1.0` | `python-gobject` | `python3-gobject` |
+| GStreamer PipeWire + base | `pipewire-gstreamer gstreamer1-plugins-base` | `gstreamer1.0-pipewire gstreamer1.0-plugins-base` | `gst-plugin-pipewire gst-plugins-base` | `gstreamer-plugins-pipewire gstreamer-plugins-base` |
+| Clipboard paste fallback | `wl-clipboard` | `wl-clipboard` | `wl-clipboard` | `wl-clipboard` |
+| JDK (to build the agent) | `java-latest-openjdk-devel` | `default-jdk` | `jdk-openjdk` | `java-21-openjdk-devel` |
+
+Non-Fedora names are best-effort — corrections welcome. Only `dnf`/Fedora is
+tested end to end today.
 
 ## Checking status
 

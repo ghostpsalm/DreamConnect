@@ -29,9 +29,11 @@ box. Today it targets exactly that:
 - **GNOME/Mutter only.** The headless, no-consent path uses GNOME's
   `org.gnome.Mutter.*` D-Bus API. **KDE/KWin and wlroots (Sway, etc.) are not
   supported yet.**
-- **Fedora-tested.** The installer is Fedora-shaped (uses `dnf`, assumes GDM).
-  The agent + daemon themselves aren't distro-specific, but on other distros you
-  install dependencies and configure autologin by hand for now.
+- **Fedora-tested.** The installer installs dependencies via the detected package
+  manager (`apt`/`dnf`/`zypper`/`pacman`) and assumes GDM for the autologin
+  guidance. The agent + daemon aren't distro-specific, but only Fedora is verified
+  end to end — other distros are best-effort (package names may need tweaks; see
+  [per-distro packages](docs/troubleshooting.md)).
 - **The machine must be logged in.** It attaches to an existing graphical
   session and can't drive the login greeter — so **you can't log in through
   ScreenConnect after a reboot unless autologin is enabled** (the installer
@@ -60,9 +62,10 @@ headless/unattended. Full details in [`docs/design.md`](docs/design.md).
   (`connectwisecontrol-*.service`).
 - `systemd`, a **JDK** (built/tested on JDK 25), and `python3` with GObject +
   GStreamer PipeWire.
-- **Tested on Fedora**, where the installer pulls missing dependencies via `dnf`.
-  Other distros: the agent + daemon work the same, but you install the deps and
-  set up autologin yourself for now.
+- **Tested on Fedora.** The installer pulls dependencies via the detected package
+  manager (`apt`/`dnf`/`zypper`/`pacman`) — see
+  [per-distro packages](docs/troubleshooting.md). Only Fedora is verified end to
+  end; other distros are best-effort.
 
 ## Install
 

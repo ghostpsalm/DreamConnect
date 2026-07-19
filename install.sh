@@ -12,6 +12,11 @@
 #   DREAMCONNECT_USER=<name>   desktop user (default: auto-detected graphical session)
 #   MONITOR=<connector>        capture source (default: auto-detected / HDMI-2)
 #   INSTALL_DIR=<path>         default /opt/dreamconnect
+#   DREAMCONNECT_SKIP_DEPS=1   don't touch the package manager (deps preinstalled)
+#
+# Dependencies are installed via the detected package manager (apt/dnf/zypper/
+# pacman); see docs/troubleshooting.md for the per-distro package list if your
+# distro isn't covered or a name differs.
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/dreamconnect}"
@@ -84,9 +89,62 @@ echo ">> SC unit      : ${SC_UNIT:-<none found>}"
 echo ">> capture mon  : $MONITOR"
 echo ">> install dir  : $INSTALL_DIR"
 
+# --- dependencies (distro-agnostic, best-effort) ----------------------------
+# The agent + daemon are distro-neutral, but they need: the X11 probe tools SC
+# uses for geometry (xdpyinfo/xrandr/xwininfo), python3 + GObject introspection,
+# the GStreamer PipeWire source + base plugins (pipewiresrc/videoconvert/appsink),
+# wl-clipboard (the "insert clipboard text" paste fallback), and a JDK to build
+# the agent. Names differ per distro; failures warn rather than abort so a box
+# that already has them (or uses an unlisted PM) still installs.
+detect_pm() {
+  local pm
+  for pm in apt-get dnf zypper pacman; do
+    command -v "$pm" >/dev/null 2>&1 && { echo "$pm"; return; }
+  done
+}
+PM="$(detect_pm)"
+
+pm_install() {  # best-effort; non-zero on failure
+  case "$PM" in
+    apt-get) DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" ;;
+    dnf)     dnf install -y "$@" ;;
+    zypper)  zypper --non-interactive install "$@" ;;
+    pacman)  pacman -Sy --noconfirm --needed "$@" ;;
+    *)       return 1 ;;
+  esac
+}
+
+case "$PM" in
+  dnf)     DEPS=(xdpyinfo xrandr xwininfo python3-gobject pipewire-gstreamer gstreamer1-plugins-base wl-clipboard); JDK_PKG=java-latest-openjdk-devel ;;
+  apt-get) DEPS=(x11-utils x11-xserver-utils python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-pipewire gstreamer1.0-plugins-base wl-clipboard); JDK_PKG=default-jdk ;;
+  pacman)  DEPS=(xorg-xdpyinfo xorg-xrandr xorg-xwininfo python-gobject gst-plugin-pipewire gst-plugins-base wl-clipboard); JDK_PKG=jdk-openjdk ;;
+  zypper)  DEPS=(xdpyinfo xrandr xwininfo python3-gobject gstreamer-plugins-pipewire gstreamer-plugins-base wl-clipboard); JDK_PKG=java-21-openjdk-devel ;;
+  *)       DEPS=(); JDK_PKG="" ;;
+esac
+
+if [ "${DREAMCONNECT_SKIP_DEPS:-}" = "1" ]; then
+  echo ">> skipping dependency install (DREAMCONNECT_SKIP_DEPS=1)"
+elif [ -n "$PM" ]; then
+  echo ">> installing dependencies via $PM"
+  pm_install "${DEPS[@]}" >/dev/null 2>&1 \
+    || echo "!! some dependencies failed via $PM; install manually: ${DEPS[*]}"
+else
+  echo "!! no supported package manager (apt/dnf/zypper/pacman) found."
+  echo "   Ensure these are installed: xdpyinfo xrandr xwininfo, python3 + GObject"
+  echo "   introspection, GStreamer PipeWire + base plugins, wl-clipboard, a JDK."
+fi
+
 # --- build the agent if not already built -----------------------------------
 AGENT_JAR="$HERE/agent/target/dist/dreamconnect-agent.jar"
-[ -f "$AGENT_JAR" ] || { echo ">> building agent"; bash "$HERE/agent/build.sh" >/dev/null; }
+if [ ! -f "$AGENT_JAR" ]; then
+  if ! command -v javac >/dev/null 2>&1; then
+    echo ">> javac not found; installing a JDK (${JDK_PKG:-none})"
+    [ -n "$JDK_PKG" ] && pm_install "$JDK_PKG" >/dev/null 2>&1 || true
+    command -v javac >/dev/null 2>&1 \
+      || die "javac is required to build the agent; install a JDK (17+) and re-run"
+  fi
+  echo ">> building agent"; bash "$HERE/agent/build.sh" >/dev/null
+fi
 
 # --- deploy files -----------------------------------------------------------
 # Root-owned, not group/other-writable on purpose: anyone able to write the
@@ -98,15 +156,12 @@ install -d -o root -g root -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/runtime"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
 install -o root -g root -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
 
-# --- host fix: display-detection tools + broken-:1 skip wrapper --------------
-# ScreenConnect detects screen geometry with xdpyinfo/xrandr/xwininfo; without
-# them it reports "no display information". And this host's Xwayland :1 hangs
-# X probes, freezing the session periodically. See host-fixes/ for the why.
-echo ">> installing display-probe tools + broken-display skip wrapper"
-if command -v dnf >/dev/null 2>&1; then
-  dnf install -y xdpyinfo xrandr xwininfo >/dev/null 2>&1 || \
-    echo "!! could not install xdpyinfo/xrandr/xwininfo; install them manually"
-fi
+# --- host fix: broken-:1 display skip wrapper -------------------------------
+# ScreenConnect detects screen geometry with xdpyinfo/xrandr/xwininfo (installed
+# above). On hosts whose Xwayland :1 hangs X probes, that freezes the session
+# periodically, so we shadow those tools with a wrapper that fails :1 probes
+# instantly and passes everything else through. See host-fixes/ for the why.
+echo ">> installing broken-display skip wrapper"
 install -m 0755 "$HERE/host-fixes/xprobe-skip-broken-display.sh" \
   /usr/local/bin/.dc-xprobe-wrapper
 for t in xdpyinfo xrandr xwininfo xrdb; do ln -sf .dc-xprobe-wrapper "/usr/local/bin/$t"; done
