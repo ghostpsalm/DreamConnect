@@ -6,39 +6,44 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Translates AWT input codes (what ScreenConnect passes to Robot) into the
- * evdev codes Mutter's RemoteDesktop Notify* methods expect.
+ * Translates AWT input codes (what ScreenConnect passes to Robot) into what
+ * Mutter's RemoteDesktop Notify* methods expect.
  *
- * Keyboard: AWT virtual keycode -> evdev keycode (Linux input-event-codes.h,
- * i.e. KEY_A=30, NOT the X11 keycode which is +8). This assumes a US-ish
- * physical layout, which matches how a normal X11 Robot injects via XTEST.
- * Coverage is the common keyboard; gaps return -1 so the caller can fall back
- * to keysym injection. (Keymap fidelity is a known hardening area.)
+ * Keyboard is split two ways:
+ *   - Character-producing keys (letters, digits, punctuation) map to an X11
+ *     **keysym** (see {@link #keysym}). Mutter's NotifyKeyboardKeysym then picks
+ *     whatever keycode produces that symbol *on the guest's own layout*, so the
+ *     right character lands regardless of the guest keymap (US, QWERTZ, AZERTY,
+ *     …). We send the *base* (unshifted) keysym; an operator-held Shift/AltGr,
+ *     injected as an evdev modifier below, promotes it (verified: evdev-Shift +
+ *     keysym 'a' -> 'A'; Ctrl held + keysym 'c' -> Ctrl+C).
+ *   - Everything else — modifiers, whitespace/control, navigation, function row,
+ *     numpad, locks — maps to an **evdev keycode** (Linux input-event-codes.h,
+ *     KEY_A=30, not the X11 +8 keycode). These are physical/functional keys that
+ *     mean the same thing on every layout, so position-based injection is right.
+ *
+ * Gaps return -1 so the caller can fall back ({@link #fallbackKeysym}) or drop.
  */
 final class AwtEvdev {
     // evdev button codes
     static final int BTN_LEFT = 0x110, BTN_RIGHT = 0x111, BTN_MIDDLE = 0x112;
 
-    private static final Map<Integer, Integer> KEY = new HashMap<>();
+    private static final Map<Integer, Integer> KEY = new HashMap<>();   // vk -> evdev
+    private static final Map<Integer, Integer> KSYM = new HashMap<>();  // vk -> X11 keysym
 
     private static void m(int vk, int evdev) { KEY.put(vk, evdev); }
+    private static void k(int vk, int keysym) { KSYM.put(vk, keysym); }
 
     static {
-        // letters
-        m(KeyEvent.VK_A, 30); m(KeyEvent.VK_B, 48); m(KeyEvent.VK_C, 46);
-        m(KeyEvent.VK_D, 32); m(KeyEvent.VK_E, 18); m(KeyEvent.VK_F, 33);
-        m(KeyEvent.VK_G, 34); m(KeyEvent.VK_H, 35); m(KeyEvent.VK_I, 23);
-        m(KeyEvent.VK_J, 36); m(KeyEvent.VK_K, 37); m(KeyEvent.VK_L, 38);
-        m(KeyEvent.VK_M, 50); m(KeyEvent.VK_N, 49); m(KeyEvent.VK_O, 24);
-        m(KeyEvent.VK_P, 25); m(KeyEvent.VK_Q, 16); m(KeyEvent.VK_R, 19);
-        m(KeyEvent.VK_S, 31); m(KeyEvent.VK_T, 20); m(KeyEvent.VK_U, 22);
-        m(KeyEvent.VK_V, 47); m(KeyEvent.VK_W, 17); m(KeyEvent.VK_X, 45);
-        m(KeyEvent.VK_Y, 21); m(KeyEvent.VK_Z, 44);
-        // number row
-        m(KeyEvent.VK_1, 2); m(KeyEvent.VK_2, 3); m(KeyEvent.VK_3, 4);
-        m(KeyEvent.VK_4, 5); m(KeyEvent.VK_5, 6); m(KeyEvent.VK_6, 7);
-        m(KeyEvent.VK_7, 8); m(KeyEvent.VK_8, 9); m(KeyEvent.VK_9, 10);
-        m(KeyEvent.VK_0, 11);
+        // Character keys -> base (unshifted) keysym, for layout-independent text.
+        for (int vk = KeyEvent.VK_A; vk <= KeyEvent.VK_Z; vk++) k(vk, vk + 0x20); // 'a'..'z'
+        for (int vk = KeyEvent.VK_0; vk <= KeyEvent.VK_9; vk++) k(vk, vk);        // '0'..'9'
+        k(KeyEvent.VK_MINUS, '-'); k(KeyEvent.VK_EQUALS, '=');
+        k(KeyEvent.VK_OPEN_BRACKET, '['); k(KeyEvent.VK_CLOSE_BRACKET, ']');
+        k(KeyEvent.VK_BACK_SLASH, '\\'); k(KeyEvent.VK_SEMICOLON, ';');
+        k(KeyEvent.VK_QUOTE, '\''); k(KeyEvent.VK_BACK_QUOTE, '`');
+        k(KeyEvent.VK_COMMA, ','); k(KeyEvent.VK_PERIOD, '.'); k(KeyEvent.VK_SLASH, '/');
+
         // whitespace / control
         m(KeyEvent.VK_ENTER, 28); m(KeyEvent.VK_ESCAPE, 1);
         m(KeyEvent.VK_BACK_SPACE, 14); m(KeyEvent.VK_TAB, 15);
@@ -51,12 +56,6 @@ final class AwtEvdev {
         m(KeyEvent.VK_META, 125);   // left meta / super
         m(KeyEvent.VK_WINDOWS, 125);
         m(KeyEvent.VK_CONTEXT_MENU, 127);
-        // punctuation (US layout)
-        m(KeyEvent.VK_MINUS, 12); m(KeyEvent.VK_EQUALS, 13);
-        m(KeyEvent.VK_OPEN_BRACKET, 26); m(KeyEvent.VK_CLOSE_BRACKET, 27);
-        m(KeyEvent.VK_BACK_SLASH, 43); m(KeyEvent.VK_SEMICOLON, 39);
-        m(KeyEvent.VK_QUOTE, 40); m(KeyEvent.VK_BACK_QUOTE, 41);
-        m(KeyEvent.VK_COMMA, 51); m(KeyEvent.VK_PERIOD, 52); m(KeyEvent.VK_SLASH, 53);
         // navigation
         m(KeyEvent.VK_INSERT, 110); m(KeyEvent.VK_DELETE, 111);
         m(KeyEvent.VK_HOME, 102); m(KeyEvent.VK_END, 107);
@@ -86,6 +85,23 @@ final class AwtEvdev {
     static int keycode(int awtVk) {
         Integer e = KEY.get(awtVk);
         return e == null ? -1 : e;
+    }
+
+    /** AWT virtual keycode -> base X11 keysym for character keys, or -1. */
+    static int keysym(int awtVk) {
+        Integer s = KSYM.get(awtVk);
+        return s == null ? -1 : s;
+    }
+
+    /**
+     * Last-resort keysym for a printable VK not in either table. Java's
+     * character VK constants equal the uppercase ASCII code, so letters map to
+     * the lowercase (base) keysym and other printables map to themselves.
+     */
+    static int fallbackKeysym(int awtVk) {
+        if (awtVk >= 'A' && awtVk <= 'Z') return awtVk + 0x20;
+        if (awtVk >= 0x20 && awtVk <= 0x7E) return awtVk;
+        return -1;
     }
 
     /**

@@ -229,10 +229,21 @@ wrapper is a permanent shim or a one-host quirk.
 ### Hardening
 
 #### H1 — Keymap fidelity
-AWT virtual-key → evdev mapping currently assumes a US-ish physical layout.
-Cover non-US layouts, dead keys, keypad edge cases, and modifier combinations;
-consider using Mutter's `NotifyKeyboardKeysym` / `CurrentKeymap` for
-layout-independent injection where appropriate.
+**Status:** ✅ DONE (core) · **Priority:** medium
+
+Character keys (letters, digits, punctuation) now inject as a **base X11 keysym**
+via Mutter's `NotifyKeyboardKeysym`, which resolves the keycode on the *guest's*
+layout — so the right character lands on US, QWERTZ, AZERTY, etc. Modifiers and
+functional keys (F-row, nav, numpad, locks) stay evdev (position-based, correct
+on every layout); an operator-held Shift/Ctrl/Alt injected as an evdev modifier
+combines correctly with the keysym. **Empirically verified** with a focused
+key-logger: on German, evdev-21 gave `z` (the QWERTZ swap bug) while keysym `y`
+gave `y`; on US, `a`/`A`/`@`/`5`/`;`/Ctrl+C all correct via the new path.
+
+Remaining edge cases (lower priority): shifted *symbols* still assume the guest
+shares the operator's layout for that key (base-keysym + evdev-Shift → guest's
+shift level); dead keys / compose and AltGr-layer symbols aren't specially
+handled.
 
 #### H2 — Multi-monitor
 Capture and coordinate mapping are validated for a single monitor. Support
