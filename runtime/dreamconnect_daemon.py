@@ -112,9 +112,12 @@ class FrameBuffer:
 class Session:
     """Persistent Mutter RemoteDesktop + linked ScreenCast session."""
 
-    def __init__(self, bus, monitor, frame):
+    def __init__(self, bus, monitor, frame, all_monitors=False):
         self.bus = bus
         self.monitor = monitor
+        self.all_monitors = all_monitors  # capture the whole logical desktop
+        self.area_x = 0  # origin of the captured area in desktop coords (RecordArea)
+        self.area_y = 0
         self.frame = frame
         self.rd_path = None
         self.sc_path = None
@@ -257,6 +260,45 @@ class Session:
         return self.bus.call_sync(RD_DEST, self.rd_path, RD_SESSION_IFACE, method,
                                   v, None, Gio.DBusCallFlags.NONE, -1, None)
 
+    def _desktop_area(self):
+        """Bounding box of all logical monitors as (x, y, w, h, count), in
+        desktop/logical coordinates — or None if it can't be determined."""
+        try:
+            r = self.bus.call_sync(
+                "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                "org.gnome.Mutter.DisplayConfig", "GetCurrentState", None, None,
+                Gio.DBusCallFlags.NONE, -1, None)
+            _serial, monitors, logical, _props = r.unpack()
+            if not logical:
+                return None
+
+            def mode_dims(conn):
+                for (mc, *_r), modes, _mp in monitors:
+                    if mc == conn:
+                        for md in modes:
+                            if md[6].get("is-current"):
+                                return md[1], md[2]
+                return None
+
+            minx = miny = 1 << 30
+            maxx = maxy = -(1 << 30)
+            for (x, y, scale, transform, _primary, mons, _lp) in logical:
+                dims = mode_dims(mons[0][0])
+                if not dims:
+                    continue
+                w = int(round(dims[0] / scale))
+                h = int(round(dims[1] / scale))
+                if transform in (1, 3):  # 90/270 rotation swaps w/h
+                    w, h = h, w
+                minx, miny = min(minx, x), min(miny, y)
+                maxx, maxy = max(maxx, x + w), max(maxy, y + h)
+            if maxx <= minx or maxy <= miny:
+                return None
+            return (minx, miny, maxx - minx, maxy - miny, len(logical))
+        except Exception as e:  # noqa: BLE001
+            log(f"desktop-area query failed: {e}")
+            return None
+
     def start(self):
         # Drop any signal subscriptions from a previous session — start() is
         # re-entered on Mutter-close recovery, and the old rd_path/stream_path
@@ -283,11 +325,27 @@ class Session:
             GLib.Variant("(a{sv})", ({"remote-desktop-session-id": GLib.Variant("s", sess_id)},)),
             None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
 
-        self.stream_path = self.bus.call_sync(
-            SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordMonitor",
-            GLib.Variant("(sa{sv})", (self.monitor, {"cursor-mode": GLib.Variant("u", 1)})),
-            None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
-        log(f"ScreenCast session {self.sc_path} stream {self.stream_path} monitor={self.monitor}")
+        # Multi-monitor: capture the whole logical desktop (RecordArea over the
+        # bounding box) when forced, or auto when more than one logical monitor
+        # is present. Otherwise keep the proven single-monitor RecordMonitor.
+        area = self._desktop_area()
+        props = {"cursor-mode": GLib.Variant("u", 1)}
+        if area and (self.all_monitors or area[4] > 1):
+            x, y, w, h, n = area
+            self.area_x, self.area_y = x, y
+            self.stream_path = self.bus.call_sync(
+                SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordArea",
+                GLib.Variant("(iiiia{sv})", (x, y, w, h, props)),
+                None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+            log(f"ScreenCast session {self.sc_path} stream {self.stream_path} "
+                f"area ({x},{y}) {w}x{h} spanning {n} monitor(s)")
+        else:
+            self.area_x = self.area_y = 0
+            self.stream_path = self.bus.call_sync(
+                SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordMonitor",
+                GLib.Variant("(sa{sv})", (self.monitor, props)),
+                None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+            log(f"ScreenCast session {self.sc_path} stream {self.stream_path} monitor={self.monitor}")
 
         self._sub_ids.append(self.bus.signal_subscribe(
             SC_DEST, SC_STREAM_IFACE, "PipeWireStreamAdded", self.stream_path, None,
@@ -364,8 +422,13 @@ class Session:
 
     # ---- input injection (called from the socket thread) -------------------
     def motion_abs(self, x, y):
+        # Coordinates are relative to the captured stream. For RecordArea the
+        # stream origin is the area's top-left (area_x/area_y), so shift the
+        # desktop coordinate SC gives us into the stream's frame; for
+        # RecordMonitor area_x/area_y are 0 and this is a no-op.
         with self._lock:
-            self._rd("NotifyPointerMotionAbsolute", (self.stream_path, x, y), "(sdd)")
+            self._rd("NotifyPointerMotionAbsolute",
+                     (self.stream_path, x - self.area_x, y - self.area_y), "(sdd)")
 
     def button(self, evdev_button, state):
         with self._lock:
@@ -516,6 +579,9 @@ class ControlServer(threading.Thread):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--monitor", default="HDMI-2")
+    ap.add_argument("--all-monitors", action="store_true",
+                    help="capture the whole logical desktop (RecordArea) instead "
+                         "of a single monitor; auto-enabled when >1 monitor")
     ap.add_argument("--shm", default="/dev/shm/dreamconnect.frame")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
     ap.add_argument("--socket", default=os.path.join(runtime_dir, "dreamconnect.sock"))
@@ -524,7 +590,7 @@ def main():
     Gst.init(None)
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     frame = FrameBuffer(args.shm)
-    session = Session(bus, args.monitor, frame)
+    session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors)
     session.start()
     ControlServer(args.socket, session).start()
 

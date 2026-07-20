@@ -246,9 +246,23 @@ shift level); dead keys / compose and AltGr-layer symbols aren't specially
 handled.
 
 #### H2 — Multi-monitor
-Capture and coordinate mapping are validated for a single monitor. Support
-multiple monitors / logical-monitor layouts and correct absolute-coordinate
-mapping across them.
+**Status:** ✅ DONE (single-monitor path verified; spanning needs multi-mon HW) · **Priority:** medium
+
+The daemon now captures the **whole logical desktop** via `RecordArea` over the
+bounding box of all logical monitors — auto-enabled when more than one monitor is
+present (or forced with `--all-monitors`), falling back to the proven
+single-monitor `RecordMonitor` otherwise. Pointer coordinates are shifted by the
+area origin (`area_x/area_y`) into the stream's frame; for a single monitor / an
+origin-anchored layout that's a no-op. The bounding box honours per-monitor scale
+and 90/270 rotation. **Verified** on this single-monitor box that `RecordArea`
+over `(0,0) 1920×1080` captures live at the right geometry, identical to
+`RecordMonitor` (so no regression, and the area path + coordinate math are sound);
+true multi-monitor *spanning* is architecturally in place but needs a
+multi-monitor host to confirm end to end.
+
+Open follow-ups: HiDPI mixed-scale layouts (RecordArea captures at logical res);
+interaction with SC's own `SelectMonitor` command (today we present one combined
+desktop rather than switchable per-monitor streams).
 
 #### H3 — Wheel units & momentum
 Confirm scroll step units/granularity match operator expectations across apps
