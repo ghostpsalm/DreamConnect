@@ -265,9 +265,29 @@ interaction with SC's own `SelectMonitor` command (today we present one combined
 desktop rather than switchable per-monitor streams).
 
 #### H3 — Wheel units & momentum
-Confirm scroll step units/granularity match operator expectations across apps
-(direction is already correct); consider high-resolution / smooth-scroll axis
-events.
+**Status:** scoped · **Priority:** low
+
+**Current path:** `RobotPeer.mouseWheel(wheelAmt)` → `W 0 <wheelAmt>` →
+`NotifyPointerAxisDiscrete(axis=0, steps=wheelAmt)`. One AWT notch = one discrete
+step; direction is correct and it works. It's the traditional *notch* model — no
+smooth/pixel scrolling, and horizontal isn't wired (AWT `mouseWheel` is
+vertical-only).
+
+**Mutter offers two axis calls:** `NotifyPointerAxisDiscrete(u axis, i steps)`
+(what we use) and `NotifyPointerAxis(d dx, d dy, u flags)` — continuous,
+high-resolution/smooth scrolling with a kinetic-`finish` flag.
+
+**Plan (if operators report notchy/uneven scrolling — otherwise leave as-is):**
+1. Add a continuous path via `NotifyPointerAxis` with a configurable
+   pixels-per-notch factor (default tuned to GNOME's ~ per-notch step), keeping
+   `NotifyPointerAxisDiscrete` as a fallback/option.
+2. Emit a kinetic `finish` on the last event of a scroll burst for natural
+   momentum stop.
+3. Cross-app feel test (browser, terminal, editor, file manager) — the whole risk
+   here is subjective tuning, not mechanism.
+· **Effort: S–M.** · **Risk: low mechanically; needs operator feel-testing.**
+The main open question is whether the notch model is actually a problem in
+practice; capture a real complaint before investing.
 
 #### H4 — Reconnect & resilience
 **Status:** ✅ DONE · **Priority:** medium
