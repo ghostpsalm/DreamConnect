@@ -42,6 +42,19 @@ detect_user() {
   die "could not detect a graphical session user; set DREAMCONNECT_USER="
 }
 
+# Type (wayland/x11) of the desktop user's active graphical session.
+user_session_type() {
+  local sid uid name type active
+  while read -r sid uid name _; do
+    [ "$name" = "$USER_NAME" ] || continue
+    type=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)
+    active=$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)
+    if { [ "$type" = "wayland" ] || [ "$type" = "x11" ]; } && [ "$active" = "yes" ]; then
+      echo "$type"; return
+    fi
+  done < <(loginctl list-sessions --no-legend)
+}
+
 USER_NAME="$(detect_user)"
 USER_UID="$(id -u "$USER_NAME")"
 USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
@@ -251,9 +264,14 @@ if [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
     enable_autologin "$GDM_CONF" "$USER_NAME"
     echo "   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt."
     echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
-    if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' "$GDM_CONF"; then
-      echo "   NOTE: WaylandEnable=false is set — the bridge needs a *Wayland* session."
-      echo "   Make sure $USER_NAME's default session is GNOME on Wayland, not Xorg."
+    # WaylandEnable=false only matters if it's actually forcing Xorg. Modern GDM
+    # (50+) ignores it and the session is Wayland anyway, so only warn when this
+    # user's current session is NOT Wayland — otherwise it's demonstrably inert.
+    if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' "$GDM_CONF" \
+       && [ "$(user_session_type)" != "wayland" ]; then
+      echo "   NOTE: WaylandEnable=false is set and this session isn't Wayland —"
+      echo "   ensure $USER_NAME's autologin session is GNOME on Wayland, not Xorg,"
+      echo "   or the bridge won't work at boot."
     fi
   else
     echo "!! DREAMCONNECT_AUTOLOGIN=1 but no GDM found (/etc/gdm{,3}/custom.conf)."
