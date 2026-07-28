@@ -23,7 +23,10 @@
 #                              autologin for it (so DREAMCONNECT_AUTOLOGIN is not
 #                              consulted — host-account mode implies autologin,
 #                              and requires GDM). Opt-in; unset means the
-#                              detected desktop user, exactly as before.
+#                              detected desktop user, exactly as before. One host
+#                              account per box: once one is installed, a re-run
+#                              naming a DIFFERENT account is refused — run
+#                              --uninstall first to switch.
 #
 # Dependencies are installed via the detected package manager (apt/dnf/zypper/
 # pacman); see docs/troubleshooting.md for the per-distro package list if your
@@ -82,7 +85,18 @@ uninstall() {
                           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$target_uid/bus")
 
   "${target_run_user[@]}" systemctl --user disable --now dreamconnect-daemon.service 2>/dev/null || true
-  rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service"
+  # $target_home is passwd field 6 verbatim, and an account deleted by hand
+  # before --uninstall leaves it empty — which points this rm at root's own
+  # /.config/systemd/user. `rm -f` is silent about that today, but silence is an
+  # accident, not a guard. Skipped rather than fatal, for the same reason
+  # remove_no_idle_lock's failure is non-fatal below: everything after this line
+  # (the SC drop-in, the dconf revert, the account, the state file) is exactly
+  # what a box whose account is already gone still needs reverted.
+  if valid_home_dir "$target_home"; then
+    rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service"
+  else
+    echo "!! skipping the daemon unit removal for $target_name: unusable home directory '$target_home' — continuing"
+  fi
   "${target_run_user[@]}" systemctl --user daemon-reload 2>/dev/null || true
   if [ -n "$SC_UNIT" ]; then
     rm -f "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
@@ -174,11 +188,15 @@ MONITOR="$(detect_monitor)"
 # --- resolve the identity the daemon/autologin/socket will run under --------
 # "user" and "local" are dconf's own default profile and its shared system db;
 # configure_no_idle_lock refuses them, and it only runs long after the account
-# exists. Refuse here instead, before anything at all is created, so a reserved
-# name can never leave an account behind that the later failure never recorded.
+# exists. "root" is not a dconf name at all — it is simply the account every
+# other rail here exists to protect; host_account_installable refuses it too,
+# but only through the generic "already installed" die below, which is a lie on
+# a fresh box. Refuse all three here instead, before anything at all is created,
+# so a reserved name can never leave an account behind that the later failure
+# never recorded.
 case "${DREAMCONNECT_HOST_ACCOUNT:-}" in
-  user|local)
-    die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT is a reserved dconf name (user/local); choose a different account name" ;;
+  root|user|local)
+    die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT is a reserved name (root/user/local); choose a different account name" ;;
 esac
 # And the shape of the name itself, at the entry point, before ensure_host_account
 # or resolve_host_identity ever sees it: `getent passwd 1000` resolves by UID, so
@@ -187,6 +205,16 @@ esac
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ] && ! valid_account_name "$DREAMCONNECT_HOST_ACCOUNT"; then
   die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT is not a valid account name (must start with a letter or underscore, contain only letters/digits/underscore/hyphen, and be at most 32 characters)"
 fi
+# One display-host account per box: a re-run naming a different account than
+# install.state records is refused (its predecessor's dconf profile, linger and
+# AccountsService marker would become unreachable by --uninstall), and a re-run
+# naming none at all continues under the recorded one. Asked here, before
+# ensure_host_account can create anything and long before write_install_state
+# overwrites the single slot — and the answer is what the rest of the run uses.
+DREAMCONNECT_HOST_ACCOUNT="$(host_account_installable "${DREAMCONNECT_HOST_ACCOUNT:-}")" \
+  || die "this box already has a display-host account installed; run $0 --uninstall first
+   (if install.state itself records an invalid or reserved account name, --uninstall
+   will refuse it too; delete $(install_state_file) by hand to recover)"
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   # Host-account mode needs GDM to ever autologin — fail before touching the
   # system rather than leaving a created-but-useless account behind. `|| true`
@@ -200,6 +228,14 @@ fi
 IDENTITY="$(resolve_host_identity "${DREAMCONNECT_HOST_ACCOUNT:-}" "$PROTECTED_USER")" \
   || die "could not resolve the identity to install the daemon under"
 read -r USER_NAME USER_UID USER_HOME _ <<<"$IDENTITY"
+# resolve_host_identity copies passwd field 6 out verbatim, and every later use
+# of $USER_HOME is a root write pasted into it: the `install -d`, the daemon unit
+# and its chown, and configure_no_idle_lock's two home files. An empty or
+# malformed field aims all of them at root's own /.config. Refused here, before
+# the first of them runs: this is the install side, with an operator present, and
+# files laid down under a bad home are artefacts --uninstall can never find again.
+valid_home_dir "$USER_HOME" \
+  || die "the account $USER_NAME has an unusable home directory ('$USER_HOME'); fix its passwd entry and re-run"
 RUN_USER=(sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus")
 
@@ -338,9 +374,17 @@ if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
 elif [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
   if [ -n "$GDM_CONF" ]; then
     echo ">> enabling GDM autologin for $USER_NAME in $GDM_CONF (DREAMCONNECT_AUTOLOGIN=1)"
-    enable_autologin "$GDM_CONF" "$USER_NAME"
-    echo "   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt."
-    echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
+    # Non-fatal here, unlike the host-account call above: this is the very last
+    # step and the daemon is already installed, so a refused name (root, or one
+    # carrying a backslash) must not abort an otherwise-complete install.
+    if enable_autologin "$GDM_CONF" "$USER_NAME"; then
+      echo "   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt."
+      echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
+    else
+      # Nothing was written, so neither the security warning nor the backup path
+      # below would be true — the refusal is the whole of the output.
+      echo "!! could not enable autologin for $USER_NAME — the daemon install itself succeeded; check the account name and re-run, or configure autologin manually"
+    fi
     # WaylandEnable=false only matters if it's actually forcing Xorg. Modern GDM
     # (50+) ignores it and the session is Wayland anyway, so only warn when this
     # user's current session is NOT Wayland — otherwise it's demonstrably inert.

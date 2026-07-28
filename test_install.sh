@@ -338,6 +338,104 @@ test_write_install_state_overwrites_rather_than_appends() {
     "the second write wins"
 }
 
+# Breaker lap 2, finding 1 (CHECKPOINT.md): "a bare `sudo ./install.sh` re-run
+# with DREAMCONNECT_HOST_ACCOUNT unset takes the warn-and-reuse path, re-enters
+# ensure_host_account which finds the account already exists
+# (ACCOUNT_WAS_CREATED=0 this run), and write_install_state then overwrites the
+# previously-recorded CREATED_ACCOUNT=1 with 0 — permanently disarming
+# host_account_removable's gate, so --uninstall can never remove that account
+# again." That is issue #21's own failure mode ("uninstall MUST delete the
+# account and fully revert") arriving through the ordinary upgrade path.
+#
+# So CREATED_ACCOUNT is STICKY ONCE TRUE, PER ACCOUNT NAME. Extending the
+# write_install_state contract above:
+#
+#   Before writing, read what is already recorded. When the recorded
+#   HOST_ACCOUNT is EXACTLY <name>, the CREATED_ACCOUNT written is 1 if EITHER
+#   the recorded value or arg 3 is 1 (a logical OR); otherwise arg 3 is written
+#   as given. A record naming a DIFFERENT account carries nothing over — its 1
+#   belongs to that account, not this one — and neither does an absent record.
+#
+#   Only CREATED_ACCOUNT is sticky. HOST_ACCOUNT, HOST_UID and AUTOLOGIN_SET are
+#   always this run's arguments, so "keep the whole previous record" is not the
+#   fix: it would make a re-run that stops setting autologin unrevertable in the
+#   other direction.
+#
+# The prior record is written BY HAND, as everywhere else in this slice, so the
+# writer under test cannot vouch for its own starting point; the result is read
+# back through read_install_state, the seam host_account_removable's rail 5
+# actually consults.
+test_write_install_state_never_downgrades_created_account_for_the_same_account() {
+  local c prior_acct prior_created acct created expected label i=0
+  local DC_STATE_FILE
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  # prior_account prior_created  this_account this_created  expected_recorded
+  local cases=(
+    "dreamconnect-host  1  dreamconnect-host   0  1"
+    "dreamconnect-host  0  dreamconnect-host   1  1"
+    "dreamconnect-host  1  dreamconnect-host   1  1"
+    "dreamconnect-host  0  dreamconnect-host   0  0"
+    "dreamconnect-host  1  dreamconnect-host2  0  0"
+  )
+  for c in "${cases[@]}"; do
+    read -r prior_acct prior_created acct created expected <<<"$c"
+    DC_STATE_FILE="$TMP/state-sticky-$i/install.state"; i=$((i + 1))
+    label="recorded $prior_acct/CREATED_ACCOUNT=$prior_created, this run $acct/$created"
+
+    write_state_fixture "$DC_STATE_FILE" "$prior_acct" 987 "$prior_created" 1
+    write_install_state "$acct" 986 "$created" 0
+
+    read_install_state
+    assert_eq "$CREATED_ACCOUNT" "$expected" "$label: CREATED_ACCOUNT"
+    assert_eq "$HOST_ACCOUNT" "$acct"        "$label: HOST_ACCOUNT is this run's account"
+    assert_eq "$HOST_UID" "986"              "$label: HOST_UID is this run's uid"
+    assert_eq "$AUTOLOGIN_SET" "0"           "$label: AUTOLOGIN_SET is this run's value, not sticky"
+  done
+}
+
+# Crash-safety (CHECKPOINT.md "Breaker findings on slice 1", finding 2): "an
+# interrupted write (crash/power-loss/ENOSPC) leaves an empty or truncated
+# install.state, which host_account_installable then reads as 'nothing
+# recorded' — silently re-opening #21's exact strand-the-old-account failure".
+# So the contract is: a write that dies part way through leaves the PREVIOUS
+# complete record in place. Never an empty file, never half a record.
+#
+# The interruption is real, not simulated: RLIMIT_FSIZE=0 (`ulimit -f 0`) lets
+# the open/truncate through and then kills the writer with SIGXFSZ on the very
+# first byte it tries to write — the crash window between truncating the state
+# file and finishing it. Deterministic, no timing race. Nested one process deep
+# with its stderr discarded so the shell's "File size limit exceeded" notice
+# and any core file stay out of the suite; `ulimit -c 0` for the same reason.
+# The fixture is written BY HAND, as everywhere else in this slice, so the
+# writer under test cannot be the thing that vouches for its own starting point.
+test_write_install_state_survives_a_write_killed_part_way_through() {
+  local state before after rc
+  local DC_STATE_FILE="$TMP/state-interrupted/install.state"
+  state="$DC_STATE_FILE"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  before="$(cat "$state")"
+
+  rc="$(bash -c '
+    exec 2>/dev/null
+    ulimit -c 0; ulimit -f 0
+    . "$1"
+    ( DC_STATE_FILE="$2" write_install_state dreamconnect-host2 986 0 0 >/dev/null 2>&1 )
+    echo "$?"
+  ' _ "$LIB" "$state")"
+  [ "${rc:-0}" -gt 128 ] || fail "precondition: the writer was not killed mid-write (rc=$rc)"
+
+  after="$(cat "$state" 2>/dev/null || true)"
+  assert_eq "$after" "$before" \
+    "an interrupted write leaves the previous install.state byte-for-byte intact"
+
+  # The consequence the finding names, asserted at the seam that suffers it:
+  # a reader must still see the recorded account, not "nothing recorded".
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  read_install_state
+  assert_eq "$HOST_ACCOUNT"    "dreamconnect-host" "interrupted write: HOST_ACCOUNT still recorded"
+  assert_eq "$CREATED_ACCOUNT" "1"                 "interrupted write: CREATED_ACCOUNT still recorded"
+}
+
 test_install_state_round_trips_all_four_values() {
   local DC_STATE_FILE="$TMP/state-roundtrip/install.state"
   local HOST_ACCOUNT="stale" HOST_UID="stale" CREATED_ACCOUNT="stale" AUTOLOGIN_SET="stale"
@@ -2144,6 +2242,165 @@ test_uninstall_host_account_survives_set_e_when_loginctl_fails() {
   done
 }
 
+# --- issue #21, breaker lap 1 defect 2: the account was deleted by hand -------
+#
+# WHY THESE TESTS EXIST. Issue #21's own motivating scenario is an account that
+# is removed OUTSIDE this tool (`userdel -r dchost` by hand) before
+# `sudo ./install.sh --uninstall` ever runs. Traced through the code as it
+# stands, that scenario now dead-ends:
+#
+#   uninstall_host_account dchost  ->  host_account_removable dchost  ->  the
+#   "no such account in the passwd source" rail refuses  ->  non-zero  ->
+#   install.sh's uninstall() sets account_removed=0 and therefore SKIPS
+#   `rm -f "$(install_state_file)"` (install.sh:155-159), printing "state
+#   preserved ... so a future --uninstall can retry account removal". No retry
+#   can ever succeed: the account is gone, so that same rail refuses every time.
+#   install.state is then stuck naming dchost forever, and slice 1's
+#   host_account_installable refuses to install under ANY other account for as
+#   long as it is there. Issue #21's exact repro, blocked by our own slice 1 fix.
+#
+# CONTRACT UNDER TEST — an extension of the slice 6a contract above; the
+# implementation follows this, not the reverse. No implementation of this branch
+# exists at the time these tests were written. Expected values come from issue
+# #21's scenario plus install.sh's caller contract (account_removed=1 is what
+# clears install.state), NOT from what any code currently does:
+#
+#   0. BEFORE consulting host_account_removable, uninstall_host_account asks
+#      whether <name> has a passwd entry AT ALL. If <name> is non-empty and the
+#      passwd source has no entry for it, the account is already gone: there is
+#      nothing to delete, which IS the success case. Return 0, having run
+#      NOTHING — no `loginctl disable-linger`, no `loginctl terminate-user`, no
+#      `userdel` (every one of them is meaningless on an account that does not
+#      exist, and userdel would simply fail). Say so in the output, naming the
+#      account, so install.sh's ">> removed display-host account X" is not the
+#      only thing the operator sees. The wording is the builder's; these tests
+#      assert only that the account is named.
+#
+#   0b. An EMPTY <name> is still a refusal, exactly as today. "No such account"
+#      is a claim about a named account; an empty name names none, and reporting
+#      a removal that was never even asked for would clear install.state on a
+#      nonsense call.
+#
+#   1-4. For a name that DOES have a passwd entry, behaviour is COMPLETELY
+#      unchanged: host_account_removable is still consulted first and every one
+#      of its rails still refuses exactly as before.
+#
+#   host_account_removable's own contract is NOT touched by this. Its "no such
+#   account in the passwd source" rail keeps refusing — it is the right answer
+#   for a caller that does not already know the account is gone. The fix belongs
+#   in the caller that does know.
+
+# The box in issue #21's scenario: the same removal fixture as everywhere else
+# in this slice, with the dreamconnect-host line ALREADY REMOVED — what
+# /etc/passwd actually looks like after a hand-run `userdel -r dreamconnect-host`.
+# Every decoy entry is kept, so a test that accidentally names one still sees it.
+make_hand_deleted_passwd_db() {
+  cat > "$TMP/passwd-hand-deleted" <<'EOF'
+root:x:0:0:Super User:/root:/bin/bash
+kogies:x:1000:1000:Kogies:/home/kogies:/bin/bash
+dc-uid0:x:0:0:DreamConnect display host:/var/lib/dc-uid0:/bin/bash
+dc-home-slash:x:981:981:DreamConnect display host:/:/bin/bash
+dc-home-home:x:982:982:DreamConnect display host:/home:/bin/bash
+dc-home-root:x:983:983:DreamConnect display host:/root:/bin/bash
+dc-gecos-empty:x:984:984::/var/lib/dc-gecos-empty:/bin/bash
+dc-gecos-trailing:x:985:985:DreamConnect display host :/var/lib/dc-gecos-trailing:/bin/bash
+dc-gecos-lower:x:986:986:dreamconnect display host:/var/lib/dc-gecos-lower:/bin/bash
+dc-gecos-human:x:988:988:Roger Rickard:/var/lib/dc-gecos-human:/bin/bash
+EOF
+  echo "$TMP/passwd-hand-deleted"
+}
+
+# Contract 0. The state file still records exactly what a successful install
+# wrote (HOST_ACCOUNT=dreamconnect-host, CREATED_ACCOUNT=1) — that is the whole
+# point: install.state outlives the account, and is what has to be cleared.
+#
+# The last phase is the anti-vacuous control: an implementation that returned 0
+# and ran nothing UNCONDITIONALLY would satisfy every assertion above it, so the
+# same call against the same state and the same shims — differing ONLY in that
+# the passwd entry is still there — must still reach userdel.
+test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed() {
+  local gone_db live_db state shims log
+  require_uninstall_host_account "hand-deleted account" || return 0
+  gone_db="$(make_hand_deleted_passwd_db)"
+  live_db="$(make_removal_passwd_db)"
+  state="$TMP/state-uninstall-gone/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  # Precondition: the fixture really is issue #21's box.
+  assert_eq "$(DC_PASSWD_DB="$gone_db" passwd_entry dreamconnect-host)" "" \
+    "precondition: the hand-deleted fixture has no dreamconnect-host entry"
+
+  # Dry run first: nothing may even be EMITTED, let alone executed.
+  shims="$TMP/shims-uninstall-gone-dry"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_dry "$gone_db" "$state" "" "$shims" dreamconnect-host kogies
+  [ "$UNINSTALL_RC" -ne 127 ] || { fail "hand-deleted: exit 127, not a result"; return 0; }
+  assert_eq "$UNINSTALL_RC" "0" \
+    "an account already deleted by hand: uninstall_host_account exits 0 (nothing to remove IS removed) so install.sh clears install.state"
+  assert_eq "$(uninstall_dry_all)" "" \
+    "hand-deleted: no command is even emitted — there is no account to disable-linger, terminate or userdel"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "hand-deleted (dry): nothing was executed either"
+  assert_contains "$UNINSTALL_OUT" "dreamconnect-host" \
+    "hand-deleted: the output names the account it found nothing to remove"
+
+  # And for real, with loginctl/userdel shimmed away: still nothing runs.
+  shims="$TMP/shims-uninstall-gone-real"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_shimmed "$gone_db" "$state" "$shims" dreamconnect-host kogies
+  assert_eq "$UNINSTALL_RC" "0" "hand-deleted (real run): exits 0"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "hand-deleted (real run): neither loginctl nor userdel was invoked on a nonexistent account"
+
+  # Control: the ONLY difference is that the passwd entry is still there.
+  shims="$TMP/shims-uninstall-gone-control"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_shimmed "$live_db" "$state" "$shims" dreamconnect-host kogies
+  assert_eq "$UNINSTALL_RC" "0" "control: an account that IS still there is removed, exit 0"
+  assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
+terminate-user
+userdel" "control: an account that IS still there still gets the full removal, in order"
+}
+
+# Contract 0b + 1-4: the regression guard on the fix above. "The account is gone"
+# is the ONLY thing that may short-circuit the gate. An account that is really
+# there, and a call with no account name at all, must refuse exactly as before —
+# a short-circuit that swallowed those would report a removal that never
+# happened and let install.sh delete the state file that proves the account is
+# ours (install.sh:151-159).
+test_uninstall_host_account_still_refuses_an_account_that_is_really_there() {
+  local db shims log state i
+  require_uninstall_host_account "still refuses" || return 0
+  db="$(make_removal_passwd_db)"
+
+  #      name                recorded account    created  label
+  local -a names=(dreamconnect-host dreamconnect-host dc-gecos-human "")
+  local -a acct=(dreamconnect-host  dreamconnect-host dc-gecos-human dreamconnect-host)
+  local -a created=(0 1 1 1)
+  local -a nostate=(0 1 0 0)
+  local -a labels=("CREATED_ACCOUNT=0 for an account that exists"
+                   "no state file at all for an account that exists"
+                   "wrong GECOS on an account that exists"
+                   "no account name given")
+
+  for i in 0 1 2 3; do
+    state="$TMP/state-uninstall-present-$i/install.state"
+    if [ "${nostate[$i]}" = "1" ]; then
+      state="$TMP/state-uninstall-present-$i-absent/install.state"
+      rm -f "$state"
+    else
+      write_state_fixture "$state" "${acct[$i]}" 987 "${created[$i]}" 1
+    fi
+    shims="$TMP/shims-uninstall-present-$i"; log="$(make_uninstall_shims "$shims" 0)"
+
+    run_uninstall_dry "$db" "$state" "" "$shims" "${names[$i]}" kogies
+    [ "$UNINSTALL_RC" -ne 127 ] || { fail "${labels[$i]}: exit 127, not a refusal"; continue; }
+    [ "$UNINSTALL_RC" -ne 0 ] || fail \
+      "${labels[$i]}: expected non-zero (nothing removed), got 0 — a safety rail was weakened by the already-absent short-circuit"
+    [ -n "$UNINSTALL_OUT" ] || fail "${labels[$i]}: expected a line explaining the refusal"
+    assert_eq "$(uninstall_dry_all)" "" "${labels[$i]}: no command was emitted"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "${labels[$i]}: no account tool was executed"
+  done
+}
+
 # The removal-side half of slice 5's blast-radius guard, tightened here.
 #
 # configure_no_idle_lock already refuses the reserved dconf names "user" and
@@ -2923,6 +3180,1394 @@ test_ensure_host_account_refuses_malformed_account_names() {
   done
 }
 
+# --- slice 7: host_account_installable (one host account per box) ------------
+#
+# Contract under test (issue #21 sub-problem 1; factory/CHECKPOINT.md slice 1,
+# owner-confirmed design decisions):
+#
+#   "Re-run with a different DREAMCONNECT_HOST_ACCOUNT than install.state
+#    records: REFUSE, name the recorded account, point at --uninstall. No new
+#    state format (install.state stays single-slot)."
+#   "DREAMCONNECT_HOST_ACCOUNT unset on re-run while install.state has one
+#    recorded: WARN and proceed with the recorded account."
+#
+#   host_account_installable <requested_or_empty>
+#
+#   Decides whether this run may proceed under <requested>, and says which
+#   account the run must actually use. Follows resolve_host_identity's
+#   convention — the resolution on stdout, complaints on stderr, non-zero on
+#   refusal — because install.sh has no test harness of its own, so the decision
+#   has to live in the library (checkpoint seams: "so new logic lands in the
+#   testable surface").
+#
+#   Reads the recorded account from the install state (DC_STATE_FILE honoured,
+#   absent file = nothing recorded).
+#
+#     * nothing recorded              -> exit 0, stdout <requested> (may be
+#                                        empty), stderr EMPTY.
+#     * requested == recorded         -> exit 0, stdout <requested>, stderr EMPTY.
+#     * requested empty, one recorded -> exit 0, stdout <recorded>, and a
+#                                        "warning:" line on stderr naming the
+#                                        recorded account. (install-lib.sh's own
+#                                        warning convention, cf. the chown
+#                                        warning in configure_no_idle_lock.)
+#     * requested non-empty and
+#       different from recorded       -> NON-ZERO, nothing on stdout, a stderr
+#                                        line naming the RECORDED account and
+#                                        telling the operator to run --uninstall
+#                                        first. The state file is left byte-for-
+#                                        byte alone: the whole point of the
+#                                        refusal is that the earlier account's
+#                                        dconf profile/db, linger and
+#                                        AccountsService marker stay reachable by
+#                                        --uninstall, which a single-slot state
+#                                        file can only do while it still names
+#                                        them.
+#
+# Called from install.sh before write_install_state, i.e. before ensure_host_account
+# has created anything — but that wiring is install.sh's, and out of scope here.
+
+INSTALLABLE_RC=0
+INSTALLABLE_OUT=""
+INSTALLABLE_ERR=""
+
+# stdout and stderr are separate parts of this contract, so they are captured
+# separately rather than folded together. Command substitution is a subshell, so
+# the state globals the function reads stay out of the harness.
+try_installable() {  # state_file requested
+  local errf="$TMP/installable.err"
+  : > "$errf"
+  INSTALLABLE_OUT="$(DC_STATE_FILE="$1" host_account_installable "$2" 2>"$errf")"
+  INSTALLABLE_RC=$?
+  INSTALLABLE_ERR="$(cat "$errf" 2>/dev/null || true)"
+  return 0
+}
+
+# Same reasoning as assert_refused: a missing function also exits non-zero with
+# text on stderr, and a refusal test that accepts that asserts nothing.
+assert_install_refused() {  # label
+  declare -F host_account_installable >/dev/null || {
+    fail "$1: host_account_installable() is not defined — refusal not demonstrated"; return 0; }
+  [ "$INSTALLABLE_RC" -ne 127 ] || { fail "$1: exit 127 (command not found), not a refusal"; return 0; }
+  assert_not_contains "$INSTALLABLE_ERR" "command not found" \
+    "$1: the refusal came from the guard, not the shell"
+  [ "$INSTALLABLE_RC" -ne 0 ] || fail "$1: expected non-zero exit (NOT installable), got $INSTALLABLE_RC"
+  [ -n "$INSTALLABLE_ERR" ] || fail "$1: expected a stderr line explaining the refusal, got none"
+}
+
+test_library_defines_host_account_installable() {
+  declare -F host_account_installable >/dev/null || \
+    fail "install-lib.sh defines host_account_installable(): not defined"
+}
+
+# The bug in #21: a second run with a different DREAMCONNECT_HOST_ACCOUNT
+# overwrote the single-slot state file, and the first account's dconf profile,
+# linger and AccountsService marker became unreachable by --uninstall forever.
+test_host_account_installable_refuses_a_different_account_than_recorded() {
+  local state before
+  state="$TMP/state-installable-different/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  before="$(cat "$state")"
+
+  try_installable "$state" dreamconnect-host2
+  assert_install_refused "requested account differs from the recorded one"
+  assert_contains "$INSTALLABLE_ERR" "dreamconnect-host" \
+    "the refusal names the previously recorded account"
+  assert_contains "$INSTALLABLE_ERR" "--uninstall" \
+    "the refusal tells the operator to run --uninstall first"
+  assert_eq "$INSTALLABLE_OUT" "" "a refusal resolves no account on stdout"
+  assert_eq "$(cat "$state" 2>/dev/null || true)" "$before" \
+    "the refusal leaves install.state untouched (single slot, still naming the old account)"
+}
+
+# A bare `sudo ./install.sh` re-run must keep working, and must keep working
+# against the account already installed — silently switching back to the desktop
+# user would strand exactly the same set of artefacts #21 is about.
+test_host_account_installable_warns_and_reuses_the_recorded_account_when_unset() {
+  local state
+  state="$TMP/state-installable-unset/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  try_installable "$state" ""
+  assert_eq "$INSTALLABLE_RC" "0" \
+    "no account requested on a re-run proceeds (stderr: $INSTALLABLE_ERR)"
+  assert_eq "$INSTALLABLE_OUT" "dreamconnect-host" \
+    "the run continues under the previously recorded account"
+  assert_contains "$INSTALLABLE_ERR" "warning:" \
+    "reusing the recorded account is announced as a warning"
+  assert_contains "$INSTALLABLE_ERR" "dreamconnect-host" \
+    "the warning names the account being reused"
+}
+
+# The ordinary re-run: same account as last time. Nothing to warn about, so
+# nothing on stderr — a warning here would train the operator to ignore them.
+test_host_account_installable_accepts_the_recorded_account_silently() {
+  local state
+  state="$TMP/state-installable-same/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  try_installable "$state" dreamconnect-host
+  assert_eq "$INSTALLABLE_RC" "0" \
+    "re-requesting the recorded account proceeds (stderr: $INSTALLABLE_ERR)"
+  assert_eq "$INSTALLABLE_OUT" "dreamconnect-host" "the requested account is the resolved one"
+  assert_eq "$INSTALLABLE_ERR" "" "an unchanged account name is not worth a warning"
+}
+
+# Fresh box: no state file at all. Every request is installable, including the
+# empty one (today's no-host-account install), and none of them warn.
+test_host_account_installable_accepts_any_account_on_a_fresh_install() {
+  local state
+  state="$TMP/state-installable-fresh/install.state"
+  assert_file_absent "$state" "precondition: no state file"
+
+  try_installable "$state" dreamconnect-host
+  assert_eq "$INSTALLABLE_RC" "0" \
+    "a named account on a fresh install proceeds (stderr: $INSTALLABLE_ERR)"
+  assert_eq "$INSTALLABLE_OUT" "dreamconnect-host" "fresh install resolves the requested account"
+  assert_eq "$INSTALLABLE_ERR" "" "fresh install with a named account is silent"
+
+  try_installable "$state" ""
+  assert_eq "$INSTALLABLE_RC" "0" \
+    "no account requested on a fresh install proceeds (stderr: $INSTALLABLE_ERR)"
+  assert_eq "$INSTALLABLE_OUT" "" "fresh install with no account resolves no account"
+  assert_eq "$INSTALLABLE_ERR" "" "fresh install with no account is silent"
+}
+
+# The recorded name is adopted by this function and becomes the account the
+# WHOLE run uses — install.sh reassigns DREAMCONNECT_HOST_ACCOUNT from this
+# stdout, and its own two entry-point guards (the reserved dconf `case` and the
+# valid_account_name check, install.sh ~175-190) have already run against the
+# ORIGINAL env var by then. So whatever comes out of here is never validated
+# again before ensure_host_account/enable_autologin act on it. host_account_removable
+# already draws exactly this conclusion for exactly this file — it re-validates
+# the recorded name because install.state is "the last thing standing between a
+# tampered install.state and `userdel -r`" — and an adopted name has the same
+# provenance and a comparable blast radius (useradd/usermod, an AccountsService
+# path, a dconf profile, GDM autologin).
+#
+# Contract this asserts, extending the slice-7 block above:
+#
+#     * recorded name fails valid_account_name -> NON-ZERO, nothing on stdout,
+#       a stderr line naming the recorded name and saying it is "not a valid
+#       account name" (the wording ensure_host_account and host_account_removable
+#       both already use for this rail). Applies to BOTH adopting paths: the
+#       empty request that reuses the record, and requested == recorded.
+test_host_account_installable_refuses_a_malformed_recorded_account() {
+  local state before name i=0
+  for name in ".." "." "./dreamconnect-host" "../victim" 1000 "dc host" "-lead-dash"; do
+    state="$TMP/state-installable-malformed-$i/install.state"; i=$((i + 1))
+    write_state_fixture "$state" "$name" 987 1 1
+    before="$(cat "$state")"
+
+    # The reuse path: no account requested, so the recorded one would be adopted.
+    try_installable "$state" ""
+    assert_install_refused "malformed recorded account '$name' (no account requested)"
+    assert_eq "$INSTALLABLE_OUT" "" \
+      "malformed recorded account '$name': nothing is resolved on stdout for the run to use"
+    assert_contains "$INSTALLABLE_ERR" "not a valid account name" \
+      "malformed recorded account '$name': the refusal names the rail"
+    assert_contains "$INSTALLABLE_ERR" "$name" \
+      "malformed recorded account '$name': the refusal names the recorded account"
+
+    # And the match-confirms path: agreeing with a tampered record does not
+    # launder it either.
+    try_installable "$state" "$name"
+    assert_install_refused "malformed recorded account '$name' (requested == recorded)"
+    assert_eq "$INSTALLABLE_OUT" "" \
+      "malformed recorded account '$name': requesting it too still resolves nothing"
+
+    assert_eq "$(cat "$state" 2>/dev/null || true)" "$before" \
+      "malformed recorded account '$name': install.state is left byte-for-byte alone"
+  done
+}
+
+# "user" and "local" are dconf's own default profile and its shared system db.
+# install.sh refuses them at the entry point BEFORE anything is created,
+# precisely "so a reserved name can never leave an account behind that the later
+# failure never recorded" (install.sh ~171-181) — configure_no_idle_lock's own
+# refusal comes far too late. A name adopted out of install.state reaches
+# ensure_host_account by the same road and must meet the same gate, with the
+# same distinct wording, because the operator's fix differs: a reserved name is
+# not malformed, it is a name dconf has already claimed.
+test_host_account_installable_refuses_a_reserved_recorded_account() {
+  local state before name
+  for name in user local; do
+    state="$TMP/state-installable-reserved-$name/install.state"
+    write_state_fixture "$state" "$name" 987 1 1
+    before="$(cat "$state")"
+
+    try_installable "$state" ""
+    assert_install_refused "reserved recorded account '$name' (no account requested)"
+    assert_eq "$INSTALLABLE_OUT" "" \
+      "reserved recorded account '$name': nothing is resolved on stdout for the run to use"
+    assert_contains "$INSTALLABLE_ERR" "reserved" \
+      "reserved recorded account '$name': the refusal says the name is reserved"
+    assert_contains "$INSTALLABLE_ERR" "$name" \
+      "reserved recorded account '$name': the refusal names the recorded account"
+
+    try_installable "$state" "$name"
+    assert_install_refused "reserved recorded account '$name' (requested == recorded)"
+    assert_eq "$INSTALLABLE_OUT" "" \
+      "reserved recorded account '$name': requesting it too still resolves nothing"
+
+    assert_eq "$(cat "$state" 2>/dev/null || true)" "$before" \
+      "reserved recorded account '$name': install.state is left byte-for-byte alone"
+  done
+}
+
+# The whole of breaker lap 2 finding 1, driven end to end at the library seam in
+# install.sh's own order (install.sh:196-219 has no harness of its own):
+#
+#   host_account_installable ""      -> adopts the recorded account (warn-and-reuse)
+#   ensure_host_account <adopted>    -> the account is already there, so
+#                                       ACCOUNT_WAS_CREATED=0 for THIS run
+#   write_install_state ... "$ACCOUNT_WAS_CREATED" 1
+#
+# The consequence is asserted where it is actually paid — issue #18's rule that
+# "uninstall MUST delete the account and fully revert", i.e. host_account_removable
+# must still say yes afterwards. A bare re-run is the ordinary upgrade path, so
+# this must hold however many times it runs.
+test_a_bare_rerun_keeps_the_account_created_by_the_installer_removable() {
+  local state resolved
+  local ACCOUNT_WAS_CREATED="junk"
+  local DC_DRY_RUN=1 DC_PASSWD_DB DC_ACCOUNTSSERVICE_DIR DC_STATE_FILE
+  require_ensure_host_account "bare re-run keeps the account removable" || return 0
+
+  state="$TMP/state-rerun/install.state"
+  DC_STATE_FILE="$state"
+  DC_PASSWD_DB="$(make_removal_passwd_db)"
+  DC_ACCOUNTSSERVICE_DIR="$TMP/as-rerun"; mkdir -p "$DC_ACCOUNTSSERVICE_DIR"
+
+  # What the FIRST run left behind: it created dreamconnect-host itself.
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  # The second run: nothing in the environment, so the recorded account is
+  # adopted; the account exists, so this run did not create it.
+  resolved="$(host_account_installable "" 2>/dev/null)"
+  assert_eq "$resolved" "dreamconnect-host" \
+    "precondition: a bare re-run adopts the recorded account"
+  ensure_host_account "$resolved" >/dev/null 2>&1
+  assert_eq "$ACCOUNT_WAS_CREATED" "0" \
+    "precondition: the re-run did not create the account that already existed"
+
+  write_install_state "$resolved" 987 "$ACCOUNT_WAS_CREATED" 1
+
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  read_install_state
+  assert_eq "$CREATED_ACCOUNT" "1" \
+    "a bare re-run does not forget that the installer created the account"
+
+  try_removable "$DC_PASSWD_DB" "$state" "" dreamconnect-host kogies
+  assert_eq "$REMOVE_RC" "0" \
+    "after a bare re-run --uninstall may still remove the account (stderr: $REMOVE_ERR)"
+}
+
+# --- slice 8: the reserved-name set (root) + locale-independent name shape -----
+#
+# CONTRACT UNDER TEST — issue #21 sub-problem 3, quoted:
+#
+#   "DREAMCONNECT_HOST_ACCOUNT=root passes both the entry-point guard and
+#    valid_account_name, and would reach enable_autologin "$GDM_CONF" root (GDM
+#    itself refuses root autologin, so this fails closed today, but relying on GDM
+#    rather than our own guard is fragile) ... worth tightening to
+#    [[:upper:][:lower:]] in the C locale or an explicit ASCII-only check, and
+#    adding root to the reserved-name list alongside user/local."
+#
+# and factory/CHECKPOINT.md's slice-2 row: "reserved-name guard (root + user +
+# local at all 6 call sites) + LC_ALL=C fix in valid_account_name".
+#
+# So there is ONE reserved set — root, user, local — and every function that
+# already refuses "user"/"local", plus every function that acts destructively on
+# an account name and refuses neither, must refuse all three. Per call site:
+#
+#   1. host_account_installable <requested>   — the library half of install.sh's
+#      entry-point `case` (install.sh:179). Today the fresh-box path echoes
+#      <requested> back UNVALIDATED, so DREAMCONNECT_HOST_ACCOUNT=root survives
+#      the whole resolution. Refuse a reserved REQUESTED name, on a fresh box and
+#      on a re-run alike: non-zero, nothing on stdout, a stderr line saying
+#      "reserved" and naming the account, and install.state untouched. The
+#      RECORDED-name path (slice 1) gains root on top of user/local.
+#   2. configure_no_idle_lock / remove_no_idle_lock — the existing reserved `case`
+#      gains root. Same shape as the user/local tests already here: non-zero, a
+#      stderr line, and not one byte written or removed.
+#   3. ensure_host_account — no reserved check at all today. root exists in every
+#      passwd source, so the guard is what stops `install -D` stamping
+#      SystemAccount=true onto /var/lib/AccountsService/users/root and hiding root
+#      from the greeter. Refuse before the passwd lookup, useradd/usermod and any
+#      write.
+#   4. remove_accountsservice_marker — no reserved check today; from --uninstall
+#      the name comes off a state FILE, so `rm -f`/`mv -f` on .../users/root is one
+#      tampered line away. Refuse, and leave the directory exactly as found.
+#   5. enable_autologin <conf> <name> — validates NOTHING today; GDM's own refusal
+#      of root autologin is the only thing standing between us and
+#      AutomaticLogin=root in /etc/gdm/custom.conf. Refuse a reserved name (and,
+#      by the same rail every other destructive function here already carries, a
+#      name failing valid_account_name): non-zero, a stderr line, the conf file
+#      byte-for-byte unchanged and no .dreamconnect.bak created. A well-formed
+#      name keeps today's behaviour.
+#   6. host_account_removable — the architect's survey says this one is already
+#      sound via the uid-0 and /root-home rails. Verified below, AND extended: a
+#      passwd source is data, so an entry literally named "root" with a non-zero
+#      uid and a safe home satisfies all seven rails today and `userdel -r root`
+#      follows. The reserved set is a name rail, not a uid rail.
+#
+#   valid_account_name — the shape rule is UNCHANGED (^[A-Za-z_][A-Za-z0-9_-]*$,
+#   =32 chars, slice 6b's contract) but must mean the SAME thing in every locale:
+#   [A-Za-z] is an LC_COLLATE/LC_CTYPE-dependent range, and this box accepts "é"
+#   under en_US.utf8 while rejecting it under C. ASCII-only, whatever LC_ALL the
+#   invoking shell carries. valid_account_name itself stays a pure SHAPE
+#   predicate: "root"/"user"/"local" are well-shaped names, and the reserved
+#   refusals above are a separate rail with their own distinct wording, because
+#   the operator's fix differs ("choose another name" vs "that is not a name").
+
+# Loud skip: a box without a given locale must not silently lose the coverage.
+SKIPPED=0
+skip() { echo "  SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
+
+# The locales this box actually has, out of a candidate list chosen for their
+# LC_CTYPE: en_US.utf8 is the one demonstrated to accept "é" today, tr_TR.utf8 is
+# the classic dotless-i case-folding trap. C is always present and always listed
+# first, so the test can never be entirely vacuous.
+available_ctype_locales() {
+  local l have
+  have="$(locale -a 2>/dev/null || true)"
+  echo "C"
+  for l in en_US.utf8 en_US.UTF-8 tr_TR.utf8 tr_TR.UTF-8 de_DE.utf8 fr_FR.utf8; do
+    case $'\n'"$have"$'\n' in *$'\n'"$l"$'\n'*) echo "$l" ;; esac
+  done
+}
+
+# valid_account_name is evaluated in a sub-bash so the locale is really in force
+# for the [[ =~ ]] match, the same sub-bash technique
+# test_sourcing_is_side_effect_free uses. Echoes "valid" or "invalid".
+name_verdict_under_locale() {  # locale name
+  if LC_ALL="$1" bash -c '. "$1"; valid_account_name "$2"' _ "$LIB" "$2" 2>/dev/null; then
+    echo valid
+  else
+    echo invalid
+  fi
+}
+
+test_valid_account_name_is_locale_independent() {
+  local loc n locales count=0
+  require_valid_account_name "locale independence" || return 0
+  locales="$(available_ctype_locales)"
+  count="$(printf '%s\n' "$locales" | grep -c . || true)"
+  [ "$count" -gt 1 ] || skip "locale independence: no non-C locale installed (locale -a); only C exercised"
+
+  for loc in $locales; do
+    # An account name is ASCII. "é" is a letter to [A-Za-z] under a UTF-8
+    # LC_CTYPE and not one under C — the whole defect.
+    for n in "é" "dréam" "naïve" "Ünal"; do
+      assert_eq "$(name_verdict_under_locale "$loc" "$n")" "invalid" \
+        "LC_ALL=$loc: a non-ASCII letter is not an account name [$n]"
+    done
+    # And the fix must not over-tighten: the ordinary names slice 6b accepts stay
+    # accepted in every locale, including tr_TR's dotless-i.
+    for n in dreamconnect-host _svc A1 Iiz; do
+      assert_eq "$(name_verdict_under_locale "$loc" "$n")" "valid" \
+        "LC_ALL=$loc: an ordinary ASCII account name is still accepted [$n]"
+    done
+  done
+}
+
+# Call site 1, the fresh-box path: install.sh's entry-point `case` is the only
+# thing refusing a reserved REQUESTED name today, and install.sh has no harness —
+# so the refusal has to exist here too, where it can be tested and where a name
+# adopted out of install.state meets the same gate.
+test_host_account_installable_refuses_a_reserved_requested_account() {
+  local state name
+  for name in root user local; do
+    state="$TMP/state-installable-requested-$name/install.state"
+    mkdir -p "$(dirname "$state")"
+    assert_file_absent "$state" "precondition: fresh box, no state file"
+
+    try_installable "$state" "$name"
+    assert_install_refused "reserved requested account '$name' (fresh install)"
+    assert_eq "$INSTALLABLE_OUT" "" \
+      "reserved requested account '$name': nothing is resolved on stdout for the run to use"
+    assert_contains "$INSTALLABLE_ERR" "reserved" \
+      "reserved requested account '$name': the refusal says the name is reserved"
+    assert_contains "$INSTALLABLE_ERR" "$name" \
+      "reserved requested account '$name': the refusal names the account"
+    assert_file_absent "$state" \
+      "reserved requested account '$name': a refusal writes no state file"
+  done
+}
+
+# Call site 1, the adoption path: slice 1 added this for user/local only and
+# deliberately left root to this slice. Same two adopting paths, same wording.
+test_host_account_installable_refuses_root_as_the_recorded_account() {
+  local state before
+  state="$TMP/state-installable-recorded-root/install.state"
+  write_state_fixture "$state" root 0 1 1
+  before="$(cat "$state")"
+
+  try_installable "$state" ""
+  assert_install_refused "recorded account 'root' (no account requested)"
+  assert_eq "$INSTALLABLE_OUT" "" \
+    "recorded account 'root': nothing is resolved on stdout for the run to use"
+  assert_contains "$INSTALLABLE_ERR" "root" \
+    "recorded account 'root': the refusal names the recorded account"
+
+  try_installable "$state" root
+  assert_install_refused "recorded account 'root' (requested == recorded)"
+  assert_eq "$INSTALLABLE_OUT" "" \
+    "recorded account 'root': requesting it too still resolves nothing"
+  assert_eq "$(cat "$state" 2>/dev/null || true)" "$before" \
+    "recorded account 'root': install.state is left byte-for-byte alone"
+}
+
+# Call site 2, write side. Same assertions as the user/local test above it: the
+# one that matters is that nothing at all was written.
+test_configure_no_idle_lock_refuses_root_as_a_dconf_name() {
+  local d home shims log
+  require_no_idle_lock "write-side root guard" || return 0
+  shims="$TMP/shims-idle-configure-root"; log="$(make_idle_shims "$shims" 0)"
+  read -r d home <<<"$(idle_fixture "idle-configure-root")"
+
+  run_configure "$d" root "$home" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "root: exit 127, not a refusal"; return 0; }
+  assert_not_contains "$IDLE_OUT" "command not found" \
+    "root: the refusal came from the guard, not the shell"
+  [ "$IDLE_RC" -ne 0 ] || fail "configure 'root': expected non-zero exit, got $IDLE_RC"
+  [ -n "$IDLE_OUT" ] || fail "configure 'root': expected a stderr line explaining the refusal"
+  assert_eq "$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')" "0" \
+    "configure 'root': nothing at all written under DC_DCONF_DIR"
+  assert_eq "$(find "$home" -type f 2>/dev/null | wc -l | tr -d ' ')" "0" \
+    "configure 'root': nothing at all written under <home>"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "configure 'root': neither chown nor dconf update was run"
+}
+
+# Call site 2, removal side — and sharper, because here the name comes off a
+# state FILE: HOST_ACCOUNT=root would delete /etc/dconf/profile/root and the
+# root account's own db.
+test_remove_no_idle_lock_refuses_root_as_a_dconf_name() {
+  local d home shims log before
+  require_no_idle_lock "removal-side root guard" || return 0
+  shims="$TMP/shims-idle-remove-root"; log="$(make_dconf_shim "$shims")"
+  read -r d home <<<"$(idle_fixture "idle-remove-root")"
+
+  mkdir -p "$d/profile" "$d/db/root.d" "$home/.config/environment.d"
+  printf 'user-db:user\nsystem-db:root\n' > "$d/profile/root"
+  printf '[org/gnome/desktop/screensaver]\nlock-enabled=true\n' > "$d/db/root.d/00-display-host"
+  printf 'DCONF_PROFILE=somebody-else\n' > "$home/.config/environment.d/dconf-profile.conf"
+  printf 'yes\n' > "$home/.config/gnome-initial-setup-done"
+  before="$(find "$d" "$home" | sort)"
+
+  run_remove "$d" root "$home" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "root: exit 127, not a refusal"; return 0; }
+  assert_not_contains "$IDLE_OUT" "command not found" \
+    "root: the refusal came from the guard, not the shell"
+  [ "$IDLE_RC" -ne 0 ] || fail "removal 'root': expected non-zero exit, got $IDLE_RC"
+  [ -n "$IDLE_OUT" ] || fail "removal 'root': expected a stderr line explaining the refusal"
+  assert_eq "$(find "$d" "$home" | sort)" "$before" \
+    "removal 'root': nothing at all under DC_DCONF_DIR or <home> changed"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "removal 'root': a refused removal does not run dconf update either"
+}
+
+# Call site 3. root is in every passwd source, so ensure_host_account takes its
+# "account already exists" path and writes SystemAccount=true into
+# .../AccountsService/users/root — hiding root from the greeter, with a backup
+# of whatever was there. user/local may or may not exist; both are refused for
+# the same reason install.sh refuses them at the entry point.
+test_ensure_host_account_refuses_reserved_account_names() {
+  local db dir shims log name tag i=0
+  require_ensure_host_account "reserved-name guard" || return 0
+  db="$(make_fresh_passwd_db)"
+
+  for name in root user local; do
+    tag="as-create-reserved-$i"; i=$((i + 1))
+    dir="$TMP/$tag"; mkdir -p "$dir"
+    shims="$TMP/shims-$tag"; log="$(make_cmd_shims "$shims")"
+
+    run_ensure_shimmed "$db" "$dir" "$shims" "$name"
+    [ "$ENSURE_RC" -ne 127 ] || { fail "reserved name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$ENSURE_OUT" "command not found" \
+      "reserved name '$name': the refusal came from the guard, not the shell"
+    [ "$ENSURE_RC" -ne 0 ] || \
+      fail "reserved ensure '$name': expected non-zero exit, got $ENSURE_RC"
+    [ -n "$ENSURE_OUT" ] || \
+      fail "reserved ensure '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "reserved ensure '$name': neither useradd nor usermod was invoked"
+    assert_eq "$(find "$dir" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')" "0" \
+      "reserved ensure '$name': nothing at all written under DC_ACCOUNTSSERVICE_DIR"
+  done
+}
+
+# Call site 4, the --uninstall counterpart, driven by a name off a state FILE:
+# HOST_ACCOUNT=root makes the restore branch overwrite root's AccountsService
+# file and the remove branch delete it.
+test_remove_accountsservice_marker_refuses_reserved_account_names() {
+  local dir name tag i=0 before
+  require_remove_accountsservice_marker "reserved-name guard" || return 0
+
+  for name in root user local; do
+    tag="as-rm-reserved-$i"; i=$((i + 1))
+    dir="$TMP/$tag"; mkdir -p "$dir"
+    printf '[User]\nSystemAccount=true\n' > "$dir/$name"
+    plant_preexisting_accountsservice_file "$dir/$name.dreamconnect.bak"
+    before="$(find "$dir" | sort)"
+
+    run_remove_marker "$dir" "$name"
+    [ "$REMOVE_MARKER_RC" -ne 127 ] || { fail "reserved name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$REMOVE_MARKER_OUT" "command not found" \
+      "reserved name '$name': the refusal came from the guard, not the shell"
+    [ "$REMOVE_MARKER_RC" -ne 0 ] || \
+      fail "reserved marker removal '$name': expected non-zero exit, got $REMOVE_MARKER_RC"
+    [ -n "$REMOVE_MARKER_OUT" ] || \
+      fail "reserved marker removal '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(find "$dir" | sort)" "$before" \
+      "reserved marker removal '$name': the AccountsService dir is left exactly as found"
+  done
+}
+
+# A real /etc/gdm/custom.conf: the stock Fedora/Debian shape, with the [daemon]
+# section enable_autologin edits and a neighbouring section it must not touch.
+plant_gdm_conf() {  # path
+  mkdir -p "$(dirname "$1")"
+  cat > "$1" <<'EOF'
+# GDM configuration storage
+
+[daemon]
+# Uncomment the line below to force the login screen to use Xorg
+#WaylandEnable=false
+
+[security]
+
+[xdmcp]
+
+[chooser]
+
+[debug]
+# Uncomment the line below to turn on debugging
+#Enable=true
+EOF
+}
+
+RUN_AUTOLOGIN_OUT=""
+RUN_AUTOLOGIN_RC=0
+run_enable_autologin() {  # conf name
+  RUN_AUTOLOGIN_OUT="$(enable_autologin "$1" "$2" 2>&1)"
+  RUN_AUTOLOGIN_RC=$?
+  return 0
+}
+
+# Call site 5, the one the issue names outright: "would reach enable_autologin
+# "$GDM_CONF" root (GDM itself refuses root autologin, so this fails closed
+# today, but relying on GDM rather than our own guard is fragile)".
+#
+# NARROWED (breaker lap 1, slice 2). This function has TWO callers with
+# genuinely different notions of a valid name — install.sh:344 (host-account
+# mode, a name this installer is about to CREATE, already validated for shape
+# and the reserved set at install.sh:183-192, host_account_installable and
+# ensure_host_account) and install.sh:349 (classic mode, DREAMCONNECT_AUTOLOGIN=1,
+# a PRE-EXISTING desktop account resolved through detect_user/resolve_host_identity
+# that no rule of ours ever governed). So enable_autologin is not the place for
+# "is this shaped like a new account name" or for the dconf profile reservations
+# (user/local), which classic mode never touches. See the acceptance test below.
+#
+# What stays is the narrower, caller-independent rail: names that break the
+# mechanism this function IS. `root` — a graphical autologin as root is the
+# hazard issue #21 sub-problem 3 names at this exact call site, GDM refuses it
+# itself, and neither mode has a legitimate reason to ask for it. An empty name,
+# which writes an `AutomaticLogin=` key nothing can ever satisfy. And a name
+# carrying a newline or carriage return, which is not a name-policy question at
+# all: it is pasted verbatim into the [daemon] section and would inject arbitrary
+# GDM config keys. Everything else is the caller's business, not this function's.
+test_enable_autologin_refuses_only_root_and_names_that_corrupt_the_conf() {
+  local conf name tag i=0 before
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — refusal not demonstrated"; return 0; }
+
+  for name in root "" $'dc\nAutomaticLoginEnable=true' $'dc\rx'; do
+    tag="gdm-refuse-$i"; i=$((i + 1))
+    conf="$TMP/$tag/custom.conf"
+    plant_gdm_conf "$conf"
+    before="$(cat "$conf")"
+
+    run_enable_autologin "$conf" "$name"
+    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$RUN_AUTOLOGIN_OUT" "command not found" \
+      "autologin '$name': the refusal came from the guard, not the shell"
+    [ "$RUN_AUTOLOGIN_RC" -ne 0 ] || \
+      fail "autologin '$name': expected non-zero exit, got $RUN_AUTOLOGIN_RC"
+    [ -n "$RUN_AUTOLOGIN_OUT" ] || \
+      fail "autologin '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$conf")" "$before" \
+      "autologin '$name': the GDM config is left byte-for-byte alone"
+    assert_not_contains "$(cat "$conf")" "AutomaticLogin=" \
+      "autologin '$name': no autologin key is written for a refused name"
+    assert_file_absent "$conf.dreamconnect.bak" \
+      "autologin '$name': a refusal backs nothing up either"
+  done
+}
+
+# The other half of call site 5, so the guard above cannot be satisfied by
+# refusing everything: an ordinary account still gets autologin configured, and
+# the backup enable_autologin's own comment promises. This documents today's
+# behaviour (it passes before the guard exists) and pins it afterwards.
+test_enable_autologin_still_configures_an_ordinary_account() {
+  local conf
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined"; return 0; }
+  conf="$TMP/gdm-ordinary/custom.conf"
+  plant_gdm_conf "$conf"
+
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "a well-formed account is configured (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
+    "the autologin key names the display-host account"
+  assert_contains "$(cat "$conf")" "AutomaticLoginEnable=true" \
+    "autologin is enabled"
+  assert_file_exists "$conf.dreamconnect.bak" "the original GDM config is backed up"
+}
+
+# The other caller: install.sh:346-351, classic mode. `$USER_NAME` there is the
+# machine's EXISTING desktop user — detect_user/resolve_host_identity, resolved
+# out of the passwd source, never created by this installer and never subject to
+# its new-account rules. On an SSSD/AD-joined box that name is routinely
+# `john.doe`; it can exceed 32 characters; it can be literally `user` or `local`,
+# which are dconf PROFILE reservations and mean nothing here because classic mode
+# touches neither dconf nor AccountsService nor useradd. Every one of these is a
+# real Linux account whose owner has opted in with DREAMCONNECT_AUTOLOGIN=1.
+#
+# Expected value from GDM's custom.conf format — `AutomaticLogin=<name>`, the
+# account name verbatim — and from the classic-mode contract at install.sh:346.
+# A refusal here aborts install.sh under `set -euo pipefail` at line 349, AFTER
+# deps, build, deploy, the daemon unit and enable-linger have all run.
+test_enable_autologin_accepts_an_existing_account_that_is_not_new_account_shaped() {
+  local conf name tag i=0 long
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined"; return 0; }
+
+  long="averylongdomainaccountname.for.a.joined.box"   # 43 chars, has dots
+  for name in john.doe user local "$long" _svc-desk; do
+    tag="gdm-classic-$i"; i=$((i + 1))
+    conf="$TMP/$tag/custom.conf"
+    plant_gdm_conf "$conf"
+
+    run_enable_autologin "$conf" "$name"
+    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127"; continue; }
+    assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+      "autologin '$name': a pre-existing desktop account is configured, not refused (stderr: $RUN_AUTOLOGIN_OUT)"
+    assert_contains "$(cat "$conf")" "AutomaticLogin=$name" \
+      "autologin '$name': the account name is written verbatim into [daemon]"
+    assert_contains "$(cat "$conf")" "AutomaticLoginEnable=true" \
+      "autologin '$name': autologin is enabled"
+    assert_file_exists "$conf.dreamconnect.bak" \
+      "autologin '$name': the original GDM config is backed up"
+  done
+}
+
+# The third way a name pasted into [daemon] corrupts the conf, and the one the
+# newline/CR rail above cannot see. enable_autologin hands the name to awk as
+# `awk -v user="$user"`, and a -v assignment is NOT a verbatim string: POSIX
+# (awk, OPERANDS: "an assignment ... shall be evaluated as if it were an
+# assignment with a string literal") makes awk process C escape sequences in the
+# VALUE before the script runs. So a shell string holding the two characters
+# backslash and `n` — no newline byte anywhere in it, which is why the *$'\n'*
+# case pattern never matches — becomes a real newline INSIDE awk, and
+# `print "AutomaticLogin=" user` emits two lines. `\t` becomes a tab, `\\`
+# becomes one backslash; every one of them writes something other than the
+# account the caller named.
+#
+# `DOMAIN\nick` is not a contrived string: backslash is the NSS/winbind
+# separator between a domain and the local part (`winbind separator = \` is the
+# Samba default), so it is exactly what a domain-joined box hands classic mode
+# through detect_user. Its corruption is invisible: rc 0, and
+# disable_autologin's undo only drops AutomaticLogin* keys, so the stray bare
+# line survives uninstall.
+#
+# Expected value from GDM's custom.conf format (key=value, one key per line — a
+# bare word on its own line is not a valid entry) and from this function's own
+# stated rail: a name that would corrupt the file rather than merely name the
+# wrong account is REFUSED before the backup. Same shape as the newline/CR
+# refusal directly above: non-zero exit, a stderr line, the conf byte-identical,
+# no .dreamconnect.bak. Not a name-policy question — the classic-mode acceptance
+# test above still stands, and no legitimate GDM AutomaticLogin value can carry
+# a backslash, because GDM would receive the escaped form, not the name.
+test_enable_autologin_refuses_a_name_whose_backslash_awk_would_expand() {
+  local conf name tag i=0 before
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined"; return 0; }
+
+  for name in 'DOMAIN\nick' 'dc\tx' 'dc\\x'; do
+    tag="gdm-backslash-$i"; i=$((i + 1))
+    conf="$TMP/$tag/custom.conf"
+    plant_gdm_conf "$conf"
+    before="$(cat "$conf")"
+
+    # The premise: these are ORDINARY shell strings. If one of them carried a
+    # real newline/CR the existing rail would already catch it and this test
+    # would prove nothing about the backslash.
+    case "$name" in
+      *$'\n'*|*$'\r'*) fail "autologin '$name': fixture carries a real newline/CR — tests the wrong rail"; continue ;;
+    esac
+
+    run_enable_autologin "$conf" "$name"
+    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$RUN_AUTOLOGIN_OUT" "command not found" \
+      "autologin '$name': the refusal came from the guard, not the shell"
+    [ "$RUN_AUTOLOGIN_RC" -ne 0 ] || \
+      fail "autologin '$name': expected non-zero exit, got $RUN_AUTOLOGIN_RC"
+    [ -n "$RUN_AUTOLOGIN_OUT" ] || \
+      fail "autologin '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$conf")" "$before" \
+      "autologin '$name': the GDM config is left byte-for-byte alone"
+    assert_not_contains "$(cat "$conf")" "AutomaticLogin=" \
+      "autologin '$name': no autologin key is written for a refused name"
+    assert_file_absent "$conf.dreamconnect.bak" \
+      "autologin '$name': a refusal backs nothing up either"
+  done
+}
+
+# Call site 6. Two halves, because a passwd source is DATA, not a fact about the
+# box: the real root entry is refused by the uid-0 and /root-home rails that are
+# already there (verifying the architect's "already sound"), while an entry
+# literally NAMED root carrying a non-zero uid, a safe home, our GECOS marker and
+# a matching state record satisfies every one of those seven rails — and
+# `userdel -r root` follows. The reserved set is a NAME rail, not a uid rail.
+make_root_named_passwd_db() {
+  cat > "$TMP/passwd-root-named" <<'EOF'
+kogies:x:1000:1000:Kogies:/home/kogies:/bin/bash
+root:x:993:993:DreamConnect display host:/var/lib/dc-root:/bin/bash
+EOF
+  echo "$TMP/passwd-root-named"
+}
+
+test_host_account_removable_refuses_root_however_the_passwd_source_spells_it() {
+  local db state
+  # Half 1: the genuine root entry (uid 0, home /root) — already refused today.
+  db="$(make_removal_passwd_db)"
+  state="$TMP/state-removable-real-root/install.state"
+  write_state_fixture "$state" root 0 1 1
+  try_removable "$db" "$state" "" root kogies
+  assert_refused "the real root entry (uid 0, home /root)"
+
+  # Half 2: an entry named root that satisfies all seven existing rails.
+  db="$(make_root_named_passwd_db)"
+  state="$TMP/state-removable-named-root/install.state"
+  write_state_fixture "$state" root 993 1 1
+  try_removable "$db" "$state" "" root kogies
+  assert_refused "an entry NAMED root with a non-zero uid and a safe home"
+  assert_contains "$REMOVE_ERR" "root" "the refusal names the account it protected"
+}
+
+# --- slice 9: valid_home_dir — the home argument nobody validates --------------
+#
+# CONTRACT UNDER TEST — issue #21 sub-problem 2, quoted verbatim:
+#
+#   "`remove_no_idle_lock` doesn't validate its `home` argument. It validates
+#    `name` via `valid_account_name` but not `home`. If the host account is
+#    deleted by hand before running `--uninstall`, `passwd_entry | cut -f6`
+#    yields an empty string, and root then runs
+#    `rm -f "/.config/environment.d/dconf-profile.conf"` and
+#    `rm -f "/.config/gnome-initial-setup-done"` — harmless today (nothing
+#    typically lives at literal `/.config`), but unguarded."
+#
+# and factory/CHECKPOINT.md's slice-3 row: "home-dir guard (valid_home_dir):
+# non-empty, absolute, not / /home /root, no `..`. Hard error in
+# configure_no_idle_lock, skip-the-home-half-and-continue in remove_no_idle_lock,
+# guard on install.sh:85's rm -f."
+#
+#   valid_home_dir <path>
+#     A pure SHAPE predicate, exactly like valid_account_name beside it: no
+#     output, no filesystem, no passwd lookup, exit 0 for usable / non-zero for
+#     not. It answers one question only — "is it safe to paste this into
+#     `rm -f "$home/.config/..."`, `install -d "$home/.config/systemd/user"`,
+#     `sed > "$home/..."` and `chown <name>: "$home/.config"` as root?" — and
+#     each rail below is one call site's failure, not a generic checklist:
+#
+#       1. NON-EMPTY. The issue's literal trigger: an account deleted by hand
+#          makes `passwd_entry | cut -d: -f6` yield "", and every path above
+#          collapses onto /.config/... — root's own rm/chown target.
+#       2. ABSOLUTE (starts with "/"). passwd(5) field 6 is absolute by
+#          definition, so a relative value is already corrupt data; pasted in, it
+#          resolves against root's CWD, which for install.sh is the checkout the
+#          operator happened to run it from.
+#       3. NOT EXACTLY "/". Same paths as rail 1, reached a different way; and
+#          `chown <name>: "/.config"` hands a directory at the filesystem root to
+#          the display-host account.
+#       4. NOT EXACTLY "/home" OR "/root". Not invented here: install-lib.sh's
+#          host_account_removable already refuses exactly these three values with
+#          "home directory is $home", so the dangerous set is the repo's own,
+#          reused. /home/.config would be created, chowned and later deleted in a
+#          directory shared by every human on the box; /root puts our dconf
+#          drop-in inside root's home and chowns it to the host account.
+#       5. NO ".." PATH COMPONENT. A COMPONENT, not a substring: /var/lib/x/..
+#          walks the rm/install/chown one level out of the home it was given,
+#          exactly the reasoning valid_account_name's "./user" rail already
+#          carries — while /var/lib/dc..host is an ordinary directory name and
+#          must stay valid.
+#
+#     Deliberately NOT a rail: whitespace. USER_HOME with a space does truncate
+#     at install.sh:214's `read -r NAME UID HOME _`, but this same predicate
+#     guards classic mode, where <home> is a human's real passwd entry —
+#     rejecting it would abort a legitimate install, which is the exact mistake
+#     slice 2's breaker lap 1 found in enable_autologin. Noted, not enforced here.
+#
+#   remove_no_idle_lock <name> <home>, home unusable
+#     SKIP THE HOME HALF, DO THE REST, CONTINUE. The two /etc/dconf reverts
+#     (profile, keyfile, the now-empty <name>.d) and `dconf update` are wholly
+#     independent of <home> and are the half that actually matters — they are
+#     what --uninstall leaves behind otherwise. So they still run, a warning
+#     naming the problem goes to stderr, the two home files are left completely
+#     alone, and the function exits 0: the account's home is gone or unusable, so
+#     there is nothing there to have failed to revert, and install.sh:113 would
+#     otherwise print "could not fully revert idle-lock config — continuing" over
+#     a successful revert.
+#
+#   configure_no_idle_lock <name> <home>, home unusable
+#     HARD ERROR, and nothing at all written — the same shape as its reserved-
+#     and malformed-name guards above. This is the WRITE side, running during
+#     install: files created under a bad home path are artefacts --uninstall can
+#     never find again, and install is exactly when there is an operator present
+#     to read the failure.
+#
+#   Both refusals name the account and use the word "home", so the operator can
+#   tell this rail from the name rails at a glance.
+#
+# install.sh's own two consumers of the same unvalidated value — the
+# `rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service"` at
+# install.sh:85 and the `install -d` / sed / chown on $USER_HOME at
+# install.sh:298-302 — get the same guard, but install.sh has no harness (see the
+# header of this file), so they are verified by hand-trace + bash -n + this suite,
+# not by a test here. Same caveat as slices 1 and 2.
+
+HOMEDIR_RC=0
+HOMEDIR_ERR=""
+
+try_valid_home() {  # path
+  HOMEDIR_ERR="$(valid_home_dir "$1" 2>&1 >/dev/null)"
+  HOMEDIR_RC=$?
+  return 0
+}
+
+# A missing function exits 127 with "command not found" on stderr, which is
+# non-zero — so every rejection assertion below would pass vacuously against a
+# library that never defines valid_home_dir at all.
+require_valid_home_dir() {  # label
+  declare -F valid_home_dir >/dev/null && return 0
+  fail "$1: valid_home_dir() is not defined"
+  return 1
+}
+
+assert_home_rejected() {  # path label
+  try_valid_home "$1"
+  [ "$HOMEDIR_RC" -ne 127 ] || {
+    fail "$2: exit 127 (not defined), not a rejection of [$1]"; return 0; }
+  assert_not_contains "$HOMEDIR_ERR" "command not found" \
+    "$2: the rejection came from the function, not the shell"
+  [ "$HOMEDIR_RC" -ne 0 ] || fail "$2: expected non-zero (unusable) for [$1], got 0"
+}
+
+assert_home_accepted() {  # path label
+  try_valid_home "$1"
+  assert_eq "$HOMEDIR_RC" "0" "$2: expected usable (exit 0) for [$1] (stderr: $HOMEDIR_ERR)"
+}
+
+test_library_defines_valid_home_dir() {
+  declare -F valid_home_dir >/dev/null \
+    || fail "install-lib.sh defines valid_home_dir(): not defined"
+}
+
+# The homes this installer actually meets: /var/lib/<name> from
+# `useradd --system --create-home` (host-account mode, and the shape the passwd
+# fixtures at the top of this file already use), and a human's /home/<user> from
+# the passwd source (classic mode, including the dotted AD-style name slice 2's
+# breaker lap established really does reach these paths). A predicate that
+# rejects any of these breaks the feature rather than protecting it.
+test_valid_home_dir_accepts_real_home_directories() {
+  local p
+  require_valid_home_dir "accepts real homes" || return 0
+  for p in /var/lib/dreamconnect-host /var/lib/dreamconnect-host2 /home/kogies \
+           /home/john.doe /srv/dreamconnect /home/dc-host2; do
+    assert_home_accepted "$p" "an ordinary home directory"
+  done
+  # Rail 5 is about a PATH COMPONENT: dots inside a directory NAME traverse
+  # nothing, and a predicate matching the substring ".." would reject this.
+  assert_home_accepted "/var/lib/dc..host" "dots inside a component are not traversal"
+}
+
+# Rails 1 and 2. The empty string is the issue's literal repro; a relative path
+# resolves against root's CWD wherever install.sh was launched from.
+test_valid_home_dir_rejects_empty_and_relative_paths() {
+  require_valid_home_dir "empty and relative" || return 0
+  assert_home_rejected "" "an account deleted by hand yields an empty passwd field 6"
+  assert_home_rejected "var/lib/dreamconnect-host" "a home with no leading slash is not absolute"
+  assert_home_rejected "home/kogies" "a relative path resolves against root's CWD"
+  assert_home_rejected "./dreamconnect-host" "a dot-relative path is not a home directory"
+}
+
+# Rail 3 and 4. The set is install-lib.sh's own: host_account_removable already
+# refuses exactly / , /home and /root as a home directory, and these are the
+# values that make the rm/install/chown land on shared ground.
+test_valid_home_dir_rejects_the_shared_roots() {
+  require_valid_home_dir "shared roots" || return 0
+  assert_home_rejected "/"     "the filesystem root is never an account's home"
+  assert_home_rejected "/home" "/home is every human's parent directory, not a home"
+  assert_home_rejected "/root" "/root is root's own home"
+  # Only the three values themselves: a real home UNDER /home must stay valid,
+  # or classic mode stops installing at all.
+  assert_home_accepted "/home/kogies" "a home under /home is still a home"
+}
+
+# Rails 3 and 4 again, spelled the way a passwd file, an operator or a shell
+# variable actually spells them — breaker lap 1 finding #1, quoted from
+# factory/CHECKPOINT.md:
+#
+#   "valid_home_dir's /, /home, /root reserved-path rail is a literal string
+#    compare, bypassed by non-canonical spellings: /root/, //root, /root/.,
+#    /./root. As root, configure_no_idle_lock dchost "/root/" would chown
+#    /root/.config (and subdirs) to the host account"
+#
+# The dangerous value is the PATH, not the spelling. A trailing slash, a doubled
+# slash and a "." component are all no-ops on the resolved path — POSIX 4.13
+# pathname resolution: "." names the directory itself, a sequence of slashes is
+# equivalent to one, a trailing slash is equivalent to a trailing "/." — so
+# every string below IS /, /home or /root, and `rm -f "$home/.config/..."`,
+# `install -d` and `chown <name>: "$home/.config"` land on exactly the ground
+# the three literals were added to protect. Rail 5 catches none of these: not one
+# of them contains a ".." component.
+test_valid_home_dir_rejects_noncanonical_spellings_of_the_shared_roots() {
+  local p
+  require_valid_home_dir "non-canonical shared roots" || return 0
+
+  # The four the breaker demonstrated, on the value it demonstrated them with.
+  for p in "/root/" "//root" "/root/." "/./root"; do
+    assert_home_rejected "$p" "[$p] resolves to /root, root's own home"
+  done
+  # The same three transforms on the other two reserved values, and stacked:
+  # nothing here is a different rule, only a different spelling of the same one.
+  for p in "/home/" "//home" "/home/." "/./home" "/home/./" "//home//" \
+           "//" "///" "/." "/./" "/.//" "//root/" "/root/./" "/./root/." \
+           "//./root" "/root//."; do
+    assert_home_rejected "$p" "[$p] resolves to a shared root"
+  done
+
+  # The anti-overreach half. Normalising for the comparison must not start
+  # rejecting paths that merely CONTAIN a slash run or a "." component: these all
+  # resolve to an ordinary home under /home or /var/lib, and classic mode meets
+  # trailing-slash passwd entries in the wild.
+  for p in "/home/kogies/" "//home/kogies" "/home/./kogies" "/home/kogies/." \
+           "/var/lib/dreamconnect-host/" "//var/lib/dreamconnect-host" \
+           "/var/lib/./dc..host" "/home/john.doe/"; do
+    assert_home_accepted "$p" "[$p] resolves to an ordinary home directory"
+  done
+}
+
+# Rail 5. Each of these makes `rm -f "$home/.config/..."` and
+# `chown <name>: "$home/.config"` act one or more levels OUT of the directory the
+# caller named — the same escape valid_account_name's "./user" rail closes for
+# the name half.
+test_valid_home_dir_rejects_dotdot_components() {
+  local p
+  require_valid_home_dir "dotdot components" || return 0
+  for p in ".." "../etc" "/.." "/var/lib/dreamconnect-host/.." "/var/../root" \
+           "/home/../home" "/var/lib/../../etc"; do
+    assert_home_rejected "$p" "a .. component walks out of the home it was given"
+  done
+  # Regression guard for breaker lap 1 finding #1's fix: normalising "." away
+  # must NOT normalise ".." away with it. ".." is rejected because a home that
+  # traverses is unsafe whatever it resolves to — a separate rail from the
+  # reserved-name one, and it stays a rejection, not something resolved out.
+  # /root/../etc would otherwise "normalise" to /etc and pass; /home/x/.. to
+  # /home and be caught by the wrong rail with the wrong message.
+  for p in "/root/../etc" "/home/x/.." "/var/lib/host/../../root" \
+           "/home/./x/.." "//home//x//.." "/root/.././root"; do
+    assert_home_rejected "$p" "[$p] still has a .. component after normalisation"
+  done
+  # And the substring guard, restated here because the fix touches this string:
+  # ".." inside a component name traverses nothing and must survive.
+  assert_home_accepted "/var/lib/dc..host" "dots inside a component are not traversal"
+  assert_home_accepted "/home/..john" "a leading double dot in a NAME is not a component"
+}
+
+# /etc/dconf as configure_no_idle_lock leaves it, planted by hand rather than by
+# calling configure: this test is about the REMOVAL contract, and the contents of
+# these two files are already pinned by the slice-5 tests above.
+plant_configured_dconf_tree() {  # dconf_dir name
+  local d="$1" name="$2"
+  mkdir -p "$d/profile" "$d/db/$name.d"
+  printf 'user-db:user\nsystem-db:%s\n' "$name" > "$d/profile/$name"
+  printf '[org/gnome/desktop/screensaver]\nlock-enabled=false\n' \
+    > "$d/db/$name.d/00-display-host"
+}
+
+# THE ISSUE'S CASE. Both halves of the contract at once: the /etc/dconf revert
+# still happens (skipping it would strand exactly what --uninstall exists to
+# remove) and the home half does not (a bad <home> is the whole point).
+#
+# Round 1 is the issue's literal repro — the account deleted by hand, passwd
+# field 6 empty. Round 2 makes the skip OBSERVABLE with real files: <home> is a
+# path with a .. component, so the two home paths resolve onto planted files that
+# today's bare `rm -f` deletes and the guard must leave untouched. Asserting the
+# absence of an effect at literal /.config is not something this non-root suite
+# can do, so round 2 is where the destructive behaviour is actually pinned.
+test_remove_no_idle_lock_skips_the_home_half_for_an_unusable_home() {
+  local d home shims log bad envf gisf
+  require_no_idle_lock "unusable-home skip" || return 0
+
+  # --- round 1: empty home (account deleted by hand before --uninstall) -------
+  shims="$TMP/shims-idle-remove-emptyhome"; log="$(make_dconf_shim "$shims")"
+  read -r d home <<<"$(idle_fixture idle-remove-emptyhome)"
+  plant_configured_dconf_tree "$d" dreamconnect-host
+
+  run_remove "$d" dreamconnect-host "" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "empty home: exit 127, not a guarded skip"; return 0; }
+  assert_eq "$IDLE_RC" "0" \
+    "empty home: the uninstall continues — the /etc/dconf half succeeded (stderr: $IDLE_OUT)"
+  [ -n "$IDLE_OUT" ] || fail "empty home: expected a stderr warning about the unusable home"
+  assert_contains "$IDLE_OUT" "home" \
+    "empty home: the warning says it is the HOME that is unusable, not the name"
+  assert_contains "$IDLE_OUT" "dreamconnect-host" \
+    "empty home: the warning names the account it was reverting"
+  assert_file_absent "$d/profile/dreamconnect-host" \
+    "empty home: the dconf profile is STILL removed"
+  assert_file_absent "$d/db/dreamconnect-host.d/00-display-host" \
+    "empty home: the db keyfile is STILL removed"
+  assert_file_absent "$d/db/dreamconnect-host.d" \
+    "empty home: the now-empty <name>.d directory is STILL removed"
+  assert_contains "$(cat "$log" 2>/dev/null || true)" "== dconf" \
+    "empty home: dconf update STILL runs — the db must be recompiled either way"
+
+  # --- round 2: a .. component, with real files behind it --------------------
+  shims="$TMP/shims-idle-remove-badhome"; log="$(make_dconf_shim "$shims")"
+  read -r d home <<<"$(idle_fixture idle-remove-badhome)"
+  plant_configured_dconf_tree "$d" dreamconnect-host
+  bad="$home/.."
+  envf="$TMP/idle-remove-badhome/.config/environment.d/dconf-profile.conf"
+  gisf="$TMP/idle-remove-badhome/.config/gnome-initial-setup-done"
+  mkdir -p "$(dirname "$envf")"
+  printf 'DCONF_PROFILE=somebody-else\n' > "$envf"
+  printf 'already-done-by-the-human\n'   > "$gisf"
+
+  run_remove "$d" dreamconnect-host "$bad" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "traversing home: exit 127, not a guarded skip"; return 0; }
+  assert_eq "$IDLE_RC" "0" \
+    "traversing home: the uninstall continues (stderr: $IDLE_OUT)"
+  assert_contains "$IDLE_OUT" "home" \
+    "traversing home: the warning says it is the HOME that is unusable"
+  assert_file_exists "$envf" \
+    "traversing home: a file one level out of the given home is NOT deleted"
+  assert_eq "$(cat "$envf" 2>/dev/null || true)" "DCONF_PROFILE=somebody-else" \
+    "traversing home: somebody else's DCONF_PROFILE is byte-for-byte untouched"
+  assert_file_exists "$gisf" \
+    "traversing home: the initial-setup marker outside the home is NOT deleted"
+  assert_file_absent "$d/profile/dreamconnect-host" \
+    "traversing home: the dconf profile is STILL removed"
+  assert_file_absent "$d/db/dreamconnect-host.d/00-display-host" \
+    "traversing home: the db keyfile is STILL removed"
+  assert_contains "$(cat "$log" 2>/dev/null || true)" "== dconf" \
+    "traversing home: dconf update STILL runs"
+}
+
+# The WRITE side of the same defect, unnamed by the issue but the same class:
+# configure_no_idle_lock validates <name> and not <home> either. Here the answer
+# is the opposite one — refuse outright, write nothing — because an install that
+# lays a dconf profile, a system db and two home files down under a bad path
+# leaves artefacts --uninstall can never find, and there is an operator watching.
+# Same assertion shape as its reserved- and malformed-name tests above: the one
+# that matters is that NOTHING at all was written.
+test_configure_no_idle_lock_refuses_an_unusable_home() {
+  local d home shims log bad
+  require_no_idle_lock "write-side home guard" || return 0
+
+  # --- round 1: empty home ---------------------------------------------------
+  shims="$TMP/shims-idle-configure-emptyhome"; log="$(make_idle_shims "$shims" 0)"
+  read -r d home <<<"$(idle_fixture idle-configure-emptyhome)"
+
+  run_configure "$d" dreamconnect-host "" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "empty home: exit 127, not a refusal"; return 0; }
+  assert_not_contains "$IDLE_OUT" "command not found" \
+    "empty home: the refusal came from the guard, not the shell"
+  [ "$IDLE_RC" -ne 0 ] || fail "configure with an empty home: expected non-zero exit, got 0"
+  assert_contains "$IDLE_OUT" "home" \
+    "empty home: the refusal says it is the HOME that is unusable, not the name"
+  assert_contains "$IDLE_OUT" "dreamconnect-host" \
+    "empty home: the refusal names the account"
+  assert_eq "$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')" "0" \
+    "empty home: nothing at all written under DC_DCONF_DIR"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "empty home: neither chown nor dconf update was run"
+
+  # --- round 2: a .. component, with a real directory behind it --------------
+  shims="$TMP/shims-idle-configure-badhome"; log="$(make_idle_shims "$shims" 0)"
+  read -r d home <<<"$(idle_fixture idle-configure-badhome)"
+  bad="$home/.."
+
+  run_configure "$d" dreamconnect-host "$bad" "$shims"
+  [ "$IDLE_RC" -ne 127 ] || { fail "traversing home: exit 127, not a refusal"; return 0; }
+  [ "$IDLE_RC" -ne 0 ] || fail "configure with a traversing home: expected non-zero exit, got 0"
+  assert_contains "$IDLE_OUT" "home" \
+    "traversing home: the refusal says it is the HOME that is unusable"
+  assert_file_absent "$TMP/idle-configure-badhome/.config" \
+    "traversing home: no .config is created one level out of the given home"
+  assert_eq "$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')" "0" \
+    "traversing home: nothing at all written under DC_DCONF_DIR"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "traversing home: neither chown nor dconf update was run"
+
+  # --- round 3: the breaker's own demonstration, at the call site ------------
+  # factory/CHECKPOINT.md, breaker lap 1 finding #1: "As root,
+  # configure_no_idle_lock dchost "/root/" would chown /root/.config (and
+  # subdirs) to the host account". This round is that call, verbatim in shape.
+  #
+  # The observable that does NOT need root: configure writes the dconf profile
+  # and the system db BEFORE it ever touches <home>, so an unguarded run leaves
+  # files under DC_DCONF_DIR whatever it then fails to do to /root. The refusal
+  # must happen before any of that, and must name the HOME.
+  #
+  # Skipped under root, deliberately: this call really does create and chown
+  # /root/.config on a box where the guard is missing, which is the defect
+  # itself — a test must not be the thing that performs it.
+  if [ "$(id -u)" -eq 0 ]; then
+    skip "configure with /root/: not run as root — this call is destructive without the guard"
+  else
+    shims="$TMP/shims-idle-configure-rootslash"; log="$(make_idle_shims "$shims" 0)"
+    read -r d home <<<"$(idle_fixture idle-configure-rootslash)"
+
+    run_configure "$d" dreamconnect-host "/root/" "$shims"
+    [ "$IDLE_RC" -ne 127 ] || { fail "/root/: exit 127, not a refusal"; return 0; }
+    [ "$IDLE_RC" -ne 0 ] || fail "configure with /root/: expected non-zero exit, got 0"
+    assert_contains "$IDLE_OUT" "home" \
+      "/root/: the refusal says it is the HOME that is unusable"
+    assert_eq "$(find "$d" -type f 2>/dev/null | wc -l | tr -d ' ')" "0" \
+      "/root/: nothing at all written under DC_DCONF_DIR"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "/root/: neither chown nor dconf update was run"
+  fi
+}
+
+# --- slice 9b: resolve_host_identity is the PRODUCER of the unvalidated home ---
+#
+# CONTRACT UNDER TEST — factory/CHECKPOINT.md, "Seraph gate: FAIL", quoted:
+#
+#   "`resolve_host_identity` emits a space-delimited string
+#    `"$name $uid $home /run/user/$uid/dreamconnect.sock"`. When `$home` is empty
+#    ... the string has a double space; bash's
+#    `read -r USER_NAME USER_UID USER_HOME _ <<<"$IDENTITY"` word-splitting on
+#    default IFS COLLAPSES the empty field, shifting the socket path into
+#    `$USER_HOME` instead of leaving it empty. Site B's `valid_home_dir
+#    "$USER_HOME"` guard then checks the socket path (which IS a valid-looking
+#    absolute path), passes, and install proceeds writing into
+#    `/run/user/$uid/dreamconnect.sock/.config/...` as if it were a home
+#    directory."
+#
+# So the rail belongs in the producer, where the value is still a variable rather
+# than a field in a string that has already lost its boundaries:
+#
+#   resolve_host_identity <account_or_empty> <fallback_user>, resolved home
+#   unusable (fails valid_home_dir — empty, relative, "/", "/home", "/root", or
+#   carrying a ".." component)
+#     REFUSE. Non-zero exit, NOTHING on stdout, and a message on stderr naming
+#     the account and the offending home value. This happens AFTER the passwd
+#     entry is found and BEFORE the four-field line is ever echoed, so no caller
+#     can be handed a string whose fields have shifted: it gets a complete,
+#     valid identity or it gets nothing.
+#
+#     install.sh:223's `IDENTITY="$(resolve_host_identity ...)" || die` already
+#     handles a non-zero exit correctly, so nothing changes there.
+#
+#     The predicate is valid_home_dir, not a second opinion — the same rails the
+#     slice-9 tests above pin, applied at the one place the home enters the run.
+#
+# Deliberately NOT asserted: a home containing whitespace (`/home/john doe`)
+# shifts the same read the same way, but valid_home_dir has no whitespace rail on
+# purpose (see the slice-9 header: it also guards classic mode's real human
+# passwd entry, and slice 2's breaker lap already found what over-tightening a
+# shared path costs). Out of scope here, and named as a known gap.
+
+# Homes that valid_home_dir rejects, one per account, in passwd(5) shape.
+# dchost-nohome's field 6 is EMPTY — note the double colon; that is the exact
+# defect trigger. dchost-good carries a normal home and is the anti-vacuous
+# control: a resolve_host_identity that refused everything would pass every
+# rejection assertion below and this one catches it.
+make_passwd_db_bad_homes() {
+  cat > "$TMP/passwd-bad-homes" <<'EOF'
+dchost-nohome:x:1500:1500:DreamConnect display host::/bin/bash
+dchost-slash:x:1501:1501:DreamConnect display host:/:/bin/bash
+dchost-root:x:1502:1502:DreamConnect display host:/root:/bin/bash
+dchost-homes:x:1503:1503:DreamConnect display host:/home:/bin/bash
+dchost-relative:x:1504:1504:DreamConnect display host:var/lib/dchost-relative:/bin/bash
+dchost-dotdot:x:1505:1505:DreamConnect display host:/var/lib/dchost-dotdot/..:/bin/bash
+dchost-good:x:1506:1506:DreamConnect display host:/var/lib/dchost-good:/bin/bash
+EOF
+  echo "$TMP/passwd-bad-homes"
+}
+
+IDENT_RC=0
+IDENT_OUT=""
+IDENT_ERR=""
+
+# resolve_host_identity with stdout and stderr kept apart, because "nothing on
+# stdout" is half the contract and 2>&1 would hide it.
+run_resolve() {  # db account fallback
+  local err="$TMP/resolve-home.err"
+  IDENT_RC=0
+  IDENT_OUT="$(DC_PASSWD_DB="$1" resolve_host_identity "$2" "$3" 2>"$err")" || IDENT_RC=$?
+  IDENT_ERR="$(cat "$err" 2>/dev/null || true)"
+  return 0
+}
+
+assert_identity_refused() {  # db account label
+  run_resolve "$1" "$2" kogies
+  [ "$IDENT_RC" -ne 127 ] || { fail "$3: exit 127 (not defined), not a refusal"; return 0; }
+  [ "$IDENT_RC" -ne 0 ] || fail "$3: expected non-zero exit for [$2], got 0 (stdout: [$IDENT_OUT])"
+  assert_eq "$IDENT_OUT" "" "$3: a refused identity prints nothing to stdout"
+  assert_contains "$IDENT_ERR" "$2" "$3: the refusal names the account"
+  assert_contains "$IDENT_ERR" "home" "$3: the refusal says it is the HOME that is unusable"
+}
+
+# (a) The defect's own trigger: passwd field 6 blank. Refused outright, so the
+# shiftable string is never produced in the first place.
+test_resolve_host_identity_refuses_an_empty_home_field() {
+  local db
+  db="$(make_passwd_db_bad_homes)"
+  assert_identity_refused "$db" dchost-nohome "an empty passwd field 6"
+}
+
+# The rest of valid_home_dir's rails, reached through the producer. One account
+# per rail, everything else about each entry valid, so a refusal can only be the
+# home.
+test_resolve_host_identity_refuses_every_home_valid_home_dir_rejects() {
+  local db
+  db="$(make_passwd_db_bad_homes)"
+  assert_identity_refused "$db" dchost-slash    "a home of exactly /"
+  assert_identity_refused "$db" dchost-root     "a home of /root"
+  assert_identity_refused "$db" dchost-homes    "a home of /home"
+  assert_identity_refused "$db" dchost-relative "a relative home resolves against root's CWD"
+  assert_identity_refused "$db" dchost-dotdot   "a .. component walks out of the home"
+  # nobody's home really is "/" on this class of box — that line is captured
+  # verbatim from a real /etc/passwd at the top of this file, not invented here.
+  assert_identity_refused "$(make_passwd_db)" nobody "a captured real entry whose home is /"
+}
+
+# The anti-vacuous guard. A producer that refused everything would satisfy every
+# assertion above and break every install; both identities the installer can
+# actually produce must still resolve to the same four fields as before.
+test_resolve_host_identity_still_resolves_a_usable_home() {
+  local db
+  db="$(make_passwd_db_bad_homes)"
+  run_resolve "$db" dchost-good kogies
+  assert_eq "$IDENT_RC" "0" "a normal home still resolves (stderr: $IDENT_ERR)"
+  assert_eq "$IDENT_OUT" \
+    "dchost-good 1506 /var/lib/dchost-good /run/user/1506/dreamconnect.sock" \
+    "a normal home resolves NAME UID HOME SOCKET unchanged"
+
+  db="$(make_passwd_db)"
+  run_resolve "$db" "" kogies
+  assert_eq "$IDENT_RC" "0" "the fallback desktop user still resolves"
+  assert_eq "$IDENT_OUT" "kogies 1000 /home/kogies /run/user/1000/dreamconnect.sock" \
+    "classic mode's identity is unchanged"
+  run_resolve "$db" dreamconnect-host kogies
+  assert_eq "$IDENT_RC" "0" "the host account still resolves"
+  assert_eq "$IDENT_OUT" \
+    "dreamconnect-host 987 /var/lib/dreamconnect-host /run/user/987/dreamconnect.sock" \
+    "host-account mode's identity is unchanged"
+}
+
+# THE FIELD SHIFT, from the caller's side. install.sh:223-225 verbatim:
+#
+#   IDENTITY="$(resolve_host_identity ...)" || die ...
+#   read -r USER_NAME USER_UID USER_HOME _ <<<"$IDENTITY"
+#
+# Default IFS collapses the double space an empty home leaves behind, so the
+# socket path lands in USER_HOME and install.sh:232's valid_home_dir guard waves
+# it through — an absolute path with no ".." in it. What this test pins is the
+# property the guard cannot provide: a caller parsing exactly this way either
+# stops, or holds the account's REAL home. Never a value from another field.
+test_resolve_host_identity_never_hands_the_caller_a_shifted_home() {
+  local db identity rc name uid home rest
+  db="$(make_passwd_db_bad_homes)"
+
+  rc=0
+  identity="$(DC_PASSWD_DB="$db" resolve_host_identity dchost-nohome kogies 2>/dev/null)" || rc=$?
+  name=""; uid=""; home=""; rest=""
+  read -r name uid home rest <<<"$identity"
+
+  [ "$rc" -ne 0 ] || fail \
+    "install.sh's caller must stop: resolve_host_identity returned 0 with [$identity]"
+  assert_not_contains "$home" "dreamconnect.sock" \
+    "USER_HOME must never be the socket path (field shift): got [$home]"
+  assert_eq "$home" "" "a refused identity leaves USER_HOME empty, not shifted"
+  assert_eq "$rest" "" "nothing is left over in the read's catch-all"
+  assert_eq "$name" "" "a refused identity leaves USER_NAME empty"
+  assert_eq "$uid" "" "a refused identity leaves USER_UID empty"
+
+  # And the guard install.sh applies to the parsed value: today it PASSES on the
+  # shifted socket path, which is why it cannot be the fix.
+  if [ "$rc" -eq 0 ]; then
+    valid_home_dir "$home" \
+      && fail "the shifted value [$home] passes valid_home_dir — the downstream guard is blind to it"
+  fi
+}
+
+# --- slice 3, rail 2: the SAME non-canonical spellings, at the userdel seam ----
+#
+# host_account_removable's rail 2 delegates its home check to valid_home_dir
+# rather than repeating that predicate's literals. Nothing pinned the
+# delegation: restoring the old `case "$home" in /|/home|/root) ... esac` in
+# THIS function alone left the whole suite green, because every existing rail-2
+# test (test_host_account_removable_refuses_dangerous_home_dirs) uses the three
+# canonically-spelled values a literal compare still catches.
+#
+# The expectation is not read off the implementation. It is breaker lap 1
+# finding #1, quoted at valid_home_dir's contract above — "/root/, //root,
+# /root/., /./root" are bypasses of a literal compare — plus POSIX 4.13
+# pathname resolution, under which every home below IS /, /home or /root. And
+# the consequence at THIS call site is the worst one in the installer:
+# uninstall_host_account runs `userdel -r <name>`, which deletes the home named
+# in field 6. A passwd entry reading "/root/" therefore means `userdel -r` on
+# root's own home directory.
+#
+# Every entry satisfies all six other rails — valid account name, non-zero uid,
+# exact GECOS marker, matching state record with CREATED_ACCOUNT=1, and it is
+# neither the protected user nor $SUDO_USER — so the home field is the only
+# thing that can refuse them. dc-home-ok is the control that proves it: same
+# fixture shape, ordinary home, and it MUST be removable. Without it a fixture
+# typo would make every refusal below pass vacuously.
+make_noncanonical_home_passwd_db() {
+  cat > "$TMP/passwd-noncanonical-home" <<'EOF'
+kogies:x:1000:1000:Kogies:/home/kogies:/bin/bash
+dc-home-ok:x:970:970:DreamConnect display host:/var/lib/dc-home-ok:/bin/bash
+dc-root-trailing:x:971:971:DreamConnect display host:/root/:/bin/bash
+dc-root-double:x:972:972:DreamConnect display host://root:/bin/bash
+dc-root-dot:x:973:973:DreamConnect display host:/root/.:/bin/bash
+dc-root-leaddot:x:974:974:DreamConnect display host:/./root:/bin/bash
+dc-home-trailing:x:975:975:DreamConnect display host:/home/:/bin/bash
+dc-slash-triple:x:976:976:DreamConnect display host:///:/bin/bash
+EOF
+  echo "$TMP/passwd-noncanonical-home"
+}
+
+test_host_account_removable_refuses_a_reserved_home_however_it_is_spelled() {
+  local db state acct
+  db="$(make_noncanonical_home_passwd_db)"
+
+  # The control: this fixture really does satisfy every other rail.
+  state="$TMP/state-noncanon-ok/install.state"
+  write_state_fixture "$state" dc-home-ok 970 1 1
+  try_removable "$db" "$state" "" dc-home-ok kogies
+  assert_eq "$REMOVE_RC" "0" \
+    "control: an ordinary home in this fixture is removable (stderr: $REMOVE_ERR)"
+
+  for acct in dc-root-trailing dc-root-double dc-root-dot dc-root-leaddot \
+              dc-home-trailing dc-slash-triple; do
+    state="$TMP/state-noncanon-$acct/install.state"
+    write_state_fixture "$state" "$acct" 971 1 1
+    try_removable "$db" "$state" "" "$acct" kogies
+    assert_refused "userdel -r would delete a reserved directory ($acct)"
+    assert_contains "$REMOVE_ERR" "home" \
+      "$acct: the refusal names the HOME rail, not another one"
+  done
+}
+
 # --- issue #24: wait_for_user_bus --------------------------------------------
 #
 # WHY THIS SLICE EXISTS (issue #24, the observed failure):
@@ -3497,6 +5142,8 @@ for CURRENT in \
   test_library_defines_the_state_and_removal_functions \
   test_write_install_state_creates_parent_dirs_and_all_four_keys \
   test_write_install_state_overwrites_rather_than_appends \
+  test_write_install_state_never_downgrades_created_account_for_the_same_account \
+  test_write_install_state_survives_a_write_killed_part_way_through \
   test_install_state_round_trips_all_four_values \
   test_read_install_state_resets_to_safe_defaults_when_absent \
   test_host_account_removable_accepts_the_account_we_created \
@@ -3550,6 +5197,8 @@ for CURRENT in \
   test_uninstall_host_account_deletes_even_when_terminate_user_fails \
   test_uninstall_host_account_reports_a_failing_userdel \
   test_uninstall_host_account_survives_set_e_when_loginctl_fails \
+  test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed \
+  test_uninstall_host_account_still_refuses_an_account_that_is_really_there \
   test_remove_no_idle_lock_refuses_reserved_dconf_names \
   test_library_defines_the_name_and_marker_functions \
   test_valid_account_name_accepts_ordinary_names \
@@ -3572,6 +5221,39 @@ for CURRENT in \
   test_accountsservice_marker_round_trips_a_preexisting_file \
   test_remove_accountsservice_marker_refuses_malformed_account_names \
   test_ensure_host_account_refuses_malformed_account_names \
+  test_library_defines_host_account_installable \
+  test_host_account_installable_refuses_a_different_account_than_recorded \
+  test_host_account_installable_warns_and_reuses_the_recorded_account_when_unset \
+  test_host_account_installable_accepts_the_recorded_account_silently \
+  test_host_account_installable_accepts_any_account_on_a_fresh_install \
+  test_host_account_installable_refuses_a_malformed_recorded_account \
+  test_host_account_installable_refuses_a_reserved_recorded_account \
+  test_a_bare_rerun_keeps_the_account_created_by_the_installer_removable \
+  test_valid_account_name_is_locale_independent \
+  test_host_account_installable_refuses_a_reserved_requested_account \
+  test_host_account_installable_refuses_root_as_the_recorded_account \
+  test_configure_no_idle_lock_refuses_root_as_a_dconf_name \
+  test_remove_no_idle_lock_refuses_root_as_a_dconf_name \
+  test_ensure_host_account_refuses_reserved_account_names \
+  test_remove_accountsservice_marker_refuses_reserved_account_names \
+  test_enable_autologin_refuses_only_root_and_names_that_corrupt_the_conf \
+  test_enable_autologin_refuses_a_name_whose_backslash_awk_would_expand \
+  test_enable_autologin_accepts_an_existing_account_that_is_not_new_account_shaped \
+  test_enable_autologin_still_configures_an_ordinary_account \
+  test_host_account_removable_refuses_root_however_the_passwd_source_spells_it \
+  test_library_defines_valid_home_dir \
+  test_valid_home_dir_accepts_real_home_directories \
+  test_valid_home_dir_rejects_empty_and_relative_paths \
+  test_valid_home_dir_rejects_the_shared_roots \
+  test_valid_home_dir_rejects_noncanonical_spellings_of_the_shared_roots \
+  test_valid_home_dir_rejects_dotdot_components \
+  test_remove_no_idle_lock_skips_the_home_half_for_an_unusable_home \
+  test_configure_no_idle_lock_refuses_an_unusable_home \
+  test_resolve_host_identity_refuses_an_empty_home_field \
+  test_resolve_host_identity_refuses_every_home_valid_home_dir_rejects \
+  test_resolve_host_identity_still_resolves_a_usable_home \
+  test_resolve_host_identity_never_hands_the_caller_a_shifted_home \
+  test_host_account_removable_refuses_a_reserved_home_however_it_is_spelled \
   test_library_defines_wait_for_user_bus \
   test_wait_for_user_bus_returns_zero_when_the_socket_already_exists \
   test_wait_for_user_bus_returns_zero_when_the_socket_appears_while_polling \
@@ -3592,6 +5274,9 @@ do
   "$CURRENT"
   if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
 done
+
+[ "${SKIPPED:-0}" -eq 0 ] \
+  || echo "$SKIPPED skipped check(s) — that coverage was NOT exercised on this box"
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "$FAILURES assertion failure(s)"
