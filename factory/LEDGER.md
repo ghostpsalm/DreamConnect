@@ -17,3 +17,4 @@ number would misrepresent cost.
 | 2026-07-28T12:12:53Z | issue-24 | unknown - predates the status field | #24 | 1 commits | - | 154m | out 104,398 - cache-read 12,908,721 - agents 588,473 total across 13 spawns | - |
 | 2026-07-28T13:27:58Z | issue-21 | unknown - predates the status field | #21 | 1 commits | - | 325m | out 348,895 - cache-read 65,838,011 - agents 2,151,585 total across 44 spawns | - |
 | 2026-07-28T13:49:10Z | issue-24 | unknown | #24 | 8 commits | - | 250m | out 151,022 - cache-read 29,005,776 - agents 588,473 total across 13 spawns | - |
+| 2026-07-28T22:44:50Z | issue-21 | done | #21 | 6 commits | - | 882m | out 441,519 - cache-read 130,449,420 - agents 2,151,585 total across 44 spawns | - |
