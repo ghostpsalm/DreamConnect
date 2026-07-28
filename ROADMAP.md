@@ -395,6 +395,12 @@ a time.
 ---
 
 ## Version history
+- **v1.4** (2026-07-28) — layout-independent keyboard via keysym for correct
+  characters on any guest layout (H1), full logical-desktop multi-monitor
+  capture via RecordArea (H2), and a dedicated display-host account as a
+  second reboot-survival path (H6), hardened against a systemd user-bus
+  startup race found in on-device testing; the account path itself still
+  needs a full on-device reboot verification.
 - **v1.3** (2026-07-19) — hardening: distro-agnostic dependency install
   (apt/dnf/zypper/pacman) (H5), opt-in GDM autologin for reboot survival (H6),
   and reconnect/resilience fixes — session-restart subscription leak + restart

@@ -541,6 +541,79 @@ remove_accountsservice_marker() {  # name
   fi
 }
 
+# --- the user bus -----------------------------------------------------------
+# `loginctl enable-linger` starts user@<uid>.service ASYNCHRONOUSLY, so the very
+# next `systemctl --user` can run before /run/user/<uid>/bus exists and dies with
+# "Failed to connect to user scope bus via local transport" — which install.sh's
+# set -e turns into an aborted install on a first run. So wait for the socket.
+#
+# `-S`, not `-e`: what systemctl needs is something to connect to, and a leftover
+# regular file at that path satisfies existence while still failing the connect.
+#
+# DC_RUNTIME_DIR_ROOT and DC_BUS_POLL_INTERVAL exist so the tests can drive this
+# without root and without sitting out a real timeout.
+
+# `-S` proves the path is a socket INODE, not that anyone is listening on it:
+# AF_UNIX does not unlink the inode when the listener dies, so a crashed
+# user@<uid>.service leaves a bus that passes `-S` forever and refuses every
+# connect — precisely the failure this wait exists to prevent. So attempt a real
+# connect. python3 is already installed by the time install.sh reaches the
+# user-service section. A refusal is not an error here, only "not up yet".
+bus_socket_is_live() {  # path
+  python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+try:
+    s.connect(sys.argv[1])
+except OSError:          # ConnectionRefusedError included: the bus is not up yet
+    sys.exit(1)
+finally:
+    s.close()            # close, never unlink: the inode is not ours to remove
+' "$1" 2>/dev/null
+}
+
+wait_for_user_bus() {  # uid [timeout_seconds]
+  local uid="${1:-}" timeout="${2:-30}" interval="${DC_BUS_POLL_INTERVAL:-0.2}"
+  local bus deadline
+
+  # timeout_seconds is input, and a bad one must be refused in this function's
+  # own voice rather than reaching the arithmetic below, where a non-numeric
+  # value aborts the shell under `set -u` and an absurd one overflows the
+  # millisecond deadline into an unbounded wait. The length check comes first
+  # for the same reason: a digit string too long for 64 bits would wrap inside
+  # the comparison meant to catch it. 86400s is a day — a per-boot startup race
+  # that has not resolved by then is not going to.
+  #
+  # `0|[1-9][0-9]*`, not `[0-9]+`: `$(( ))` reads a leading zero as OCTAL, so
+  # "08" aborts the whole expansion with "value too great for base" — an error
+  # that is not a `return`, so the caller's `|| die` never runs and the install
+  # walks on into the race this wait exists to prevent — while "010" is legal
+  # octal and would quietly wait 8s. Both are ambiguous to whoever typed them,
+  # so refuse rather than guess a base. Plain "0" stays valid: wait not at all.
+  if ! [[ "$timeout" =~ ^(0|[1-9][0-9]*)$ ]] || [ "${#timeout}" -gt 5 ] || [ "$timeout" -gt 86400 ]; then
+    echo "error: wait_for_user_bus: timeout_seconds '$timeout' is not a whole" \
+         "number of seconds in 0..86400" >&2
+    return 1
+  fi
+
+  # A dry run never starts a user manager, so waiting for its bus could only
+  # spend the whole timeout on its way to a failure that means nothing.
+  [ "${DC_DRY_RUN:-}" = "1" ] && return 0
+
+  bus="${DC_RUNTIME_DIR_ROOT:-/run/user}/$uid/bus"
+  # Milliseconds, because the poll interval is a fraction of a second and a
+  # whole-second deadline could expire a few ms after the wait began.
+  deadline=$(( $(date +%s%3N) + timeout * 1000 ))
+  while :; do
+    [ -S "$bus" ] && bus_socket_is_live "$bus" && return 0
+    [ "$(date +%s%3N)" -lt "$deadline" ] || break
+    sleep "$interval"
+  done
+  echo "error: timed out after ${timeout}s waiting for the user bus of uid $uid ($bus);" \
+       "is user@$uid.service running?" >&2
+  return 1
+}
+
 # --- detect the capture monitor ---------------------------------------------
 detect_monitor() {
   if [ -n "${MONITOR:-}" ]; then echo "$MONITOR"; return; fi
