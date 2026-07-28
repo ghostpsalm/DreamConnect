@@ -104,7 +104,10 @@ git clone https://github.com/ghostpsalm/DreamConnect
 cd DreamConnect
 sudo ./install.sh
 ```
-Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path>`.
+Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path>`,
+`DREAMCONNECT_HOST_ACCOUNT=<name>` (reboot survival via a dedicated hidden
+account instead of `DREAMCONNECT_AUTOLOGIN` — see
+[ROADMAP.md](ROADMAP.md#h6--reboot-survival--autologin)).
 </details>
 
 ## Use

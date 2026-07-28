@@ -1,0 +1,180 @@
+{
+  "recorded_at": "2026-07-28T03:49:45Z",
+  "repo": "display-host",
+  "branch": "install/display-host",
+  "base": "fc43dace4520b511c1416b654a9bfea9242cd482",
+  "window_start": "2026-07-21T18:30:52+10:00",
+  "head": "f08b3ffb89ef3872db3261deaeb5b1d7af741b55",
+  "issue": {
+    "number": 18,
+    "state": "OPEN",
+    "title": "Display-host service account for unattended reboot survival (autologin, no lock)",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/18"
+  },
+  "commits": [
+    {
+      "sha": "f08b3ffb89ef3872db3261deaeb5b1d7af741b55",
+      "subject": "H6: dedicated display-host account for unattended reboot survival"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "7 files changed, 3795 insertions(+), 117 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 726,
+      "output_tokens": 602206,
+      "cache_read_input_tokens": 96324291,
+      "cache_creation_input_tokens": 2620577
+    },
+    "subagents": {
+      "input_tokens": 94,
+      "output_tokens": 89394,
+      "cache_read_input_tokens": 2489387,
+      "cache_creation_input_tokens": 53360
+    },
+    "subagent_spawns": 56,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 4795,
+        "cache_read_input_tokens": 29702,
+        "total_tokens": 40908,
+        "duration_ms": 184986,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "test-author": {
+        "spawns": 9,
+        "output_tokens": 7192,
+        "cache_read_input_tokens": 307588,
+        "total_tokens": 550992,
+        "duration_ms": 1540630,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "builder": {
+        "spawns": 19,
+        "output_tokens": 22737,
+        "cache_read_input_tokens": 759940,
+        "total_tokens": 1069905,
+        "duration_ms": 2558656,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "verifier": {
+        "spawns": 6,
+        "output_tokens": 15713,
+        "cache_read_input_tokens": 280210,
+        "total_tokens": 305613,
+        "duration_ms": 1120334,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "seraph": {
+        "spawns": 9,
+        "output_tokens": 20075,
+        "cache_read_input_tokens": 501839,
+        "total_tokens": 535278,
+        "duration_ms": 1879445,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "oracle": {
+        "spawns": 9,
+        "output_tokens": 9224,
+        "cache_read_input_tokens": 422815,
+        "total_tokens": 617387,
+        "duration_ms": 1240530,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 6113,
+        "cache_read_input_tokens": 126504,
+        "total_tokens": 134291,
+        "duration_ms": 574276,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 3545,
+        "cache_read_input_tokens": 60789,
+        "total_tokens": 64920,
+        "duration_ms": 223884,
+        "models": [
+          "claude-opus-5"
+        ]
+      }
+    },
+    "usage_blocks": 365,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "6c2f06c7-1529-4e81-a0ed-2fbab90e3675.jsonl",
+        "usage_blocks": 365
+      }
+    ],
+    "agent_wall_clock_ms": 9322741,
+    "first_activity": "2026-07-27T12:17:41.434000+00:00",
+    "last_activity": "2026-07-28T03:49:36.252000+00:00",
+    "notification_tokens": 687059,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "<task-notification>\n<task-id>a91a2c3e39d7790a3</task-id>\n<tool-use-id>toolu_01KBYr6juXFDLnrXbT7eGqxz</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/a91a2c3e39d7790a3.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 5 test-author: no-idle-lock dconf config\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\nslice: 5 \u2014 `configure_no_idle_lock` / `remove_no_idle_lock` (issue #18 CODE slice 3)\nseam: `install-lib.sh` sourced by `test_install.sh`, driven against `DC_DCONF_DIR` + tmp `&lt;home&gt;` fixtures\ntest: `/home/kogies/.factory/worktrees/dreamconnect/display-host/test_install.sh` \u2014 **12** added; the 2 new ownership ones are\n`test_configure_no_idle_lock_chowns_the_home_files_to_the_account`, `test_configure_no_idle_lock_survives_a_failing_chown`\n(the other 10 as reported before, untouched)\n\nexpected value from: GNOME schemas on this box (`gsettings range ... lock-delay` \u2192 `type u` \u21d2 `uint32 0`; `sleep-inactive-ac-type` enum includes `'nothing'`); real `/etc/dconf/profile/user` + `/etc/dconf/db/local` for the guard; **`install.sh:235` `chown \"$USER_NAME:\" ...` for the ownership convention**; issue #18 constraints 2\u20133.\n\nstubs created: none\n\nred observed: `bash test_install.sh` \u2192 `FAIL: chown home files: configure_no_idle_lock()/remove_no_idle_lock() not defined` \u2026 `13 assertion failure(s)`; 32 PASS / 12 FAILED (32 pre-existing unaffected).\n\nDiscrimination checked with throwaway fakes in scratchpad (repo lib sha verified unchanged): a fake with no `chown` fails 8 assertions in exactly these two tests; a fake that chowns all four paths and tolerates failure makes the whole suite green.\n\n### Ownership contract for the builder\n`chown \"&lt;name&gt;:\" &lt;pa",
+    "continue",
+    "<task-notification>\n<task-id>ae4399794e26b5b57</task-id>\n<tool-use-id>toolu_01DWAJsbLJVf5ihdUTjFAmcS</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/ae4399794e26b5b57.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 6a test-author: uninstall_host_account\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Contract defect fixed\n\n**test added:** `/home/kogies/.factory/worktrees/dreamconnect/display-host/test_install.sh::test_uninstall_host_account_reports_a_failing_userdel`\n\n**contract block updated** (same file, slice 6a header, item 3 rewritten and marked as a correction of the earlier \"returns 0 after attempting all three\"):\n\n- `loginctl terminate-user` failure \u2014 **suppressed**, unchanged (no session is the normal post-reboot case).\n- `loginctl disable-linger` failure \u2014 **suppressed**, explicit choice, stated with its reason: an account that never had linger enabled fails this call harmlessly, and refusing to delete over it leaves exactly the leaked account this slice prevents.\n- `userdel -r` failure \u2014 **propagates** as the function's own status. No unconditional trailing `return 0`; `run userdel -r \"$name\"` is the last statement. `run()` is transparent to this (execs `\"$@\"` \u2192 real status; echoes \u2192 0, correct for a dry run).\n\n**shim change:** `make_uninstall_shims dir terminate_rc [userdel_rc]` \u2014 third argument optional, default 0, so the four existing call sites are untouched.\n\n**red observed:** `bash test_install.sh` \u2192 `50 PASS`, one `FAILED`:\n\n```\nPASS: test_uninstall_host_account_deletes_even_when_terminate_user_fails\n  FAIL: userdel failed (exit 12) but uninstall_host_account returned 0 \u2014 a failed deletion reported as done\nFAILED: test_uninstall_host_account_",
+    "<task-notification>\n<task-id>a910316d51361e052</task-id>\n<tool-use-id>toolu_01HqwSoWiwHCEr5npvy7G9hA</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/a910316d51361e052.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 6b builder: wire install.sh\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Coordinator fix applied \u2014 monitor detection reordered\n\n**Diff (this fix only), `/home/kogies/.factory/worktrees/dreamconnect/display-host/install.sh`:**\n\nThe identity block moved down; a `PROTECTED_USER`-based `RUN_USER` now precedes `MONITOR=\"$(detect_monitor)\"`, and the old `MONITOR=` line + its comment were deleted from below.\n\n```bash\n# --- detect the capture monitor ---------------------------------------------\n# Always probed through the human's own active session: the probe is a D-Bus\n# call into Mutter, and the display-host account resolved below has no session\n# of its own at install time, so probing as it would silently fall back to the\n# hardcoded default. RUN_USER is reassigned to the resolved identity right after.\nRUN_USER=(sudo -u \"$PROTECTED_USER\" env \"XDG_RUNTIME_DIR=/run/user/$(id -u \"$PROTECTED_USER\")\" \\\n          \"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u \"$PROTECTED_USER\")/bus\")\nMONITOR=\"$(detect_monitor)\"\n\n# --- resolve the identity the daemon/autologin/socket will run under --------\nif [ -n \"${DREAMCONNECT_HOST_ACCOUNT:-}\" ]; then ... fi     # unchanged body\nIDENTITY=\"$(resolve_host_identity ...)\" || die ...          # unchanged\nread -r USER_NAME USER_UID USER_HOME _ &lt;&lt;&lt;\"$IDENTITY\"       # unchanged\nRUN_USER=(sudo -u \"$USER_NAME\" env ...)                     # unchanged\n\necho \"&gt;&gt; desktop user : $USER_NAME (uid $USER_UID)\"      ",
+    "<task-notification>\n<task-id>a910316d51361e052</task-id>\n<tool-use-id>toolu_01UgmjMrT6orMZNe6GLaYBXB</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/a910316d51361e052.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 6b builder: wire install.sh\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Both findings fixed\n\n**Diff (this pass only), `/home/kogies/.factory/worktrees/dreamconnect/display-host/install.sh`:**\n\n1a \u2014 reserved-name guard, first thing in the identity section (line 129-136), before the `if` that calls `ensure_host_account`:\n```bash\n# \"user\" and \"local\" are dconf's own default profile and its shared system db;\n# configure_no_idle_lock refuses them, and it only runs long after the account\n# exists. Refuse here instead, before anything at all is created, so a reserved\n# name can never leave an account behind that the later failure never recorded.\ncase \"${DREAMCONNECT_HOST_ACCOUNT:-}\" in\n  user|local)\n    die \"DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT is a reserved dconf name (user/local); choose a different account name\" ;;\nesac\n```\n\n1b \u2014 `write_install_state` moved from the extras block to immediately after the `RUN_USER` reassignment (line 152-159), and the extras block's comment updated to say so:\n```bash\n# The account now exists, so record it before anything else can fail: every\n# later step (deps, build, deploy, linger, the daemon unit, autologin) is a\n# chance to abort, and --uninstall can only revert what this file names.\n# AUTOLOGIN_SET is 1 because host-account mode always configures it below.\nif [ -n \"${DREAMCONNECT_HOST_ACCOUNT:-}\" ]; then\n  write_install_state \"$USER_NAME\" \"$USER_UID\" \"$HOST_WAS_CREATED\" 1\nfi\n```\n\n1b + 2 \u2014 in `uni",
+    "<task-notification>\n<task-id>a910316d51361e052</task-id>\n<tool-use-id>toolu_01Q5WVgSc8Mm9jYMWjncHFfr</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/a910316d51361e052.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 6b builder: wire install.sh\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Fix applied \u2014 `uninstall()`'s `gdm_conf` abort\n\n**Change, `/home/kogies/.factory/worktrees/dreamconnect/display-host/install.sh` (line 86-89):**\n\n```bash\n  # `|| true` because gdm_conf exits non-zero when there is no GDM, and set -e\n  # would abort the rest of the cleanup below over a display manager we never\n  # touched. The empty case is already handled on the next line.\n  local conf; conf=\"$(gdm_conf || true)\"\n```\n\nThe `[ -n \"$conf\" ] &amp;&amp; [ -f \"$conf.dreamconnect.bak\" ]` guard on the next line is untouched.\n\n**Verification observed:**\n\n- `bash -n install.sh` \u2192 `SYNTAX OK`\n- `bash test_install.sh` \u2192 `installer shell tests passed`; `grep -c '^PASS:'` = **52**\n- Isolated `set -euo pipefail` trace of the cleanup tail with a `gdm_conf` that finds nothing:\n\n  *Before* (bare `conf=\"$(gdm_conf)\"`): **no output at all, `rc=1`** \u2014 the function died at the assignment.\n\n  *After* (`|| true`):\n  ```\n  STEP loginctl disable-linger dchost\n  STEP remove_no_idle_lock dchost\n  STEP delete .../as/dchost\n  STEP uninstall_host_account dchost\n  STEP delete .../fake.state\n  STEP final echo: removed service wiring + probe wrappers\n  OK: AccountsService marker gone\n  OK: state file gone\n  rc=0\n  ```\n\n  Every downstream step \u2014 linger disable, dconf revert, AccountsService marker removal, account deletion, state-file removal, final echo \u2014 is now reached on a non-GDM box. One harness substitu",
+    "1. We shoukdn\u2019t be removing any account duringnuninstall except the very one we make for the autologin script alone, if this is true proceed as suggested.\n2. fix it of course\n3. you didnt explain this but if its a problem fix it, if there is a real build decision here explain it better.",
+    "<task-notification>\n<task-id>aa24d0a126f58e6b9</task-id>\n<tool-use-id>toolu_01VJv2KXb9uLVQoVuFriqWhG</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/aa24d0a126f58e6b9.output</output-file>\n<status>completed</status>\n<summary>Agent \"Slice 6b builder: three final fixes\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Fix 4 applied. Coordinator's diagnosis confirmed and corrected.\n\n## Diff (fix 4 only, `/home/kogies/.factory/worktrees/dreamconnect/display-host/install.sh` ~line 141)\n\n```diff\n # hardcoded default. RUN_USER is reassigned to the resolved identity right after.\n-RUN_USER=(sudo -u \"$PROTECTED_USER\" env \"XDG_RUNTIME_DIR=/run/user/$(id -u \"$PROTECTED_USER\")\" \\\n-          \"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u \"$PROTECTED_USER\")/bus\")\n+#\n+# Empty when there is no session to probe through at all \u2014 bootstrapping a\n+# display-host account on a headless box over SSH. `id -u \"\"` would fail and\n+# set -e would abort the install right here, so build the prefix only when there\n+# is a user for it; detect_monitor's own fallback then yields the default.\n+if [ -n \"$PROTECTED_USER\" ]; then\n+  RUN_USER=(sudo -u \"$PROTECTED_USER\" env \"XDG_RUNTIME_DIR=/run/user/$(id -u \"$PROTECTED_USER\")\" \\\n+            \"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u \"$PROTECTED_USER\")/bus\")\n+else\n+  RUN_USER=()\n+fi\n MONITOR=\"$(detect_monitor)\"\n```\n\n## Verification\n\n`bash -n install.sh` \u2192 OK. `bash test_install.sh` \u2192 `installer shell tests passed`, 53 PASS lines. **No test-file edits** (still none across the whole slice).\n\n**Isolated fragment, `PROTECTED_USER=\"\"`** \u2014 without the guard: `id: '': no such user` (\u00d72), rc=1, `REACHED` never printed. With the guard: `RUN_USER len=0` \u2192 `REACHED, MON",
+    "<task-notification>\n<task-id>a7876053b8f866e1d</task-id>\n<tool-use-id>toolu_01Q7DaguguYbbzCvvJnPLjhm</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/a7876053b8f866e1d.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle: account-name validation + AccountsService backup\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Asymmetry closed. Final state.\n\n```\n## Test authored (addendum + final)\nslice: #18 fix-up \u2014 name validation (defects #2/#3/#5) + AccountsService preservation (#1)\nseam: install-lib.sh function surface, tmp fixtures (DC_PASSWD_DB / DC_STATE_FILE / DC_DCONF_DIR / DC_ACCOUNTSSERVICE_DIR) + PATH shims\ntest: /home/kogies/.factory/worktrees/dreamconnect/display-host/test_install.sh\n  NEW this round: test_configure_no_idle_lock_refuses_malformed_account_names\n  (19 new tests total; full list in my previous report, unchanged)\nexpected value from: coordinator's contract, restated verbatim in the section comment block; `.dreamconnect.bak` idiom read off the pre-existing enable_autologin (install-lib.sh:52-57)\nstubs created: none \u2014 missing shell functions exit 127, and every test guards on `declare -F`\nred observed: `bash test_install.sh` \u2192 `93 assertion failure(s)`; 72 tests, 54 PASS, 18 FAILED. All 53 pre-existing tests still pass, unmodified. The new test's reds:\n  FAIL: malformed configure './user': expected non-zero exit, got 0\n  FAIL: malformed configure './user': dconf's own default profile is NOT written: expected file NOT to exist: .../dconf/profile/user\n  FAIL: malformed configure './user': no keyfile lands in the shared user.d: expected file NOT to exist: .../dconf/db/user.d/00-display-host\n  FAIL: malformed configure './user': nothing at all written unde",
+    "<task-notification>\n<task-id>ae764801f8c97ecbe</task-id>\n<tool-use-id>toolu_01UeocrqopiTEWfrFSG3CYJY</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-display-host/6c2f06c7-1529-4e81-a0ed-2fbab90e3675/tasks/ae764801f8c97ecbe.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle: backup pre-existing dconf system profile\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\n\n**slice:** dconf-system files (`profile/&lt;name&gt;`, `db/&lt;name&gt;.d/00-display-host`) get back-up-once / restore-on-uninstall \u2014 with the keyfile's backup **outside** the `.d` directory.\n\n**seam:** `configure_no_idle_lock` / `remove_no_idle_lock` in `/home/kogies/.factory/worktrees/dreamconnect/display-host/install-lib.sh`, driven through `DC_DCONF_DIR` fixtures.\n\n**tests** (all in `/home/kogies/.factory/worktrees/dreamconnect/display-host/test_install.sh`):\n`test_configure_no_idle_lock_backs_up_preexisting_dconf_system_files`, `..._writes_no_backups_for_fresh_dconf_system_files`, `..._backs_up_dconf_system_files_only_once_across_reruns`, `test_remove_no_idle_lock_restores_backed_up_dconf_system_files`, `..._removes_fresh_dconf_system_files_it_created`, `test_no_idle_lock_backs_up_each_dconf_system_file_independently`.\n\n**expected value from:** the `.dreamconnect.bak` contract already in `install-lib.sh` (AccountsService + home files), plus the coordinator's backup-location decision. My own file contents come from slice-5's existing assertions. Independence caveat: the current `configure_no_idle_lock` body is visible to me; every expected value came from the contract, none from the code.\n\n**Backup paths now asserted:** profile \u2192 `$dir/profile/&lt;name&gt;.dreamconnect.bak`; keyfile \u2192 `$dir/db/&lt;name&gt;.d.dreamconnect.bak` (beside the dir",
+    "/submit",
+    "Dispatch 19 so it gets done, and submit 18 now"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 3358,
+    "ask: This edits a version number.": 2102,
+    "ask: This would publish a GitHub release, which ships to real devices.": 650,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 642,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 638,
+    "block: touching a secret/credential file": 2708,
+    "block: force push (never rewrite published history)": 641,
+    "block: editing an existing migration": 636,
+    "block: hard reset discards work": 321,
+    "block: editing the deployed factory directly": 4370,
+    "block: destructive SQL DDL": 3,
+    "block: piping remote content straight to a shell": 4,
+    "block: writing to a file the harness owns": 561,
+    "block: over-wide fence": 18,
+    "block: over-wide read fence": 4,
+    "block: TRUNCATE destroys data": 35,
+    "block: writing into the ~/.claude root directory": 26,
+    "block: writing to ~/.claude.json, which holds a live credential": 10,
+    "block: reading ~/.claude.json, which holds a live credential": 2,
+    "block: sending a secret/credential file to a network client": 4467,
+    "block: sending a file the harness owns to a network client": 25,
+    "block: sending ~/.claude.json to a network client": 272,
+    "block: disk-destructive command": 3,
+    "block: nuked": 125,
+    "block: MUTANT-BLOCK-ALL": 106,
+    "block: git clean deletes untracked files": 2
+  },
+  "note": "Gate: run-tests.sh reports FAIL overall due to a pre-existing, unrelated Java test (issue #19, dispatched separately) that aborts before reaching this branch's own tests. This branch's own suite (test_install.sh, 86/86) and the Python daemon tests (12/12) both pass green when run directly. Live slices (create account + reboot + confirm autologin/idle-lock/uninstall survival on the physical test box) explicitly not run this session -- issue #18's own design defers these to on-device operator verification.",
+  "outcome": {}
+}
