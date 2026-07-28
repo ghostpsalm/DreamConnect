@@ -315,15 +315,30 @@ documented in [`docs/troubleshooting.md`](docs/troubleshooting.md). Only Fedora 
 tested end to end; other distros' names are best-effort.
 
 #### H6 — Reboot survival / autologin
-**Status:** ✅ DONE · **Priority:** medium
+**Status:** ✅ DONE (autologin shipped v1.3; display-host account code-complete, needs on-device verification) · **Priority:** medium
 
-`install.sh` configures GDM autologin on explicit opt-in
-(`DREAMCONNECT_AUTOLOGIN=1`) — a section-aware, idempotent edit of
-`/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up, and
-is reverted on `--uninstall`. Without the opt-in it warns and points at it. Warns
-if `WaylandEnable=false` (the bridge needs a Wayland session at boot). Reboot
-survival itself is the operator's on-device verification. See F3 (wake lock) for
-the idle/lock case.
+Two ways to survive an unattended reboot:
+
+- **Autologin the human's session** (`DREAMCONNECT_AUTOLOGIN=1`) — `install.sh`
+  configures GDM autologin on explicit opt-in: a section-aware, idempotent edit
+  of `/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up,
+  and is reverted on `--uninstall`. Without the opt-in it warns and points at it.
+  Warns if `WaylandEnable=false` (the bridge needs a Wayland session at boot).
+  The trade-off is the box booting straight into that human's unlocked session.
+- **A dedicated display-host account** (`DREAMCONNECT_HOST_ACCOUNT=<name>`) —
+  creates a hidden, sudo-less, password-disabled account and runs the daemon
+  there instead, so no human's session is ever exposed. Idle-lock and
+  idle-suspend are disabled for that account (a lock or a suspend kills the
+  remote session — see F3 for the attended case), and autologin is always
+  configured for it, so `DREAMCONNECT_AUTOLOGIN` isn't consulted in this mode.
+  `--uninstall` reverts the lot: deletes the account if this installer created
+  it (behind seven safety rails), restores anything it had to overwrite on a
+  pre-existing account, and undoes the idle-lock and autologin changes.
+  **Code-complete and unit-tested** (`test_install.sh`, 86 assertions); account
+  creation, reboot survival and uninstall reversal are not yet confirmed on a
+  physical box.
+
+Reboot survival itself is the operator's on-device verification either way.
 
 ---
 

@@ -24,3 +24,6 @@ __pycache__/
 
 # local-only code review reports
 CODE_REVIEW_*.md
+
+# factory loop run state — local only, never committed
+/factory/
