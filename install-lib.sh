@@ -54,6 +54,36 @@ gdm_conf() {  # path to the GDM config, or empty if GDM isn't present
 # the section first. Backs up once to <conf>.dreamconnect.bak.
 enable_autologin() {
   local conf="$1" user="$2" tmp
+
+  # Deliberately NOT the two rails the account-creating functions here use. In
+  # classic mode this name is the machine's existing desktop user, resolved out
+  # of the passwd source and never created by us: on an AD-joined box it is
+  # routinely `john.doe`, it can run past 32 characters, and `user`/`local` are
+  # dconf PROFILE reservations that mean nothing to a file classic mode never
+  # touches. Rejecting those would abort the install after everything else has
+  # already run. What is left is root — the one account this must never log in
+  # automatically — and the two ways a name pasted verbatim into the [daemon]
+  # section below can corrupt the file rather than merely name the wrong
+  # account: empty, or carrying a newline/CR that splits AutomaticLogin= into a
+  # second key. A backslash goes the same way one step later: `awk -v` processes
+  # C escapes in the value, so `DOMAIN\nick` — the winbind domain separator, two
+  # ordinary characters no newline rail can see — becomes a real newline inside
+  # awk. Refused before the backup, so a refusal leaves no .bak either.
+  case "$user" in
+    root)
+      echo "error: refusing to set GDM autologin for 'root'" >&2
+      return 1 ;;
+    "")
+      echo "error: refusing to set GDM autologin: empty account name" >&2
+      return 1 ;;
+    *$'\n'*|*$'\r'*)
+      echo "error: refusing to set GDM autologin: account name contains a newline" >&2
+      return 1 ;;
+    *\\*)
+      echo "error: refusing to set GDM autologin: account name contains a backslash" >&2
+      return 1 ;;
+  esac
+
   [ -f "$conf.dreamconnect.bak" ] || cp -a "$conf" "$conf.dreamconnect.bak"
   tmp="$(mktemp)"
   awk -v user="$user" '
@@ -111,10 +141,57 @@ pm_install() {  # best-effort; non-zero on failure
 # ".", because "./user" normalises to the same path as "user" and so walks
 # straight past the reserved-name guards below, which compare the string.
 valid_account_name() {  # name
+  # [A-Za-z] is a locale-dependent RANGE, not an ASCII set: under an en_US.utf8
+  # LC_CTYPE this box accepts "é" as a letter and under C it does not, so the
+  # same name would be valid or invalid depending on the operator's environment.
+  # LC_ALL is one of the variables bash re-reads on assignment, `local` included,
+  # and it is restored when the function returns — so the match below is ASCII
+  # whatever the caller's locale, and nothing else in the run is affected.
+  local LC_ALL=C
   local name="${1:-}"
   [ -n "$name" ] || return 1
   [ "${#name}" -le 32 ] || return 1
   [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || return 1
+  return 0
+}
+
+# Is this a home directory it is safe to paste into `rm -f "$home/.config/..."`,
+# `install -d "$home/..."` and `chown <name>: "$home/.config"` as root? A pure
+# predicate beside valid_account_name, and the same kind: no output, no
+# filesystem, no passwd lookup. A blacklist rather than a whitelist because
+# unlike a username a home directory is a path, and the legitimate ones range
+# from /var/lib/dreamconnect-host to a human's /home/john.doe.
+#
+# Each rail is one call site's failure. Empty is the literal trigger: an account
+# deleted by hand makes `passwd_entry | cut -d: -f6` yield "", and every path
+# above collapses onto root's own /.config/... . Relative is corrupt passwd data
+# that would resolve against root's CWD — the checkout install.sh was run from.
+# And "/", "/home" and "/root" are the set host_account_removable was refusing
+# as a home directory before this predicate existed; that rail now calls here,
+# so the two cannot drift apart.
+valid_home_dir() {  # path
+  local home="${1:-}" p
+  [ -n "$home" ] || return 1
+  case "$home" in /*) ;; *) return 1 ;; esac
+  # The reserved three are a PATH, not a spelling. A trailing slash, a run of
+  # slashes and a "." component are all no-ops on the resolved path — POSIX
+  # 4.13 — so /root/, //root, /root/. and /./root all name /root, and a literal
+  # compare against the four ways a passwd file or an operator writes it misses
+  # every one. Normalised with parameter expansion alone: no realpath, no
+  # readlink, no stat, because this stays a pure predicate over a path that need
+  # not exist yet.
+  p="$home/"                                                      # bracket the tail
+  while [ "$p" != "${p//\/\//\/}" ]; do p="${p//\/\//\/}"; done   # collapse slash runs
+  while [ "$p" != "${p//\/.\//\/}" ]; do p="${p//\/.\//\/}"; done # drop "." components
+  [ "$p" = "/" ] || p="${p%/}"                                    # strip the trailing slash
+  case "$p" in /|/home|/root) return 1 ;; esac
+  # A ".." COMPONENT, not the substring: bracketing the path in slashes makes
+  # every component delimited, so /var/lib/x/.. is caught while the ordinary
+  # directory name /var/lib/dc..host stays valid. Against the RAW path, and
+  # deliberately not normalised away above: a home that traverses is unsafe
+  # whatever it resolves to, so /root/../etc is a refusal here rather than an
+  # accepted /etc.
+  case "/$home/" in */../*) return 1 ;; esac
   return 0
 }
 
@@ -138,6 +215,14 @@ resolve_host_identity() {
   [ -n "$entry" ] || { echo "error: no such account: $name" >&2; return 1; }
   uid="$(echo "$entry" | cut -d: -f3)"
   home="$(echo "$entry" | cut -d: -f6)"
+  # The home is validated HERE, while it is still a variable. Once it is pasted
+  # into the line below its boundaries are gone: an empty field 6 leaves a double
+  # space, the caller's `read -r name uid home _` collapses it, and the socket
+  # path lands in the home. So a caller gets a complete identity or nothing (a
+  # home containing whitespace still shifts the caller's read — known gap, out
+  # of scope for this fix).
+  valid_home_dir "$home" || {
+    echo "error: account $name: unusable home directory: '$home'" >&2; return 1; }
   echo "$name $uid $home /run/user/$uid/dreamconnect.sock"
 }
 
@@ -163,15 +248,35 @@ install_state_file() { echo "${DC_STATE_FILE:-/etc/dreamconnect/install.state}";
 # autologin. A full overwrite every time, never an append: two HOST_ACCOUNT
 # lines would leave the reader picking one of them arbitrarily.
 write_install_state() {  # name uid created_account autologin_set
-  local f
+  local f dir tmp created="$3"
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  # CREATED_ACCOUNT is sticky once true, per account name: a bare re-run finds
+  # the account already there, recomputes 0, and would otherwise erase the fact
+  # that we created it — permanently disarming host_account_removable's rail 5,
+  # so --uninstall could never remove it again. A record naming a DIFFERENT
+  # account carries nothing over, and only this flag is sticky: the rest is
+  # always this run's arguments.
+  read_install_state
+  if [ "$HOST_ACCOUNT" = "$1" ] && [ "$CREATED_ACCOUNT" = "1" ]; then
+    created=1
+  fi
   f="$(install_state_file)"
-  mkdir -p "$(dirname "$f")"
+  dir="$(dirname "$f")"
+  mkdir -p "$dir"
+  # Staged beside the target and renamed over it, never `> "$f"` directly: a
+  # redirect truncates first, so a write cut short (ENOSPC, power loss, a kill)
+  # would leave an empty file, which read_install_state reports as "nothing
+  # recorded" and --uninstall then declines to remove the account we created.
+  # The temp file shares the directory so the mv is a rename(2) on one
+  # filesystem, i.e. atomic: readers see the old content or the new, never half.
+  tmp="$(mktemp "$dir/install.state.XXXXXX")"
   {
     echo "HOST_ACCOUNT=$1"
     echo "HOST_UID=$2"
-    echo "CREATED_ACCOUNT=$3"
+    echo "CREATED_ACCOUNT=$created"
     echo "AUTOLOGIN_SET=$4"
-  } > "$f"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$f"
 }
 
 # Set HOST_ACCOUNT/HOST_UID/CREATED_ACCOUNT/AUTOLOGIN_SET in the caller's scope.
@@ -215,6 +320,15 @@ host_account_removable() {  # name protected_user
   valid_account_name "$name" || {
     echo "refusing to remove $name: not a valid account name" >&2; return 1; }
 
+  # A name rail, not a uid rail. The uid-0 and /root-home checks below refuse the
+  # genuine root entry, but a passwd source is DATA: an entry named "root" with a
+  # non-zero uid, a home outside /root, our GECOS marker and a matching state
+  # record satisfies every one of them, and `userdel -r root` follows.
+  case "$name" in
+    root|user|local)
+      echo "refusing to remove $name: reserved account name (root/user/local)" >&2; return 1 ;;
+  esac
+
   entry="$(passwd_entry "$name")"
   [ -n "$entry" ] || {
     echo "refusing to remove $name: no such account in the passwd source" >&2; return 1; }
@@ -224,9 +338,13 @@ host_account_removable() {  # name protected_user
 
   [ "$uid" != "0" ] || { echo "refusing to remove $name: uid 0" >&2; return 1; }
 
-  case "$home" in
-    /|/home|/root) echo "refusing to remove $name: home directory is $home" >&2; return 1 ;;
-  esac
+  # The same predicate the write side uses, not a second copy of its literals:
+  # this rail refused "/", "/home" and "/root" spelled exactly, and `userdel -r`
+  # is the one caller for which /root/, //root and /./root are just as fatal.
+  # valid_home_dir's other rails only strengthen it — an empty or relative field
+  # 6 is corrupt passwd data, and `userdel -r` on it is not an improvement.
+  valid_home_dir "$home" || {
+    echo "refusing to remove $name: home directory is $home" >&2; return 1; }
 
   [ "$name" != "$protected" ] || {
     echo "refusing to remove $name: it is the desktop user" >&2; return 1; }
@@ -247,6 +365,73 @@ host_account_removable() {  # name protected_user
   return 0
 }
 
+# One display-host account per box. install.state has a single slot, and
+# --uninstall can only revert the dconf profile/db, linger and AccountsService
+# marker of the account that slot names — so a second run under a different
+# account would strand the first one's artefacts for good. Answers, for one run:
+# may it proceed, and under which account.
+#
+# Same convention resolve_host_identity uses — the resolution on stdout, the
+# complaint on stderr, non-zero only on a refusal — because install.sh has no
+# harness of its own. Nothing is ever written here: a refusal has to leave
+# install.state naming the account --uninstall still has to reach.
+host_account_installable() {  # requested_or_empty
+  local requested="${1:-}"
+  local HOST_ACCOUNT
+
+  # install.sh refuses these at its entry point too, but that script has no
+  # harness of its own and the fresh-box path below otherwise echoes the
+  # REQUESTED name straight back unvalidated — so a reserved name survives the
+  # whole resolution and reaches useradd, an AccountsService path, a dconf
+  # profile and GDM autologin. root is not a dconf name, it is the account every
+  # other rail in this file exists to protect.
+  case "$requested" in
+    root|user|local)
+      echo "error: refusing to install under requested display-host account '$requested': reserved name (root/user/local)" >&2
+      return 1 ;;
+  esac
+
+  read_install_state
+
+  # Fresh box (or an install that never used a host account): anything goes,
+  # including the empty request that means "run as the desktop user".
+  [ -n "$HOST_ACCOUNT" ] || { echo "$requested"; return 0; }
+
+  # Both adoption paths below hand the RECORDED name back for the whole run to
+  # use — install.sh reassigns DREAMCONNECT_HOST_ACCOUNT from this stdout, long
+  # after its own entry-point guards ran against the original env var. So the
+  # name off the state file gets those same two guards here, the same way
+  # host_account_removable re-validates the record before `userdel -r`: a
+  # tampered or legacy install.state otherwise reaches useradd, an
+  # AccountsService path and a dconf profile unchecked. Reserved first, then the
+  # shape, the order install.sh and configure_no_idle_lock already use.
+  if [ -z "$requested" ] || [ "$requested" = "$HOST_ACCOUNT" ]; then
+    case "$HOST_ACCOUNT" in
+      root|user|local)
+        echo "error: refusing to continue under recorded display-host account '$HOST_ACCOUNT': reserved name (root/user/local)" >&2
+        return 1 ;;
+    esac
+    valid_account_name "$HOST_ACCOUNT" || {
+      echo "error: refusing to continue under recorded display-host account '$HOST_ACCOUNT': not a valid account name" >&2
+      return 1; }
+  fi
+
+  # A bare re-run must keep working, and must keep working against the account
+  # already installed — silently falling back to the desktop user would strand
+  # the very same artefacts.
+  if [ -z "$requested" ]; then
+    echo "warning: install state records display-host account '$HOST_ACCOUNT'; continuing under it" >&2
+    echo "$HOST_ACCOUNT"
+    return 0
+  fi
+
+  [ "$requested" = "$HOST_ACCOUNT" ] || {
+    echo "error: refusing to install under '$requested': install state records display-host account '$HOST_ACCOUNT'; run ./install.sh --uninstall first" >&2
+    return 1; }
+
+  echo "$requested"
+}
+
 # --- the display-host account -----------------------------------------------
 # Create the account when it is absent, and assert the greeter-hiding marker
 # either way. An account that already exists is left alone — no useradd, no
@@ -263,6 +448,18 @@ host_account_removable() {  # name protected_user
 # a value left over from a previous call would decide the wrong thing.
 ensure_host_account() {  # name
   local name="${1:-}" dir tmp conf
+
+  # root is in every passwd source, so the create half is skipped and the marker
+  # half stamps SystemAccount=true onto .../AccountsService/users/root, hiding
+  # root from the greeter; user and local reach this function long before
+  # configure_no_idle_lock's own guard would see them, with the account already
+  # created by then. Reserved first, then the shape, the order install.sh and
+  # configure_no_idle_lock already use.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to create display-host account '$name': reserved name (root/user/local)" >&2
+      return 1 ;;
+  esac
 
   # The create half runs useradd on this name, and the marker half pastes it into
   # a directory path, so "../victim" both makes an account nobody asked for and
@@ -316,6 +513,16 @@ ensure_host_account() {  # name
 remove_accountsservice_marker() {  # name
   local name="${1:-}" conf
 
+  # The removal side of ensure_host_account's reserved-name guard, and sharper
+  # for the usual reason: from --uninstall this name comes off a state FILE, so
+  # HOST_ACCOUNT=root makes the restore branch overwrite root's own
+  # AccountsService file and the remove branch delete it.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to remove AccountsService marker for '$name': reserved name (root/user/local)" >&2
+      return 1 ;;
+  esac
+
   # conf below is built by pasting $name into a directory path, so "../victim"
   # reaches straight out of the AccountsService directory and the mv -f or rm -f
   # then overwrites or deletes a file that is none of this installer's business.
@@ -363,9 +570,11 @@ configure_no_idle_lock() {  # name home
 
   # Blast radius. "user" is dconf's own default profile and "local" its
   # conventional system db: writing either would disable lock and idle for every
-  # user on the box. Refuse before anything at all is created.
+  # user on the box. "root" is the same rail by name rather than by file — the
+  # home writes and the chown below land in /root. Refuse before anything at all
+  # is created.
   case "$name" in
-    user|local)
+    root|user|local)
       echo "error: refusing to write dconf profile '$name': reserved name" >&2
       return 1 ;;
   esac
@@ -376,6 +585,15 @@ configure_no_idle_lock() {  # name home
   # trusting whatever install.sh checked at the entry point.
   valid_account_name "$name" || {
     echo "error: refusing to write dconf profile '$name': not a valid account name" >&2
+    return 1; }
+
+  # And <home>, which nothing upstream validates either: it is pasted into the
+  # mkdir, the two writes and the chown below. This is the WRITE side, running
+  # during install with an operator present, so it refuses outright rather than
+  # skipping — files laid down under a bad home path are artefacts --uninstall
+  # can never find again. Before anything at all is created.
+  valid_home_dir "$home" || {
+    echo "error: refusing to configure dconf profile '$name': unusable home directory '$home'" >&2
     return 1; }
 
   dir="${DC_DCONF_DIR:-/etc/dconf}"
@@ -468,9 +686,10 @@ remove_no_idle_lock() {  # name home
   # The removal side of configure_no_idle_lock's blast-radius guard, and the
   # sharper half of it: from --uninstall this name comes off a state FILE, so a
   # tampered or truncated install.state saying HOST_ACCOUNT=user would delete
-  # dconf's own default profile, and HOST_ACCOUNT=local the shared system db.
+  # dconf's own default profile, HOST_ACCOUNT=local the shared system db, and
+  # HOST_ACCOUNT=root root's own profile and the files under /root.
   case "$name" in
-    user|local)
+    root|user|local)
       echo "error: refusing to remove dconf profile '$name': reserved name" >&2
       return 1 ;;
   esac
@@ -516,14 +735,25 @@ remove_no_idle_lock() {  # name home
   # back; no backup means we wrote it from scratch and removing it leaves the
   # home as it was; neither is the never-configured box. Same three ways round as
   # remove_accountsservice_marker.
-  for p in "$home/.config/environment.d/dconf-profile.conf" \
-           "$home/.config/gnome-initial-setup-done"; do
-    if [ -f "$p.dreamconnect.bak" ]; then
-      mv -f "$p.dreamconnect.bak" "$p"
-    elif [ -f "$p" ]; then
-      rm -f "$p"
-    fi
-  done
+  #
+  # Unless <home> is unusable — from --uninstall it comes off a state file, and
+  # an account deleted by hand leaves passwd field 6 empty, which would point
+  # both paths at root's own /.config. Only this half is skipped: the /etc/dconf
+  # revert above is independent of <home> and is what --uninstall would otherwise
+  # strand, so the function warns and still succeeds. There is nothing left in an
+  # unusable home to have failed to revert.
+  if valid_home_dir "$home"; then
+    for p in "$home/.config/environment.d/dconf-profile.conf" \
+             "$home/.config/gnome-initial-setup-done"; do
+      if [ -f "$p.dreamconnect.bak" ]; then
+        mv -f "$p.dreamconnect.bak" "$p"
+      elif [ -f "$p" ]; then
+        rm -f "$p"
+      fi
+    done
+  else
+    echo "warning: skipping the home half of the idle-lock revert for '$name': unusable home directory '$home'" >&2
+  fi
 
   run dconf update
 }
@@ -538,6 +768,20 @@ remove_no_idle_lock() {  # name home
 # before userdel, or a still-running session holds its files open.
 uninstall_host_account() {  # name protected_user
   local name="$1" protected="${2:-}"
+
+  # The account issue #21 is about: removed outside this tool before --uninstall
+  # ever ran. host_account_removable would refuse it — correctly, for a caller
+  # that does not already know — and the refusal would keep install.state alive
+  # naming an account no retry can ever delete, which host_account_installable
+  # then reads as "one host account already exists" forever. Nothing to remove IS
+  # removed, so this caller answers it here: exit 0, having run none of the three
+  # commands below, all of which are meaningless on an account that is not there.
+  # A name that is EMPTY is not this case — it names no account to be absent —
+  # and falls through to the refusal it has always had.
+  if [ -n "$name" ] && [ -z "$(passwd_entry "$name")" ]; then
+    echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
+    return 0
+  fi
 
   host_account_removable "$name" "$protected" || return 1
 
