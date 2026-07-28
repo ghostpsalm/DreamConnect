@@ -1,0 +1,150 @@
+{
+  "recorded_at": "2026-07-28T13:49:10Z",
+  "repo": "dreamconnect",
+  "branch": "main",
+  "base": "95bab9b97b68c471cf73016a9501921e58f27fd0",
+  "window_start": "tag v1.3\nTagger: Roger Rickard <roger@rickard.io>\n\nDreamConnect v1.3 \u2014 hardening (distro-agnostic install, autologin, resilience)\n2026-07-19T21:16:08+10:00",
+  "head": "d8bebe84654c2b1a9824235f4774740beb1a36f8",
+  "issue": {
+    "number": 24,
+    "state": "CLOSED",
+    "title": "install.sh host-account: install aborts on first run \u2014 enable-linger races systemctl --user",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/24"
+  },
+  "commits": [
+    {
+      "sha": "d8bebe84654c2b1a9824235f4774740beb1a36f8",
+      "subject": "Roadmap: add v1.4 to version history"
+    },
+    {
+      "sha": "fe43c5bfd8fcf1fa0fe5226cfb312fdb6dfe52b7",
+      "subject": "Installer: wait for the user bus before systemctl --user (#24) (#31)"
+    },
+    {
+      "sha": "6cf6641d4c8ef1f19be776c924df6e499538a22a",
+      "subject": "Factory: record issue #18's merge to main"
+    },
+    {
+      "sha": "192bdd58b8de368d5c168910dd7f6dbf993b89d8",
+      "subject": "Installer: dedicated display-host account for unattended reboot survival (#23)"
+    },
+    {
+      "sha": "fc43dace4520b511c1416b654a9bfea9242cd482",
+      "subject": "Installer: only warn about WaylandEnable=false when it actually bites"
+    },
+    {
+      "sha": "c2debc83b632640a407734761056f39065f08c5b",
+      "subject": "Roadmap: scope + plan H3 (wheel units / smooth scroll)"
+    },
+    {
+      "sha": "165a4c00aa9de7b4a335543d740330cc96dbf828",
+      "subject": "H2: capture the full logical desktop for multi-monitor (RecordArea)"
+    },
+    {
+      "sha": "370451a7ae73af0b9c6d52d2560dbe68ceb32971",
+      "subject": "H1: layout-independent keyboard via keysym for character keys"
+    }
+  ],
+  "commit_count": 8,
+  "diffstat": "18 files changed, 5325 insertions(+), 158 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": false,
+    "parent_thread": {
+      "input_tokens": 432,
+      "output_tokens": 151022,
+      "cache_read_input_tokens": 29005776,
+      "cache_creation_input_tokens": 451327
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 13,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 47997,
+        "duration_ms": 117542,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 175833,
+        "duration_ms": 857179,
+        "models": []
+      },
+      "builder": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 110223,
+        "duration_ms": 415692,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 108736,
+        "duration_ms": 773498,
+        "models": []
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 112210,
+        "duration_ms": 975562,
+        "models": []
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 33474,
+        "duration_ms": 161553,
+        "models": []
+      }
+    },
+    "usage_blocks": 219,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "86a8ef36-a82f-49d4-a141-ce8d124f0e3f.jsonl",
+        "usage_blocks": 219
+      }
+    ],
+    "agent_wall_clock_ms": 3301026,
+    "first_activity": "2026-07-28T09:39:02.314000+00:00",
+    "last_activity": "2026-07-28T13:48:54.415000+00:00",
+    "notification_tokens": 588473,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "What is the design decision here. I see some aspects of it, but it literally breaks any MSP from actively supporting a linux device.. can we subvert the architecture, we own the machine, this is linux, there has to be a way.",
+    "I still don't understand how there is a keylog risk apart from just being conceptual... can we... create a new user, use that for auto login and then stragihtaway lock, but not show the user on the login screen so it is silent, or not ever visible, and somehow protect against any keylog because the user is 100% neutered apart from auto login and the lock action? i.e. the ScreenConnect user has ZERO permissions, except it auto logs in (no keylog potential) and somehow auto locks? This would not break on updates, is fully supported, and if done correctly, 100% secure?",
+    "/implement this feature, build and test end to end, yes please.",
+    "Continue",
+    "continue",
+    "continue",
+    "/analyst",
+    "dispatch 21 and 22, and close this session window",
+    "do @18 on device verification",
+    "dispatch the fix line, we can keep classic kogies bridge for later if needed.",
+    "Are there two more open high priorities to dispatch now?",
+    "make those corrections"
+  ],
+  "fence_decisions": {},
+  "status": "unknown",
+  "note": "released v1.4 (github.com/ghostpsalm/DreamConnect/releases/tag/v1.4). Bundled H1/H2/H6 plus the #24 fix, all already on main since the prior release. Display-host account (H6) remains unverified on real hardware end-to-end -- stated plainly in both ROADMAP.md and the release notes rather than blocking on it, per owner decision.",
+  "outcome": {}
+}
