@@ -395,6 +395,12 @@ a time.
 ---
 
 ## Version history
+- **v1.4.1** (2026-07-29) — hardening: `DREAMCONNECT_HOST_ACCOUNT` pointed at an
+  existing account is now fully reversible (H6) — a crash-safe one-host-account-
+  per-box invariant, `root`/`user`/`local` reserved everywhere without breaking
+  classic-mode autologin, and home-directory validation covering the account's
+  own hand-deleted-account scenario; the account path itself still needs a full
+  on-device reboot verification (unchanged from v1.4).
 - **v1.4** (2026-07-28) — layout-independent keyboard via keysym for correct
   characters on any guest layout (H1), full logical-desktop multi-monitor
   capture via RecordArea (H2), and a dedicated display-host account as a
