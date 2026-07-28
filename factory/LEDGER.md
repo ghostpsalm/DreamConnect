@@ -14,3 +14,4 @@ Cache reads are shown separately from output because they are billed differently
 |---|---|---|---|---|---|---|---|
 | 2026-07-28T03:49:45Z | issue-18 | #18 | 1 commits | — | 932m | out 691,600 · cache-read 98,813,678 · agents 3,319,294 total across 56 spawns | — |
 | 2026-07-28T04:02:24Z | issue-18 | #18 | 2 commits | — | 944m | out 727,673 · cache-read 122,236,864 · agents 3,319,294 total across 56 spawns | — |
+| 2026-07-28T12:12:53Z | issue-24 | #24 | 1 commits | — | 154m | out 104,398 · cache-read 12,908,721 · agents 588,473 total across 13 spawns | — |
