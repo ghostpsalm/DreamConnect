@@ -289,6 +289,10 @@ sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@MONITOR@#$MONITOR#g" \
     > "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
 chown "$USER_NAME:" "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
 loginctl enable-linger "$USER_NAME"
+# enable-linger starts user@$USER_UID.service in the background; the systemctl
+# --user calls below need its bus to exist first (issue #24).
+wait_for_user_bus "$USER_UID" \
+  || die "the user bus for $USER_NAME (uid $USER_UID) never came up after 'loginctl enable-linger'; check 'systemctl status user@$USER_UID.service'"
 "${RUN_USER[@]}" systemctl --user daemon-reload
 "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-daemon.service
 

@@ -2923,6 +2923,567 @@ test_ensure_host_account_refuses_malformed_account_names() {
   done
 }
 
+# --- issue #24: wait_for_user_bus --------------------------------------------
+#
+# WHY THIS SLICE EXISTS (issue #24, the observed failure):
+#   install.sh:291 `loginctl enable-linger "$USER_NAME"` starts user@<uid>.service
+#   ASYNCHRONOUSLY. Lines 292-293 then run `systemctl --user daemon-reload` /
+#   `enable --now` as that account, and on a first install /run/user/<uid>/bus does
+#   not exist yet, so systemctl dies with
+#       Failed to connect to user scope bus via local transport: No such file or directory
+#   and install.sh's `set -euo pipefail` (line 22) kills the whole install. A
+#   second run succeeds because by then the bus is up. A pure startup race.
+#
+# CONTRACT UNDER TEST — owner-confirmed, and the implementation follows it, not
+# the reverse. No implementation exists at the time these tests were written.
+#
+#   wait_for_user_bus <uid> [timeout_seconds]
+#
+#   * Path checked: "${DC_RUNTIME_DIR_ROOT:-/run/user}/<uid>/bus". The env
+#     override exists so these tests need neither root nor a real /run/user; the
+#     /run/user default is deliberately NOT asserted, for the same reason
+#     DC_ACCOUNTSSERVICE_DIR's default is not (slice 4): a test that forgot the
+#     override must not be able to reach the real thing.
+#   * Predicate: `[ -S <path> ]` — a real unix socket, not `-e`. What systemctl
+#     needs is something to CONNECT to; a leftover regular file at that path
+#     satisfies -e and still fails the connect, which is the very error this
+#     function exists to prevent.
+#   * Bounded poll: default timeout 30 seconds when arg 2 is omitted; arg 2
+#     overrides it. Poll interval "${DC_BUS_POLL_INTERVAL:-0.2}", also
+#     overridable — both so the failure-path tests below finish in ~1s.
+#   * Returns 0 as soon as the socket appears; non-zero if the timeout elapses
+#     without it, with something informative on stderr.
+#   * DC_DRY_RUN=1 -> return 0 immediately, no polling, no filesystem access. A
+#     dry run must never block for infrastructure that will never appear.
+#
+#   CALL SITE (asserted separately, as text, by the last test in this section):
+#   install.sh must CALL it, after `loginctl enable-linger` and before the first
+#   `systemctl --user` that follows. A helper nobody calls fixes nothing.
+#
+# WHERE THE EXPECTED VALUES COME FROM: the contract above (exit status, the -S
+# predicate, the timeout bound, the dry-run short-circuit) and real unix sockets
+# bound by python3 — not by touch/mkfifo — because -S is exactly the distinction
+# under test and only a real AF_UNIX bind produces one.
+
+BUS_PIDS=""
+
+# Bind a REAL AF_UNIX socket at <path>, in the background, <delay> seconds from
+# now, and hold it <hold> seconds. python3 is already a dependency of this repo's
+# gate (run-tests.sh runs the daemon's unittest suite with it).
+bind_bus_socket() {  # path delay_seconds hold_seconds
+  mkdir -p "$(dirname "$1")"
+  python3 -c '
+import socket, sys, time
+path, delay, hold = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
+time.sleep(delay)
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.listen(1)
+time.sleep(hold)
+' "$1" "$2" "$3" &
+  BUS_PIDS="$BUS_PIDS $!"
+}
+
+await_bus_socket() {  # path -> 0 once it is a socket, 1 after ~5s
+  local i=0
+  while [ "$i" -lt 50 ]; do
+    [ -S "$1" ] && return 0
+    sleep 0.1; i=$((i + 1))
+  done
+  return 1
+}
+
+reap_bus_binders() {
+  local p
+  for p in $BUS_PIDS; do kill "$p" 2>/dev/null; wait "$p" 2>/dev/null; done
+  BUS_PIDS=""
+  return 0
+}
+
+BUS_RC=0
+BUS_ERR=""
+BUS_MS=0
+
+# Call it, capturing exit status, stderr and wall-clock milliseconds. Arg 4 empty
+# means "omit timeout_seconds entirely", which is how the default is exercised
+# without a 30-second test.
+run_wait_bus() {  # dry runtime_root uid timeout_or_empty poll_interval
+  local start end
+  start="$(date +%s%3N)"
+  if [ -n "$4" ]; then
+    BUS_ERR="$(DC_DRY_RUN="$1" DC_RUNTIME_DIR_ROOT="$2" DC_BUS_POLL_INTERVAL="$5" \
+               wait_for_user_bus "$3" "$4" 2>&1 >/dev/null)"; BUS_RC=$?
+  else
+    BUS_ERR="$(DC_DRY_RUN="$1" DC_RUNTIME_DIR_ROOT="$2" DC_BUS_POLL_INTERVAL="$5" \
+               wait_for_user_bus "$3" 2>&1 >/dev/null)"; BUS_RC=$?
+  fi
+  end="$(date +%s%3N)"
+  BUS_MS=$((end - start))
+  return 0
+}
+
+# A missing function exits 127 with "command not found" on stderr, which is
+# non-zero with a non-empty message — i.e. it would satisfy every timeout
+# assertion below vacuously. Same rail assert_refused puts in front of slice 3.
+require_wait_for_user_bus() {  # label
+  declare -F wait_for_user_bus >/dev/null && return 0
+  fail "$1: wait_for_user_bus() is not defined"
+  return 1
+}
+
+assert_bus_failed() {  # label
+  [ "$BUS_RC" -ne 127 ] || { fail "$1: exit 127 (command not found), not a timeout"; return 0; }
+  assert_not_contains "$BUS_ERR" "command not found" \
+    "$1: the failure came from wait_for_user_bus, not the shell"
+  [ "$BUS_RC" -ne 0 ] || fail "$1: expected non-zero exit on timeout, got $BUS_RC"
+  [ -n "$BUS_ERR" ] || fail "$1: expected an informative stderr line, got none"
+}
+
+test_library_defines_wait_for_user_bus() {
+  declare -F wait_for_user_bus >/dev/null || \
+    fail "install-lib.sh defines wait_for_user_bus(): not defined"
+}
+
+# (a) The bus is already up — the second-install case, and the one every later
+# run hits. Returns 0 without waiting. timeout_seconds is OMITTED here, so this
+# also pins that arg 2 is optional (under install.sh's `set -u`, a bare "$2"
+# would abort) and that the default path does not sleep when the socket is there.
+test_wait_for_user_bus_returns_zero_when_the_socket_already_exists() {
+  local root
+  require_wait_for_user_bus "socket already present" || return 0
+  command -v python3 >/dev/null || { fail "socket already present: python3 is required"; return 0; }
+  root="$TMP/bus-present"
+  bind_bus_socket "$root/1000/bus" 0 5
+  await_bus_socket "$root/1000/bus" || { fail "precondition: no socket was bound"; reap_bus_binders; return 0; }
+
+  run_wait_bus "" "$root" 1000 "" 0.05
+  assert_eq "$BUS_RC" "0" "existing bus socket: returns 0 (stderr: $BUS_ERR)"
+  [ "$BUS_MS" -lt 2000 ] || fail "existing bus socket: returned in ${BUS_MS}ms, expected no waiting"
+  reap_bus_binders
+}
+
+# (b) The race itself: the bus appears shortly AFTER the wait starts. Returning 0
+# is only half the assertion — a stub that returns 0 unconditionally would satisfy
+# that — so the elapsed lower bound pins that it actually waited for the socket
+# rather than declaring victory on a path that did not exist yet.
+test_wait_for_user_bus_returns_zero_when_the_socket_appears_while_polling() {
+  local root path
+  require_wait_for_user_bus "socket appears late" || return 0
+  command -v python3 >/dev/null || { fail "socket appears late: python3 is required"; return 0; }
+  root="$TMP/bus-late"; path="$root/1000/bus"
+  mkdir -p "$root/1000"
+  bind_bus_socket "$path" 0.6 5
+  [ -S "$path" ] && fail "precondition: the socket was already bound before the wait started"
+
+  run_wait_bus "" "$root" 1000 10 0.05
+  assert_eq "$BUS_RC" "0" "late bus socket: returns 0 once it appears (stderr: $BUS_ERR)"
+  [ "$BUS_MS" -ge 400 ] || \
+    fail "late bus socket: returned after ${BUS_MS}ms — it cannot have waited for a socket bound 600ms in"
+  [ "$BUS_MS" -lt 9000 ] || \
+    fail "late bus socket: took ${BUS_MS}ms, expected a return soon after the socket appeared"
+  [ -S "$path" ] || fail "late bus socket: postcondition — the bound path is a socket"
+  reap_bus_binders
+}
+
+# (c) The bus never appears — a genuinely broken user manager. Bounded by the
+# timeout ARGUMENT, so the installer reports a clear failure instead of hanging:
+# the <15s ceiling is what proves arg 2 overrode the 30-second default.
+test_wait_for_user_bus_fails_when_the_socket_never_appears() {
+  local root
+  require_wait_for_user_bus "socket never appears" || return 0
+  root="$TMP/bus-never"; mkdir -p "$root/1000"
+
+  run_wait_bus "" "$root" 1000 1 0.05
+  assert_bus_failed "socket never appears"
+  [ "$BUS_MS" -ge 900 ] || \
+    fail "socket never appears: gave up after ${BUS_MS}ms, before the 1s timeout elapsed"
+  [ "$BUS_MS" -lt 15000 ] || \
+    fail "socket never appears: took ${BUS_MS}ms — timeout_seconds=1 did not override the 30s default"
+  assert_contains "$BUS_ERR" "1000" "socket never appears: stderr names the uid it waited for"
+}
+
+# (c2) `-S`, not `-e`. A leftover regular file at the bus path is exactly what an
+# existence check would accept and systemctl would still refuse to connect to.
+test_wait_for_user_bus_ignores_a_plain_file_at_the_bus_path() {
+  local root
+  require_wait_for_user_bus "plain file at the bus path" || return 0
+  root="$TMP/bus-plainfile"; mkdir -p "$root/1000"
+  : > "$root/1000/bus"
+  [ -e "$root/1000/bus" ] || fail "precondition: the plain file was not created"
+
+  run_wait_bus "" "$root" 1000 1 0.05
+  assert_bus_failed "plain file at the bus path"
+  [ "$BUS_MS" -ge 900 ] || \
+    fail "plain file at the bus path: returned in ${BUS_MS}ms — a regular file satisfied the check"
+}
+
+# (d) DC_DRY_RUN=1 returns 0 immediately, polls nothing and touches nothing. The
+# runtime root deliberately does not exist: a dry run must not create it, and
+# must not sit out the timeout waiting for a bus that will never be started.
+test_wait_for_user_bus_returns_zero_immediately_when_dry() {
+  local root
+  require_wait_for_user_bus "dry run" || return 0
+  root="$TMP/bus-dry-never-created"
+
+  run_wait_bus 1 "$root" 1000 3 0.05
+  assert_eq "$BUS_RC" "0" "DC_DRY_RUN=1: returns 0 (stderr: $BUS_ERR)"
+  [ "$BUS_MS" -lt 1000 ] || \
+    fail "DC_DRY_RUN=1: took ${BUS_MS}ms — it polled instead of short-circuiting"
+  assert_file_absent "$root" "DC_DRY_RUN=1: creates nothing under DC_RUNTIME_DIR_ROOT"
+}
+
+# --- issue #24, slice 2: what `-S` alone cannot tell you ---------------------
+#
+# CONTRACT ADDITION (owner-approved after the red team pass): `-S` proves the
+# path is a socket INODE, not that anything is listening on it. When a prior
+# user@<uid>.service crashes, the kernel does NOT unlink its AF_UNIX inode, so
+# /run/user/<uid>/bus survives as a socket that refuses every connect. `-S`
+# accepts it, `systemctl --user` then dies with exactly the connect failure this
+# function exists to prevent, and the installer aborts. So after `-S` is true,
+# wait_for_user_bus must ATTEMPT A CONNECT and only treat a successful connect as
+# "the bus is live"; ConnectionRefusedError/OSError means "not yet, keep polling".
+# python3 is a hard runtime dependency by the time this runs (install.sh installs
+# it at :244, the user-service section is at :285), so it is fair game here.
+#
+# WHERE THE EXPECTED VALUE COMES FROM: measured, not reasoned. Against a real
+# orphaned inode (bind, listen, close the listener) on this kernel:
+#     test -S <path>  -> 0            (the file still looks like a bus)
+#     connect(<path>) -> ConnectionRefusedError [Errno 111]
+# and against a bound-but-never-listen()ed socket, connect() is refused too —
+# which is why every "live socket" fixture in this file calls .listen().
+
+# Leave an ORPHANED socket inode at <path>: bind, listen, then close the
+# listener. Synchronous — when it returns, the inode is there and dead. This is
+# the crashed-user-manager leftover, reproduced exactly.
+orphan_bus_socket() {  # path
+  mkdir -p "$(dirname "$1")"
+  python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])
+s.listen(1)
+s.close()   # AF_UNIX does not unlink the inode when the listener dies
+' "$1"
+}
+
+# (f) The orphan. Before the connect probe this returned 0 in a few ms and the
+# install then died on the systemctl --user that followed; it must instead keep
+# polling and time out like any other absent bus.
+test_wait_for_user_bus_rejects_an_orphaned_socket_that_refuses_connections() {
+  local root path
+  require_wait_for_user_bus "orphaned bus socket" || return 0
+  command -v python3 >/dev/null || { fail "orphaned bus socket: python3 is required"; return 0; }
+  root="$TMP/bus-orphan"; path="$root/1000/bus"
+  orphan_bus_socket "$path"
+  [ -S "$path" ] || { fail "precondition: the orphaned inode is not a socket — the fixture proves nothing"; return 0; }
+
+  run_wait_bus "" "$root" 1000 1 0.05
+  assert_bus_failed "orphaned bus socket"
+  [ "$BUS_MS" -ge 900 ] || \
+    fail "orphaned bus socket: returned in ${BUS_MS}ms — a socket inode that refuses connect() was accepted as a live bus"
+  [ -S "$path" ] || fail "orphaned bus socket: postcondition — the probe must not unlink the inode"
+}
+
+# --- issue #24, slice 2: timeout_seconds is input, so validate it -------------
+#
+# CONTRACT ADDITION (owner-approved): arg 2, when given, must be a non-negative
+# integer no greater than 86400 (one day — a per-boot startup race that has not
+# resolved inside a day is not going to). Anything else is a caller bug and must
+# be REFUSED, fast and in this function's own voice, never fed to unguarded
+# arithmetic.
+#
+# WHY, measured on this shell (bash, install.sh runs `set -euo pipefail`):
+#   arg2="abc"               -> `$(( timeout * 1000 ))` under set -u aborts with
+#                               "install-lib.sh: line 359: abc: unbound variable"
+#                               — the caller's `|| die` never runs, the operator
+#                               gets a line number instead of a diagnosis.
+#   arg2=99999999999999999   -> *1000 overflows 64 bits to a positive ~7.7e18ms
+#                               deadline; the "bounded" poll never returns. I
+#                               measured this hanging past a 6s `timeout`, hence
+#                               the watchdog below: a hang must fail the test,
+#                               not stall the suite.
+#
+# Both cases therefore assert: non-zero, in well under a second, with stderr that
+# names the bad argument and is NOT a shell crash and NOT a timeout report — the
+# function never waited, so claiming it timed out would be a lie to the operator.
+
+# Like run_wait_bus, but in a watchdogged child shell, because the behaviour
+# under test today is an unbounded hang. Exit 124 is the watchdog firing.
+run_wait_bus_guarded() {  # runtime_root uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  BUS_ERR="$(DC_RUNTIME_DIR_ROOT="$1" DC_BUS_POLL_INTERVAL="$4" \
+             timeout "$5" bash -c 'set -uo pipefail; . "$1"; wait_for_user_bus "$2" "$3"' \
+             _ "$LIB" "$2" "$3" 2>&1 >/dev/null)"; BUS_RC=$?
+  end="$(date +%s%3N)"
+  BUS_MS=$((end - start))
+  return 0
+}
+
+assert_bus_arg_refused() {  # label bad_value
+  [ "$BUS_RC" -ne 124 ] || { fail "$1: still running after the watchdog fired — '$2' was accepted and the poll is unbounded"; return 0; }
+  # No 127 bail here, unlike assert_bus_failed: require_wait_for_user_bus has
+  # already proved the function exists, and 127 is exactly what bash returns when
+  # an expansion crashes the shell — the failure mode under test. The stderr
+  # assertions below tell a crash apart from a refusal.
+  [ "$BUS_RC" -ne 0 ] || fail "$1: expected non-zero exit for timeout_seconds='$2', got 0"
+  [ "$BUS_MS" -lt 1000 ] || fail "$1: took ${BUS_MS}ms — an invalid timeout_seconds must be refused before any polling"
+  [ -n "$BUS_ERR" ] || fail "$1: expected an informative stderr line, got none"
+  assert_not_contains "$BUS_ERR" "unbound variable" \
+    "$1: the shell crashed on the arithmetic instead of the function refusing the argument"
+  assert_not_contains "$BUS_ERR" "command not found" "$1: the refusal came from the function, not the shell"
+  assert_not_contains "$BUS_ERR" "timed out" \
+    "$1: reported a timeout it never served — an invalid argument is a caller bug, not a slow bus"
+  assert_contains "$BUS_ERR" "$2" "$1: stderr names the rejected value"
+}
+
+# (g) Non-numeric timeout_seconds.
+test_wait_for_user_bus_refuses_a_non_numeric_timeout() {
+  local root
+  require_wait_for_user_bus "non-numeric timeout" || return 0
+  root="$TMP/bus-arg-abc"; mkdir -p "$root/1000"
+
+  run_wait_bus_guarded "$root" 1000 abc 0.05 3
+  assert_bus_arg_refused "non-numeric timeout" "abc"
+}
+
+# (h) Numeric but absurd: 99999999999999999 overflows the millisecond deadline.
+# The bound this asserts is 86400 seconds (one day); 99999999999999999 is far
+# past it, so the builder may enforce the cap any way it likes.
+test_wait_for_user_bus_refuses_a_timeout_beyond_the_86400_second_cap() {
+  local root
+  require_wait_for_user_bus "oversized timeout" || return 0
+  root="$TMP/bus-arg-huge"; mkdir -p "$root/1000"
+
+  run_wait_bus_guarded "$root" 1000 99999999999999999 0.05 3
+  assert_bus_arg_refused "oversized timeout" "99999999999999999"
+}
+
+# (i) The other side of that cap, so it cannot be satisfied by refusing
+# everything: 86400 is the documented maximum and must be ACCEPTED. Asserted
+# with the bus already live, so accepting it costs milliseconds, not a day.
+test_wait_for_user_bus_accepts_the_documented_maximum_timeout_of_86400() {
+  local root
+  require_wait_for_user_bus "maximum timeout accepted" || return 0
+  command -v python3 >/dev/null || { fail "maximum timeout accepted: python3 is required"; return 0; }
+  root="$TMP/bus-arg-max"
+  bind_bus_socket "$root/1000/bus" 0 5
+  await_bus_socket "$root/1000/bus" || { fail "precondition: no socket was bound"; reap_bus_binders; return 0; }
+
+  run_wait_bus_guarded "$root" 1000 86400 0.05 5
+  assert_eq "$BUS_RC" "0" "maximum timeout accepted: timeout_seconds=86400 is within the cap (stderr: $BUS_ERR)"
+  [ "$BUS_MS" -lt 2000 ] || fail "maximum timeout accepted: returned in ${BUS_MS}ms with the bus already up"
+  reap_bus_binders
+}
+
+# --- issue #24, slice 3: leading zeros are OCTAL, and the cap in isolation -----
+#
+# CONTRACT ADDITION (the safer of the two readings; see the contract question at
+# the end of this block): timeout_seconds must be a PLAIN decimal integer. A
+# digit string with a leading zero and more than one character ("08", "010",
+# "0300") is AMBIGUOUS — it reads as decimal to the operator who typed it and as
+# octal to `$(( ))` — so it is refused as a caller bug, exactly like "abc". It is
+# never silently reinterpreted in either base. "0" itself stays valid: it is one
+# character, unambiguous, and inside the documented 0..86400 range.
+#
+# WHY, measured on this shell (bash 5.3.9) against the code as it stands today:
+#   arg2="08"   -> `deadline=$(( $(date +%s%3N) + timeout * 1000 ))` reports
+#                  "install-lib.sh: line 392: 08: value too great for base
+#                  (error token is "08")" — 8 is not an octal digit. That is an
+#                  EXPANSION error, not a `return 1`, and it does not reach the
+#                  call site as a failure: install.sh's shape,
+#                      wait_for_user_bus "$USER_UID" || die "..."
+#                  was measured printing the arithmetic error, NOT running die,
+#                  and then continuing into the next statement with status 0 —
+#                  i.e. straight on into the `systemctl --user` race that issue
+#                  #24 exists to prevent, which is worse than the crash.
+#   arg2="010"  -> valid octal, so no error at all: the deadline is built from 8
+#                  seconds, the wait is a fifth shorter than asked for, and the
+#                  timeout line then reports "timed out after 010s". Silently
+#                  wrong duration, wrongly reported.
+#
+# WHERE THE EXPECTED VALUES COME FROM: the contract above plus install.sh's own
+# call-site shape (`|| die`, itself asserted as text by the wiring test below) —
+# not from the current implementation, which is what these two tests exist to
+# contradict.
+#
+# CONTRACT QUESTION left for the owner: reject vs normalise. Stripping leading
+# zeros (`${timeout##+(0)}`, or forcing base 10 with `$((10#$timeout))`) would
+# accept "08" as 8 seconds instead. Rejecting is chosen here because it cannot
+# guess wrong about what the caller meant and needs no new parsing; if the owner
+# prefers normalisation, these two tests are the ones to change.
+
+# install.sh's call site, reproduced: `set -euo pipefail`, then the call guarded
+# by `|| die`. This is the seam the defect actually shows at — a refusal that
+# arrives as an uncaught expansion error instead of a non-zero RETURN skips the
+# `||` branch entirely, so asserting only on exit status and stderr would miss
+# it. The two markers are echoed to stderr so they land in BUS_ERR alongside
+# whatever the function itself said.
+run_wait_bus_at_call_site() {  # runtime_root uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  BUS_ERR="$(DC_RUNTIME_DIR_ROOT="$1" DC_BUS_POLL_INTERVAL="$4" \
+             timeout "$5" bash -c '
+               set -euo pipefail
+               . "$1"
+               die() { echo "CALL-SITE-DIED: $*" >&2; exit 9; }
+               wait_for_user_bus "$2" "$3" || die "the user bus never came up"
+               echo "CALL-SITE-CONTINUED" >&2
+             ' _ "$LIB" "$2" "$3" 2>&1 >/dev/null)"; BUS_RC=$?
+  end="$(date +%s%3N)"
+  BUS_MS=$((end - start))
+  return 0
+}
+
+# assert_bus_arg_refused, plus the part that tells a REFUSAL apart from a CRASH
+# that happens to be non-zero and happens to quote the bad value back. A bash
+# expansion error is always prefixed with the file it blew up in and carries one
+# of these base/token/syntax phrasings; the function's own message carries none
+# of them. Deliberately no assertion on the wording of the refusal itself — that
+# is the builder's to choose.
+assert_bus_arg_refused_cleanly() {  # label bad_value
+  assert_bus_arg_refused "$1" "$2"
+  assert_not_contains "$BUS_ERR" "install-lib.sh" \
+    "$1: stderr names the library file — that is bash reporting a crash at a line number, not the function refusing an argument"
+  assert_not_contains "$BUS_ERR" "value too great for base" \
+    "$1: '$2' reached arithmetic expansion and was parsed as octal instead of being refused"
+  assert_not_contains "$BUS_ERR" "error token" \
+    "$1: '$2' reached arithmetic expansion instead of being refused"
+  assert_not_contains "$BUS_ERR" "syntax error" \
+    "$1: '$2' reached arithmetic expansion instead of being refused"
+}
+
+# (j) "08": a leading zero that is not even valid octal. Three separate things
+# are asserted, because the exit status alone cannot see the defect (the crash
+# also exits non-zero): the refusal is clean and in the function's own voice; it
+# carries the SAME status the function already gives any other invalid timeout,
+# rather than whatever an uncaught expansion error happens to leave behind; and
+# at install.sh's call site the `|| die` branch actually runs.
+test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_not_valid_octal() {
+  local root refusal_rc
+  require_wait_for_user_bus "leading-zero timeout 08" || return 0
+  root="$TMP/bus-arg-08"; mkdir -p "$root/1000"
+
+  # The status this function uses to refuse a bad timeout, taken from the case
+  # already pinned by test (g) rather than hard-coded here.
+  run_wait_bus_guarded "$root" 1000 abc 0.05 3
+  refusal_rc="$BUS_RC"
+
+  run_wait_bus_guarded "$root" 1000 08 0.05 3
+  assert_bus_arg_refused_cleanly "leading-zero timeout 08" "08"
+  assert_eq "$BUS_RC" "$refusal_rc" \
+    "leading-zero timeout 08: refused with the same status as any other invalid timeout, not an uncaught shell error's status"
+
+  run_wait_bus_at_call_site "$root" 1000 08 0.05 3
+  assert_contains "$BUS_ERR" "CALL-SITE-DIED" \
+    "leading-zero timeout 08: install.sh's '|| die' must fire — a refusal has to arrive as a non-zero RETURN, not an expansion error that skips the || branch"
+  assert_not_contains "$BUS_ERR" "CALL-SITE-CONTINUED" \
+    "leading-zero timeout 08: the caller ran on past a failed wait, straight into the systemctl --user race issue #24 is about"
+  [ "$BUS_MS" -lt 1000 ] || \
+    fail "leading-zero timeout 08: the call site took ${BUS_MS}ms — an invalid timeout must be refused before any polling"
+}
+
+# (k) "010": a leading zero that IS valid octal, so nothing crashes and nothing
+# is reported — the wait is simply 8 seconds instead of 10. The watchdog is set
+# below that 8s so a silently-accepted "010" shows up as exit 124 rather than as
+# a test that quietly passes after sitting out the octal duration.
+test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal() {
+  local root
+  require_wait_for_user_bus "leading-zero timeout 010" || return 0
+  root="$TMP/bus-arg-010"; mkdir -p "$root/1000"
+
+  run_wait_bus_guarded "$root" 1000 010 0.05 3
+  assert_bus_arg_refused_cleanly "leading-zero timeout 010" "010"
+}
+
+# (l) The cap, isolated. Test (h) passes 99999999999999999, which any
+# length-based proxy check refuses on digit count alone — so it cannot tell
+# whether the 86400 bound itself is enforced. 90000 is five digits, the same
+# width as the accepted maximum 86400, so only a comparison against the cap can
+# refuse it. Falsification checked before this was committed: with the cap
+# raised to 999999 in a throwaway copy of install-lib.sh, test (h) still passes
+# and this test fails (exit 124 — 90000 accepted, watchdog fired).
+test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap() {
+  local root
+  require_wait_for_user_bus "timeout just past the cap" || return 0
+  root="$TMP/bus-arg-90000"; mkdir -p "$root/1000"
+
+  run_wait_bus_guarded "$root" 1000 90000 0.05 3
+  assert_bus_arg_refused_cleanly "timeout just past the cap" "90000"
+}
+
+# (e) The wiring. Everything above can be green with the helper orphaned, in
+# which case issue #24 is not fixed at all — so this asserts the call site in
+# install.sh itself, by line ordering.
+#
+# Scoped to the lines AFTER `loginctl enable-linger`: install.sh's uninstall()
+# also runs `systemctl --user` (lines 84/86 today), long before the install path,
+# and those are not what this race is about. Comment lines are skipped so that
+# documenting the call does not count as making it.
+first_code_line() {  # file regex [after_line] -> line number, or empty
+  awk -v re="$2" -v after="${3:-0}" \
+    'NR > after && $0 ~ re && $0 !~ /^[[:space:]]*#/ { print NR; exit }' "$1"
+}
+
+test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call() {
+  local sh linger waited sysd
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  linger="$(first_code_line "$sh" 'loginctl enable-linger')"
+  [ -n "$linger" ] || { fail "call site: no 'loginctl enable-linger' line in install.sh"; return 0; }
+  sysd="$(first_code_line "$sh" 'systemctl --user' "$linger")"
+  [ -n "$sysd" ] || { fail "call site: no 'systemctl --user' line after enable-linger"; return 0; }
+  waited="$(first_code_line "$sh" 'wait_for_user_bus' "$linger")"
+  [ -n "$waited" ] || {
+    fail "call site: install.sh never calls wait_for_user_bus after enable-linger (linger at line $linger, first systemctl --user at line $sysd) — the helper is orphaned and issue #24 is not fixed"
+    return 0; }
+
+  [ "$linger" -lt "$waited" ] || \
+    fail "call site: wait_for_user_bus (line $waited) must come AFTER loginctl enable-linger (line $linger)"
+  [ "$waited" -lt "$sysd" ] || \
+    fail "call site: wait_for_user_bus (line $waited) must come BEFORE the first systemctl --user after linger (line $sysd)"
+}
+
+# (e2) The call site's ERROR WIRING, which the ordering test above cannot see.
+# Mutating install.sh's `wait_for_user_bus "$USER_UID" || die "..."` down to
+# `|| true` leaves that test — and the whole suite — green, while the installer
+# sails past a dead bus straight into the `systemctl --user` failure this slice
+# exists to prevent. install.sh cannot be executed here (it demands root and does
+# top-level work), so this is a text assertion, scoped to the one statement that
+# contains the call and deliberately blind to wording and layout: the die message
+# may be rewritten and the continuation reflowed without failing it.
+logical_statement_at() {  # file line -> that line plus its backslash continuations, joined
+  awk -v start="$2" '
+    NR < start { next }
+    { cont = ($0 ~ /\\[[:space:]]*$/); line = $0; sub(/\\[[:space:]]*$/, "", line); buf = buf line " " }
+    cont == 0 { print buf; exit }
+  ' "$1"
+}
+
+test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up() {
+  local sh waited linger stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  linger="$(first_code_line "$sh" 'loginctl enable-linger')"
+  [ -n "$linger" ] || { fail "error wiring: no 'loginctl enable-linger' line in install.sh"; return 0; }
+  waited="$(first_code_line "$sh" 'wait_for_user_bus' "$linger")"
+  [ -n "$waited" ] || { fail "error wiring: install.sh never calls wait_for_user_bus after enable-linger"; return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$waited")"
+  [ -n "$stmt" ] || { fail "error wiring: could not read the statement at install.sh:$waited"; return 0; }
+
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || \
+    fail "error wiring: install.sh:$waited must handle a wait_for_user_bus failure with '|| die <message>' — a failed wait that does not abort lets the install run on into the systemctl --user failure issue #24 is about. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" \
+    "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
+  assert_not_contains "$stmt" "|| :" \
+    "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
   test_sourcing_is_side_effect_free \
@@ -3010,7 +3571,22 @@ for CURRENT in \
   test_remove_accountsservice_marker_is_a_no_op_when_nothing_exists \
   test_accountsservice_marker_round_trips_a_preexisting_file \
   test_remove_accountsservice_marker_refuses_malformed_account_names \
-  test_ensure_host_account_refuses_malformed_account_names
+  test_ensure_host_account_refuses_malformed_account_names \
+  test_library_defines_wait_for_user_bus \
+  test_wait_for_user_bus_returns_zero_when_the_socket_already_exists \
+  test_wait_for_user_bus_returns_zero_when_the_socket_appears_while_polling \
+  test_wait_for_user_bus_fails_when_the_socket_never_appears \
+  test_wait_for_user_bus_ignores_a_plain_file_at_the_bus_path \
+  test_wait_for_user_bus_returns_zero_immediately_when_dry \
+  test_wait_for_user_bus_rejects_an_orphaned_socket_that_refuses_connections \
+  test_wait_for_user_bus_refuses_a_non_numeric_timeout \
+  test_wait_for_user_bus_refuses_a_timeout_beyond_the_86400_second_cap \
+  test_wait_for_user_bus_accepts_the_documented_maximum_timeout_of_86400 \
+  test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_not_valid_octal \
+  test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
+  test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
+  test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
+  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up
 do
   before=$FAILURES
   "$CURRENT"
