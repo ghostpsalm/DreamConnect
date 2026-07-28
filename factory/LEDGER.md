@@ -13,3 +13,4 @@ Cache reads are shown separately from output because they are billed differently
 | when (UTC) | run | issue | commits | CI | elapsed | tokens | outcome |
 |---|---|---|---|---|---|---|---|
 | 2026-07-28T03:49:45Z | issue-18 | #18 | 1 commits | — | 932m | out 691,600 · cache-read 98,813,678 · agents 3,319,294 total across 56 spawns | — |
+| 2026-07-28T04:02:24Z | issue-18 | #18 | 2 commits | — | 944m | out 727,673 · cache-read 122,236,864 · agents 3,319,294 total across 56 spawns | — |
