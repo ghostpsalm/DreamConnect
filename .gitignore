@@ -24,3 +24,6 @@ __pycache__/
 
 # local-only code review reports
 CODE_REVIEW_*.md
+
+# factory: the live checkpoint is per-run scratch; archives under runs/ are tracked
+factory/CHECKPOINT.md

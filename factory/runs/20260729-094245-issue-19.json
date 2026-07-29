@@ -1,0 +1,173 @@
+{
+  "recorded_at": "2026-07-29T09:42:46Z",
+  "repo": "fix-boottests-evdev-keycodes",
+  "branch": "agent/fix-boottests-evdev-keycodes",
+  "base": "fc43dace4520b511c1416b654a9bfea9242cd482",
+  "window_start": "2026-07-21T18:30:52+10:00",
+  "head": "6bd09625feee768bed0f622283a0c959f7ef434d",
+  "issue": {
+    "number": 19,
+    "state": "OPEN",
+    "title": "BootTests.java asserts stale evdev keycodes after H1 keysym rework",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/19"
+  },
+  "commits": [
+    {
+      "sha": "6bd09625feee768bed0f622283a0c959f7ef434d",
+      "subject": "Keyboard: the numpad separator typed an \"l\" instead of a separator"
+    },
+    {
+      "sha": "cac9df900a42e510d882f629ca9b40e6e9f9cfcd",
+      "subject": "Boot tests: realign the keyboard assertions with the H1 keysym split"
+    }
+  ],
+  "commit_count": 2,
+  "diffstat": "5 files changed, 375 insertions(+), 13 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 251,
+      "output_tokens": 123937,
+      "cache_read_input_tokens": 11881704,
+      "cache_creation_input_tokens": 945093
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 12,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 35555,
+        "duration_ms": 125508,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 4,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 165869,
+        "duration_ms": 627003,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 4,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 184773,
+        "duration_ms": 676721,
+        "models": []
+      },
+      "breaker": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 56307,
+        "duration_ms": 241150,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 26837,
+        "duration_ms": 73475,
+        "models": []
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 52821,
+        "duration_ms": 218877,
+        "models": []
+      }
+    },
+    "usage_blocks": 135,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "4833af05-079b-4432-bb8b-9fa0e5e2e69a.jsonl",
+        "usage_blocks": 135
+      }
+    ],
+    "agent_wall_clock_ms": 1962734,
+    "first_activity": "2026-07-28T03:48:20.034000+00:00",
+    "last_activity": "2026-07-29T09:42:44.627000+00:00",
+    "notification_tokens": 522162,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "Continue",
+    "continue",
+    "<task-notification>\n<task-id>a0c526a2e39476f98</task-id>\n<tool-use-id>toolu_01QcV3yDw2bsK2J28bVMwkBp</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a0c526a2e39476f98.output</output-file>\n<status>completed</status>\n<summary>Agent \"Gate check slice 2 routing test\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: fail\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source) | Observed | Verdict |\n|---|---|---|\n| Routing test at `DreamConnectRobotPeer` \"proving the KS-before-K precedence H1 introduced\" (task + `factory/CHECKPOINT.md` slice 2 + test javadoc) | **Does not prove it.** Mutant swapping the two branches (`keycode` checked before `keysym`) \u2192 `ALL PASS`, `exit=0`. Cause: the tables are disjoint \u2014 exhaustive scan of vk \u22121..0x20000 gives **0 vks present in both `KEY` and `KSYM`**, so KS-vs-K ordering is behaviourally unobservable and no assertion can cover it. What the test really proves is *table-before-fallback*. | **FAIL** |\n| VK_F1 trap: evdev table beats `fallbackKeysym` | Mutant putting `fallbackKeysym` first \u2192 `FAIL: keyPress(VK_F1) \u2026 (got \"KS 112 1\")`. Real, and the only precedence actually pinned. | PASS |\n| One approved production change: drop `final` from `DaemonClient` | `git diff`: `-final class DaemonClient` / `+class DaemonClient` + one javadoc line. Nothing else. Approval **recorded** (not proven) in `factory/CHECKPOINT.md` seam 2. | PASS |\n| `DreamConnectRobotPeer.java`, `AwtEvdev.java` untouched | Not in `git status`/`git diff`. | PASS |\n\n### Standards \u2014 does it hold up as code?\n| Claim | Oracle | Observed | Verdict |\n|---|---|---|---|\n| Gate green | `./run-tests.sh` | `ALL PASS` \u2026 `ALL TESTS PASSED`, `EXIT=0`; the 5 new lines",
+    "<task-notification>\n<task-id>a6e3c7c68fa51067e</task-id>\n<tool-use-id>toolu_01JjmcQGZ4XTHKt1kP1j2qGd</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a6e3c7c68fa51067e.output</output-file>\n<status>completed</status>\n<summary>Agent \"Fix slice 2 test claim per seraph\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\nslice: #19 slice 2 \u2014 correct the routing test's claims + add the disjointness guard\nseam: `DreamConnectRobotPeer.keyPress/keyRelease` \u2192 `DaemonClient.input()` wire string (fake daemon); `AwtEvdev.keycode/keysym` statics\ntest: `/home/kogies/.factory/worktrees/dreamconnect/fix-boottests-evdev-keycodes/agent/test/dreamconnect/boot/BootTests.java::testRobotPeerKeyWire` (corrected) + `::testAwtEvdevTablesDisjoint` (new)\nexpected value from: `AwtEvdev.java` class javadoc (\"character-producing keys \u2026 keysym\" / \"everything else \u2026 evdev keycode\" \u21d2 disjoint); `runtime/README.md` control-socket table; input-event-codes.h (28, 59); X11 keysymdef ('a'=97)\nstubs created: none\nred observed: `java \u2026 dreamconnect.boot.BootTests` on a **scratch-copy mutant** \u2192 `FAIL: AwtEvdev KEY and KSYM tables are disjoint over vk -0x100..0x20000 (got 1 vk(s) in both; first: vk 0x9b -&gt; evdev 110 AND keysym 105)`, `1 FAILURE(S)`, `EXIT=1`\n\n**Javadoc before \u2192 after.** Removed \"the KS-before-K precedence H1 introduced\"; replaced with an explicit list of the four things pinned (keysym route, evdev route, release state, **table-before-fallback** via the VK_F1 trap) and a paragraph stating the test does *not* prove keysym-table-before-evdev-table ordering, because the tables are disjoint. Messages now name the route: `keysym-routed:`, `evdev-routed:`, `table before fallback:`, `re",
+    "<task-notification>\n<task-id>a7c1546a164c8898d</task-id>\n<tool-use-id>toolu_01WZcfCZbN76rsNaaFUFYFHn</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a7c1546a164c8898d.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph lap 2 re-gate slice 2\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source) | Observed | Verdict |\n|---|---|---|\n| (a) Test claims corrected to table-before-fallback; explicit disclaimer on KS/K ordering (lap-1 FAIL) | `BootTests.java:200-206` states the disclaimer; I re-ran the swap mutant (K branch before KS in `sendKey`) \u2192 `ALL PASS`, exactly as the javadoc now says. Overclaim resolved. | PASS |\n| (b) `testAwtEvdevTablesDisjoint` genuinely bites | Mutant `k(KeyEvent.VK_INSERT,'i')` in scratch copy \u2192 `1 FAILURE(S)`, sole detector: `FAIL: AwtEvdev KEY and KSYM tables are disjoint \u2026 (got 1 vk(s) in both; first: vk 0x9b -&gt; evdev 110 AND keysym 105)`. Names vk and both values. | PASS |\n| (b) Range rationale (`VK_CUT`=0xFFD1 highest AWT VK) | Reflection over `KeyEvent`: `max=VK_CUT=0xffd1 min=VK_UNDEFINED=0`. Claim exact. Scan cost nil (suite 1.1s wall). | PASS |\n| (c) README `K`/`KS` rows accurate vs `AwtEvdev`/`sendKey` | `KS` row (\"character-producing keys; guest layout resolves the keycode\") matches `AwtEvdev` javadoc + `sendKey` incl. fallback path. `K` row mirrors the source's own category list. Not overstated. | PASS |\n| (c) CHECKPOINT reasoning matches the change | `factory/CHECKPOINT.md` \"Out-of-scope findings\" #1 says both rows reworded, 4a same-class; diff shows exactly that. Approved scope, not creep. | PASS |\n| Slice 1 intact | 4 stale lines rem",
+    "<task-notification>\n<task-id>a92877fc74f963a8f</task-id>\n<tool-use-id>toolu_01Bjs7gpiR6WsVKGY97Sh8se</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a92877fc74f963a8f.output</output-file>\n<status>completed</status>\n<summary>Agent \"Red team the issue 19 diff\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Breaker report\nVERDICT: defect-found\n\n### Defects (most severe first)\n\n**1. `agent/boot/dreamconnect/boot/AwtEvdev.java:101-105` + `DreamConnectRobotPeer.java:59-60` \u00b7 `fallbackKeysym` turns the numpad separator key into the letter `l` on the guest.**\n- Trigger: `peer.keyPress(KeyEvent.VK_SEPARATOR)` (vk `0x6C`).\n- Demonstrated, real output through the production peer + a fake daemon:\n  `VK_SEPARATOR wire: [KS 108 1, KS 108 0]` \u2014 keysym 108 = `'l'`. Correct is `K 121 0/1` (`KEY_KPCOMMA=121`, kernel header verified).\n- I enumerated **all 188 distinct AWT `VK_` constants** by reflection: `VK_SEPARATOR` is the **only** vk in the whole AWT space that reaches `fallbackKeysym` at all. So the fallback branch's entire real-world reachable input set is exactly one key, and it is wrong. Every other unmapped vk (86 of them: `VK_F13..F24`, `VK_COPY/PASTE/CUT/UNDO`, all `VK_DEAD_*`, `VK_AT/COLON/PLUS/...`) is silently dropped.\n- Missing test: `keyPress(VK_SEPARATOR)` \u2192 `\"K 121 1\"`. The new `testAwtEvdevFallbackKeysym` picks `'+'` (0x2B) and `'#'` (0x23) as its \"printable vk in neither table\" examples \u2014 **neither is an AWT vk value** (`VK_PLUS=0x209`, `VK_NUMBER_SIGN=0x208`), so both cases are unreachable through the peer while the one reachable case is untested.\n- Relationship: **adjacent**. Introduced by H1 (`370451a`) \u2014 pre-H1 the peer had no fallback and simply dropped `VK_SE",
+    "<task-notification>\n<task-id>a6a2932c74f192d2d</task-id>\n<tool-use-id>toolu_01Dpi9mj8h7V5ZTYMoT8JZ8a</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a6a2932c74f192d2d.output</output-file>\n<status>completed</status>\n<summary>Agent \"Red test for VK_SEPARATOR defect\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\n\n**slice:** #19 slice 3 \u2014 VK_SEPARATOR wrong keystroke\n**seam:** `DreamConnectRobotPeer.keyPress/keyRelease` \u2192 control-socket line, via `FakeDaemon` (existing seam)\n**test:** `/home/kogies/.factory/worktrees/dreamconnect/fix-boottests-evdev-keycodes/agent/test/dreamconnect/boot/BootTests.java::testRobotPeerSeparatorKey`\n**expected value from:** `KeyEvent.getKeyText(VK_SEPARATOR)` (JDK awt bundle) = `\"NumPad ,\"`, vs `VK_DECIMAL` = `\"NumPad .\"` \u2014 ran it, output above; `/usr/include/linux/input-event-codes.h:198 #define KEY_KPCOMMA 121`; `runtime/README.md:58` `K` row (numpad \u2192 evdev)\n**stubs created:** none\n**red observed:** `./run-tests.sh` \u2192\n```\nFAIL: keyPress(VK_SEPARATOR) -&gt; \"K 121 1\" (KEY_KPCOMMA), not the 'l' keysym \"KS 108 1\" (got \"KS 108 1\")\nFAIL: keyRelease(VK_SEPARATOR) -&gt; \"K 121 0\" (got \"KS 108 0\")\n2 FAILURE(S)\n```\n\n### Ambiguity assessment \u2014 121 is **not** ambiguous\nYour brief said `KEY_KPDOT (52)`: **52 is `KEY_DOT`** (main-row period). `KEY_KPDOT` is **83** \u2014 and `AwtEvdev.java:80` already gives 83 to `VK_DECIMAL`. AWT keeps the two keys distinct (\"NumPad ,\" vs \"NumPad .\"), so 83 is ruled out; 121 stands. Cross-check: xkb `keycodes/evdev:204` `&lt;I129&gt; = 129; // KEY_KPCOMMA 121`, `alias &lt;KPPT&gt;`, and `symbols/hu:759` binds `&lt;KPPT&gt;` to `KP_Separator` on all levels.\n\n**Residual caveat for the owner (not blocking):**",
+    "<task-notification>\n<task-id>af007eeaffe35e96a</task-id>\n<tool-use-id>toolu_011wdni1HXEmXZ8LYCz54nKA</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/af007eeaffe35e96a.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make VK_SEPARATOR test green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Green.\n\n## Slice 3 \u2014 VK_SEPARATOR routes to evdev KEY_KPCOMMA\n\n**Seam:** `AwtEvdev.keycode` / the `DreamConnectRobotPeer.sendKey` wire line (`K`/`KS` to the daemon).\n**Test:** `BootTests` \u2014 `keyPress(VK_SEPARATOR) -&gt; \"K 121 1\"`, `keyRelease -&gt; \"K 121 0\"` (oracle's, untouched).\n\n**Change** \u2014 `/home/kogies/.factory/worktrees/dreamconnect/fix-boottests-evdev-keycodes/agent/boot/dreamconnect/boot/AwtEvdev.java`, one line, in the numpad block:\n\n```diff\n-        m(KeyEvent.VK_DIVIDE, 98);\n+        m(KeyEvent.VK_DIVIDE, 98); m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA\n```\n\nNo change to `fallbackKeysym`, `KSYM`, or `DreamConnectRobotPeer`.\n\n**Doc line 1** \u2014 `/home/kogies/.factory/worktrees/dreamconnect/fix-boottests-evdev-keycodes/docs/design.md:63`\nBefore: \"Character keys (letters, digits, punctuation): `NotifyKeyboardKeysym` \u2026 Everything else (modifiers, whitespace/control, navigation, function row, numpad, locks): `NotifyKeyboardKeycode` from the AWT vk \u2192 evdev keycode map\"\nAfter: \"Tried in order: character keys (letters, digits, punctuation) go out as `NotifyKeyboardKeysym` with the base X11 keysym, so the guest's own layout picks the keycode; physical/functional keys (modifiers, whitespace/control, navigation, function row, numpad, locks) as `NotifyKeyboardKeycode` from the AWT vk \u2192 evdev keycode map; an unmapped vk that happens to land in printable ASCII gets a",
+    "<task-notification>\n<task-id>a92b9ff9bbddf1a60</task-id>\n<tool-use-id>toolu_01LNaQvuJfN48mKtTFRrYHUR</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a92b9ff9bbddf1a60.output</output-file>\n<status>completed</status>\n<summary>Agent \"Gate slice 3 VK_SEPARATOR fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source) | Observed | Verdict |\n|---|---|---|\n| Fix VK_SEPARATOR wrong keystroke, map to evdev 121 (CHECKPOINT.md:89 slice 3; D1 disposition:78-85, owner-approved, class 4a) | `AwtEvdev.java:81` `m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA`; peer now emits `K 121 1`/`K 121 0` | PASS |\n| 121 is correct, independently | `grep KEY_KPCOMMA /usr/include/linux/input-event-codes.h` \u2192 `198:#define KEY_KPCOMMA 121`; KEY_KPDOT=83 still on VK_DECIMAL (reflection: `VK_DECIMAL keycode=83`) \u2014 keys stay distinct | PASS |\n| ONE production change only | `git diff --stat`: `AwtEvdev.java 2 +-`, `DaemonClient.java 4 +-` (slice-2 `final` drop). `git diff --stat -- DreamConnectRobotPeer.java` \u2192 empty | PASS |\n| docs/design.md:63 + runtime/README.md:59 describe all four outcomes (D2) | design.md line now lists keysym \u2192 evdev \u2192 printable-ASCII fallback \u2192 silent drop, in `sendKey`'s actual branch order (verified against `DreamConnectRobotPeer.java:54-61`). README `K`/`KS` rows accurate | PASS (see note) |\n| Fallback branch left present, delete/keep deferred to a filed issue | `fallbackKeysym` untouched; deferral recorded CHECKPOINT.md:82-84 (recorded, not owner-proven) | PASS |\n\n### Standards \u2014 does it hold up as code?\n| Claim | Oracle | Observed | Verdict |\n|---|---|---|---|\n| Gate green | `./run-tests.sh` | `AL",
+    "<task-notification>\n<task-id>a72838e3a0d250099</task-id>\n<tool-use-id>toolu_01GbNoT8S1DJybw7LFjwNau2</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a72838e3a0d250099.output</output-file>\n<status>completed</status>\n<summary>Agent \"Review issue 19 working diff\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Verdict: ship. No blocking finding. One gap I'd close first (2 lines).\n\nI independently confirmed by reflection: 0 named AWT vks reach `fallbackKeysym` after the fix, 86 dropped; `VK_CUT=0xffd1` is the max vk; `KEY_KPCOMMA=121`/`KEY_KPDOT=83` match the header. Breaker's refutations hold \u2014 `agent/build.sh` compiles only `boot/`, so the `final` drop never reaches a subclassable position an attacker could use without already owning the JVM.\n\n**1. Silent-drop path untested** \u2014 `agent/test/dreamconnect/boot/BootTests.java:250` \u00b7 `in-scope`\n`sendKey`'s fourth outcome (86 vks) has zero coverage; `d.sent.size()==4` pins \"no extras\" but never \"no line at all\".\n*Scenario:* someone \"fixes\" the 86 dropped vks by appending `else daemon.input(\"KS \" + awtVk + \" \" + state)` to `DreamConnectRobotPeer.sendKey:61`. All 83 assertions still pass, and `VK_F13` (0xF000) now emits `KS 61440 1` \u2014 the D1 wrong-keystroke class this diff exists to fix, reintroduced green. Add `peer.keyPress(VK_F13); check(d.sent.isEmpty(), \u2026)`.\n\n**2. `runtime/README.md:58-59` reply column says `OK`; daemon returns `None`** \u2014 `adjacent`\nThe diff rewrites these exact two rows for accuracy while leaving a wrong cell in them. CHECKPOINT defers this as needing \"a decision about whether the daemon or the doc is wrong\" \u2014 that doesn't hold: `dreamconnect_daemon.py:530-532` states the intent explicitly (\"fire-and-for",
+    "<task-notification>\n<task-id>a8c2dc2fa9684b6d2</task-id>\n<tool-use-id>toolu_015rspsoYq3wwjamZtRioos3</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-fix-boottests-evdev-keycodes/4833af05-079b-4432-bb8b-9fa0e5e2e69a/tasks/a8c2dc2fa9684b6d2.output</output-file>\n<status>completed</status>\n<summary>Agent \"Close reviewer findings\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>All four closed. Gate green.\n\n## Test authored\nslice: issue #19 \u2014 silent-drop path of `DreamConnectRobotPeer.sendKey`\nseam: the control-socket wire, via the existing `FakeDaemon` (`DaemonClient.input` override) \u2014 same seam as the other peer tests, no new one\ntest: `/home/kogies/.factory/worktrees/dreamconnect/fix-boottests-evdev-keycodes/agent/test/dreamconnect/boot/BootTests.java::testRobotPeerUnmappedKeyDropped`\nexpected value from: `docs/design.md`, `Robot.keyPress/keyRelease` routing \u2014 \"anything still unmapped is dropped silently\"; `AwtEvdev` class contract \"Gaps return -1 so the caller can fall back \u2026 or drop\". `VK_F13 == 0xF000` is from AWT itself and is asserted, not assumed.\nstubs created: none\n\n**Independence caveat**: this is a guard over code already written, so I could read `sendKey`. The expected value (\"no line at all\") is the design-doc sentence, not the code. Against the real tree the test **passes** \u2014 the behaviour already exists; this is a regression alarm, not a slice red. The red comes from the mutant.\n\nred observed (scratch mutant, `else daemon.input(\"KS \" + awtVk + \" \" + state);` appended to `sendKey`, scratch copy since reverted, production file never touched):\n```\nFAIL: unmapped key is dropped: keyPress(VK_F13) puts NO line on the wire (got [KS 61440 1])\nFAIL: unmapped key is dropped: keyRelease(VK_F13) puts NO line on the wire (got [KS 61440 1, KS",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 9315,
+    "ask: This edits a version number.": 5473,
+    "ask: This would publish a GitHub release, which ships to real devices.": 1901,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 1957,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 1736,
+    "block: touching a secret/credential file": 8098,
+    "block: force push (never rewrite published history)": 1885,
+    "block: editing an existing migration": 1731,
+    "block: hard reset discards work": 1339,
+    "block: editing the deployed factory directly": 12754,
+    "block: destructive SQL DDL": 4273,
+    "block: piping remote content straight to a shell": 125,
+    "block: writing to a file the harness owns": 1659,
+    "block: over-wide fence": 18,
+    "block: over-wide read fence": 4,
+    "block: TRUNCATE destroys data": 151,
+    "block: writing into the ~/.claude root directory": 42,
+    "block: writing to ~/.claude.json, which holds a live credential": 34,
+    "block: reading ~/.claude.json, which holds a live credential": 5,
+    "block: sending a secret/credential file to a network client": 15333,
+    "block: sending a file the harness owns to a network client": 27,
+    "block: sending ~/.claude.json to a network client": 1010,
+    "block: disk-destructive command": 139,
+    "block: nuked": 125,
+    "block: MUTANT-BLOCK-ALL": 106,
+    "block: git clean deletes untracked files": 79,
+    "block: unqualified DELETE (no WHERE)": 66,
+    "block: world-writable recursive chmod": 264,
+    "block: fork bomb": 20,
+    "block: push --all (push the current branch only)": 35,
+    "ask: This would bump the version, which ships to real devices.": 2,
+    "ask: This would rewrite the version in Cargo.toml.": 4,
+    "ask: This would rewrite package.json's version and tag it.": 75,
+    "ask: This would rewrite pyproject.toml's version.": 2,
+    "block: a shell nested deeper than this fence reads": 9
+  },
+  "status": "done",
+  "note": "Gate was red on main since 370451a; this makes it green. No CI exists in this repo (no .github/workflows) so the push runs nothing - ./run-tests.sh was the only check, on this one Linux box, one JDK, one Python. Breaker found a real shipped bug (VK_SEPARATOR typed 'l'); owner approved fixing it, landed as the second commit. Seraph failed slice 2 once for a test that claimed to prove KS-before-K precedence it could not - tables are disjoint so the branch order is unobservable; claims rewritten and a disjointness guard added. Breaker lap 2 skipped deliberately (budget): since lap 1 the diff gained one production line, which seraph mutation-tested both ways. The final round closing 4 reviewer findings was NOT re-gated by a 4th seraph run - a weekly usage limit was hit mid-run and killed one agent; the new drop-path test carries its own falsification evidence and the README reply-column claim was verified directly against dreamconnect_daemon.py, but the two doc restructures rest on the oracle's report alone. UNVERIFIED: whether K 121 actually produces a separator on a guest - only hu/keypad layouts bind evdev 121, us/pc bind nothing, so on those the key now does nothing rather than typing 'l'. Needs a live SC session on an ABNT2/hu numpad.",
+  "outcome": {
+    "slices": "3",
+    "bounces": "1",
+    "guard_tests": "2",
+    "tests_added": "8",
+    "findings_fixed": "5",
+    "findings_deferred": "4",
+    "seraph_unsure": "0",
+    "breaker_verdict": "defect-found",
+    "reviewer_blocking": "0",
+    "laps": "4"
+  }
+}
