@@ -32,6 +32,7 @@ public class BootTests {
         testAwtEvdevFallbackKeysym();
         testAwtEvdevTablesDisjoint();
         testRobotPeerKeyWire();
+        testRobotPeerSeparatorKey();
         testRobotPeerUnmappedKeyDropped();
         testFrameReader();
         testFrameReaderNeverBlackMidWrite();
@@ -161,8 +162,9 @@ public class BootTests {
      * function is package-visible and its range boundaries are worth a guard, but
      * it must not be read as covering a key.
      *
-     * The one AWT vk that does reach fallbackKeysym is VK_SEPARATOR, which this
-     * suite does not yet cover at the wire seam.
+     * The one AWT vk that did reach fallbackKeysym is VK_SEPARATOR, and it is
+     * covered where it matters — at the wire seam, in
+     * {@link #testRobotPeerSeparatorKey}.
      */
     private static void testAwtEvdevFallbackKeysym() {
         // Machine-checked form of the "not an AWT vk" claim above.
@@ -251,6 +253,49 @@ public class BootTests {
     }
 
     /**
+     * The numpad separator key must press a numpad separator, not type a letter.
+     *
+     * Expected value, from sources outside this codebase:
+     *   - AWT names vk 0x6C "NumPad ," — KeyEvent.getKeyText(VK_SEPARATOR)
+     *     returns that from the JDK's own awt resource bundle, and returns
+     *     "NumPad ." for VK_DECIMAL. Separator is the comma key, decimal is the
+     *     dot key; AWT keeps them distinct.
+     *   - AwtEvdev's class javadoc puts the whole numpad on the evdev-keycode
+     *     route ("modifiers, whitespace/control, navigation, function row,
+     *     numpad, locks -> evdev keycode"), matching runtime/README.md's `K` row.
+     *     So this is a K line, not a KS line.
+     *   - The evdev numpad-comma key is KEY_KPCOMMA = 121
+     *     (/usr/include/linux/input-event-codes.h:198). Cross-check: xkb's
+     *     keycodes/evdev has `<I129> = 129;  // #define KEY_KPCOMMA 121` with
+     *     `alias <KPPT> = <I129>`, and symbols/hu binds `<KPPT>` to KP_Separator
+     *     on every level.
+     *   - Not KEY_KPDOT = 83 (same header, :159): that is the numpad dot, and
+     *     AwtEvdev already gives it to VK_DECIMAL. Reusing it would erase the
+     *     separator/decimal distinction AWT makes.
+     *
+     * Regression being pinned: with vk 0x6C in neither table, sendKey() falls
+     * through to fallbackKeysym, which sees 108 inside the printable-ASCII range
+     * and returns 108 — the keysym for 'l'. Pressing the numpad separator on the
+     * SC client typed an "l" on the guest.
+     */
+    private static void testRobotPeerSeparatorKey() {
+        FakeDaemon d = new FakeDaemon();
+        DreamConnectRobotPeer peer = new DreamConnectRobotPeer(d, null);
+
+        peer.keyPress(KeyEvent.VK_SEPARATOR);
+        check("K 121 1".equals(d.last()),
+              "keyPress(VK_SEPARATOR) -> \"K 121 1\" (KEY_KPCOMMA), not the 'l' keysym \"KS 108 1\" (got \""
+              + d.last() + "\")");
+
+        peer.keyRelease(KeyEvent.VK_SEPARATOR);
+        check("K 121 0".equals(d.last()),
+              "keyRelease(VK_SEPARATOR) -> \"K 121 0\" (got \"" + d.last() + "\")");
+
+        check(d.sent.size() == 2,
+              "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+    }
+
+    /**
      * The fourth outcome of sendKey(): **silent drop**. docs/design.md's
      * `Robot.keyPress/keyRelease` row states the order — keysym table, then
      * evdev table, then printable-ASCII fallback, and "anything still unmapped
@@ -264,8 +309,8 @@ public class BootTests {
      * + awtVk + " " + state)` to sendKey() — the obvious way to "fix" those
      * dropped keys — keeps every other assertion in this suite green while
      * making VK_F13 emit `KS 61440 1`, i.e. handing Mutter a raw AWT vk as if
-     * it were a keysym. That is the same defect class as handing any
-     * unmapped vk straight through as a keysym, so it gets an alarm.
+     * it were a keysym. That is the same defect class as the VK_SEPARATOR ->
+     * 'l' bug this slice exists to fix, so it gets an alarm.
      *
      * VK_F13 is chosen deliberately and its three preconditions are asserted
      * rather than assumed: it is in neither table, and 0xF000 is far above

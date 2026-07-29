@@ -78,7 +78,7 @@ final class AwtEvdev {
         m(KeyEvent.VK_NUMPAD8, 72); m(KeyEvent.VK_NUMPAD9, 73);
         m(KeyEvent.VK_MULTIPLY, 55); m(KeyEvent.VK_ADD, 78);
         m(KeyEvent.VK_SUBTRACT, 74); m(KeyEvent.VK_DECIMAL, 83);
-        m(KeyEvent.VK_DIVIDE, 98);
+        m(KeyEvent.VK_DIVIDE, 98); m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA
     }
 
     /** AWT virtual keycode -> evdev keycode, or -1 if unmapped. */
