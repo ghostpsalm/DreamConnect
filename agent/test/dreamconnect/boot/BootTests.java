@@ -9,6 +9,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Dependency-free unit tests for the bootstrap classes (no JUnit — the agent
@@ -382,7 +383,7 @@ public class BootTests {
      * these out (instead of VK_UP/DOWN/LEFT/RIGHT) when Num Lock is off and the
      * operator uses the numpad's arrow overlay, so ScreenConnect can pass
      * either vk for what is, physically, the same key. The owner's decision
-     * (factory/CHECKPOINT.md, "Agreed seams" 2) is that these four are the same
+     * (factory/runs/20260731-131558-issue-36-notes.md, "Agreed seams" 2) is that these four are the same
      * physical/semantic key as their non-numpad counterparts, so they must
      * land on the *same* evdev code as VK_UP/DOWN/LEFT/RIGHT — not merely some
      * plausible arrow code.
@@ -486,7 +487,7 @@ public class BootTests {
      * class as the VK_SEPARATOR -> 'l' bug, so it gets an alarm.
      *
      * Exemplar choice, and why it is no longer VK_F13. #36's decision (recorded
-     * in factory/CHECKPOINT.md, "Agreed seams" 2) maps VK_F13-VK_F24, VK_HELP
+     * in factory/runs/20260731-131558-issue-36-notes.md, "Agreed seams" 2) maps VK_F13-VK_F24, VK_HELP
      * and the VK_KP_* arrows, and rules that the rest — every VK_DEAD_*, the
      * clipboard/edit commands, VK_UNDEFINED — stay dropped **by design**,
      * because no physical evdev key or X11 keysym means them. VK_F13 was this
@@ -527,7 +528,7 @@ public class BootTests {
 
     /**
      * #36 slice 1: **there is no printable-ASCII fallback route.** The owner's
-     * decision (factory/CHECKPOINT.md, "Agreed seams" 1) deletes
+     * decision (factory/runs/20260731-131558-issue-36-notes.md, "Agreed seams" 1) deletes
      * AwtEvdev.fallbackKeysym outright and makes sendKey's third branch an
      * explicit drop — so a vk in neither table puts NO line on the control
      * socket, whatever its numeric value happens to be.
@@ -574,7 +575,7 @@ public class BootTests {
      * Alarm on the premise the deletion rests on. #36's reflection over AWT's
      * VK_ constants found that, once VK_SEPARATOR was mapped, **no named AWT vk
      * reached the printable-ASCII fallback** — which is why removing it costs no
-     * real key (factory/CHECKPOINT.md, "Agreed seams" 1: "ScreenConnect appears
+     * real key (factory/runs/20260731-131558-issue-36-notes.md, "Agreed seams" 1: "ScreenConnect appears
      * to only ever pass named VK_* constants; the raw-int safety net has no
      * observed use case").
      *
@@ -616,27 +617,53 @@ public class BootTests {
      * becomes observable (that key would silently switch route) and nothing else
      * in this suite would notice. This is that alarm.
      *
-     * Range: every vk in -0x100 .. 0x20000. AWT's highest defined virtual key is
-     * VK_CUT = 0xFFD1, so 0x20000 is over twice the defined space; the negative
-     * tail covers the "nonsense vk" region ScreenConnect could hand us. Both
-     * tables are HashMaps keyed by boxed Integer, so a scan is the only way to
-     * enumerate them from outside without reflection.
+     * TOTAL check, not a bounded scan (#38). A previous version of this test
+     * scanned every vk in -0x100..0x20000, reasoning that AWT's highest named
+     * virtual key (VK_CUT = 0xFFD1) made that range more than complete enough.
+     * But Robot.keyPress(int)/keyRelease(int) accept any int unvalidated,
+     * including AWT's *extended* keycode space (java.awt.event.KeyEvent's
+     * getExtendedKeyCode javadoc), which starts at 0x01000000 — entirely
+     * outside that scan. A vk placed in both tables at or above 0x01000000
+     * could never have been caught by the old test. Reflecting directly over
+     * AwtEvdev's private KEY/KSYM maps and checking every key either one
+     * actually contains has no range to miss, because it isn't a range at all.
+     *
+     * Sanity precondition: reflection resolving the wrong field, or a bad cast,
+     * could silently hand back an empty map and make the intersection
+     * trivially (and meaninglessly) empty. KEY.size() and KSYM.size() are
+     * floored at 70 and 47 — at or just below the real current counts (72
+     * and 47, independently confirmed via this same reflection path before
+     * writing this assertion) — so that failure mode reports itself instead of
+     * passing vacuously.
      */
-    private static void testAwtEvdevTablesDisjoint() {
-        int overlaps = 0;
-        String first = "";
-        for (int vk = -0x100; vk <= 0x20000; vk++) {
-            int e = AwtEvdev.keycode(vk);
-            int s = AwtEvdev.keysym(vk);
-            if (e >= 0 && s >= 0) {
-                overlaps++;
-                if (first.isEmpty()) first = " first: vk 0x" + Integer.toHexString(vk)
-                                            + " -> evdev " + e + " AND keysym " + s;
+    private static void testAwtEvdevTablesDisjoint() throws Exception {
+        Field keyField = AwtEvdev.class.getDeclaredField("KEY");
+        keyField.setAccessible(true);
+        Field ksymField = AwtEvdev.class.getDeclaredField("KSYM");
+        ksymField.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        Map<Integer, Integer> KEY = (Map<Integer, Integer>) keyField.get(null);
+        @SuppressWarnings("unchecked")
+        Map<Integer, Integer> KSYM = (Map<Integer, Integer>) ksymField.get(null);
+
+        check(KEY.size() >= 70,
+              "sanity floor: AwtEvdev.KEY has >= 70 entries via reflection (got " + KEY.size()
+              + "); guards against a reflection bug silently handing back an empty/wrong map");
+        check(KSYM.size() >= 47,
+              "sanity floor: AwtEvdev.KSYM has >= 47 entries via reflection (got " + KSYM.size()
+              + "); guards against a reflection bug silently handing back an empty/wrong map");
+
+        List<String> overlaps = new ArrayList<>();
+        for (Integer vk : KEY.keySet()) {
+            if (KSYM.containsKey(vk)) {
+                overlaps.add("vk 0x" + Integer.toHexString(vk) + " -> evdev " + KEY.get(vk)
+                              + " AND keysym " + KSYM.get(vk));
             }
         }
-        check(overlaps == 0,
-              "AwtEvdev KEY and KSYM tables are disjoint over vk -0x100..0x20000 "
-              + "(got " + overlaps + " vk(s) in both;" + (first.isEmpty() ? " none" : first) + ")");
+        check(overlaps.isEmpty(),
+              "AwtEvdev KEY and KSYM tables are disjoint (total check, via reflection, over "
+              + "every vk either table actually contains — not a bounded scan) "
+              + "(got " + overlaps.size() + " vk(s) in both" + (overlaps.isEmpty() ? "" : ": " + overlaps) + ")");
     }
 
     private static void testFrameReader() throws Exception {
