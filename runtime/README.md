@@ -66,7 +66,8 @@ commands the agent's Robot path uses; the daemon also serves `WHO`, `WAKELOCK`,
 `BLANK` and `TYPE` (see `handle()` in `dreamconnect_daemon.py`).
 
 Coordinates and button/key codes are already in Wayland/evdev terms — the Java
-agent does the AWT→evdev translation (see `../keymap/`) before sending.
+agent does the AWT→evdev translation (see
+`../agent/boot/dreamconnect/boot/AwtEvdev.java`) before sending.
 
 ## Run
 

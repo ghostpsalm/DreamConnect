@@ -62,14 +62,14 @@ def main():
         nz = sum(1 for b in data[:100000] if b)
         print(f"first-100k nonzero bytes: {nz}")
 
-    # input: move to two points, left click, type 'a' via evdev keycode 30
+    # input: move to two points, left click, type 'a' via keysym 97 (layout-independent)
     # (fire-and-forget — no reply expected)
     print("M 200 200 ->", fire(s, "M 200 200"))
     print("M 960 540 ->", fire(s, "M 960 540"))
     print("B left press ->", fire(s, "B 272 1"))
     print("B left release ->", fire(s, "B 272 0"))
-    print("K a press ->", fire(s, "K 30 1"))
-    print("K a release ->", fire(s, "K 30 0"))
+    print("K a press ->", fire(s, "KS 97 1"))
+    print("K a release ->", fire(s, "KS 97 0"))
     # confirm the socket is still aligned: a control command still replies
     print("PING (post-input) ->", cmd(s, "PING"))
 
