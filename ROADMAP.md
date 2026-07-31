@@ -331,6 +331,13 @@ Two ways to survive an unattended reboot:
   idle-suspend are disabled for that account (a lock or a suspend kills the
   remote session — see F3 for the attended case), and autologin is always
   configured for it, so `DREAMCONNECT_AUTOLOGIN` isn't consulted in this mode.
+  The dconf profile that disables idle-lock is pushed directly into the
+  account's live `systemd --user` manager at install time (issue #26), not
+  just written to `environment.d` and left to a manager restart — that closes
+  the case where `loginctl enable-linger` already started the manager before
+  the drop-in existed. Reliable import of that same `environment.d` drop-in on
+  a genuine **cold boot** (a fresh manager start, not this install-time push)
+  remains **unverified on physical hardware**.
   `--uninstall` reverts the lot: deletes the account if this installer created
   it (behind seven safety rails), restores anything it had to overwrite on a
   pre-existing account, and undoes the idle-lock and autologin changes.

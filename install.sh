@@ -98,6 +98,23 @@ uninstall() {
     echo "!! skipping the daemon unit removal for $target_name: unusable home directory '$target_home' — continuing"
   fi
   "${target_run_user[@]}" systemctl --user daemon-reload 2>/dev/null || true
+  # Here, with the other calls into the account's live user manager, and not down
+  # in the HOST_ACCOUNT block below: the `loginctl disable-linger` further down is
+  # the only thing stopping user@<uid>.service on a reused account (CREATED_ACCOUNT=0,
+  # so uninstall_host_account's terminate-user never runs), and systemd takes
+  # /run/user/<uid> down with it — after that there is no manager left to unset
+  # DCONF_PROFILE in. Still the reverse of the install order: clear DCONF_PROFILE
+  # from the live manager first, then remove_no_idle_lock deletes the profile it
+  # names, so the manager never spends the uninstall pointing at an absent profile
+  # (dconf's null configuration).
+  #
+  # Never fatal, for the same reason as its neighbours below: a refusal here (a
+  # reserved name in a tampered state file, or a manager that is simply not
+  # running) must not stop the account deletion, which is the whole point.
+  if [ -n "$HOST_ACCOUNT" ]; then
+    unpush_dconf_environment "$HOST_ACCOUNT" "$target_uid" 2>/dev/null \
+      || echo "!! could not clear DCONF_PROFILE from $HOST_ACCOUNT's user manager — continuing"
+  fi
   if [ -n "$SC_UNIT" ]; then
     rm -f "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
     rmdir "/etc/systemd/system/$SC_UNIT.d" 2>/dev/null || true
@@ -124,6 +141,8 @@ uninstall() {
   if [ -n "$HOST_ACCOUNT" ]; then
     # Never fatal: a refusal here (a reserved name in a tampered state file)
     # must not stop the account deletion below, which is the whole point.
+    # DCONF_PROFILE was already cleared from the live manager above, so this
+    # deletes a profile nothing is pointing at any more.
     remove_no_idle_lock "$HOST_ACCOUNT" "$target_home" \
       || echo "!! could not fully revert idle-lock config for $HOST_ACCOUNT — continuing"
     # ensure_host_account backs up a pre-existing marker before overwriting it
@@ -352,6 +371,13 @@ fi
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   echo ">> disabling idle/lock for $USER_NAME (locking or idle-suspend kills the remote session — see ROADMAP.md H6)"
   configure_no_idle_lock "$USER_NAME" "$USER_HOME"
+  # The drop-in above only reaches `systemd --user` at manager start, and the
+  # manager has been running since enable-linger, so push DCONF_PROFILE into the
+  # live one too (issue #26). Non-fatal: this is the redundant half — the
+  # environment.d drop-in is on disk either way — so a manager that refuses
+  # set-environment must warn, not abort an otherwise-complete install.
+  push_dconf_environment "$USER_NAME" "$USER_UID" \
+    || echo "!! could not push DCONF_PROFILE into $USER_NAME's running user manager — the environment.d drop-in is still in place and applies at the next manager start, so reboot to pick up the idle/lock settings"
 fi
 
 # --- reboot survival: display-manager autologin -----------------------------

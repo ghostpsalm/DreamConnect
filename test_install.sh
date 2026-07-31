@@ -1372,6 +1372,425 @@ test_configure_no_idle_lock_survives_a_failing_chown() {
     "failing chown: it did not stop after the first failure"
 }
 
+# --- issue #26, slice 1: push_dconf_environment -------------------------------
+#
+# WHY THIS EXISTS. configure_no_idle_lock's environment.d drop-in above is only
+# ever read by `systemd --user` AT MANAGER START, and install.sh starts that
+# manager earlier and unconditionally (`loginctl enable-linger`, line 327) than
+# it writes the drop-in (configure_no_idle_lock, line 354). So the file is
+# correct on disk and the value never reaches the live manager — issue #26's
+# reported symptom, "DCONF_PROFILE was absent from both the gnome-shell process
+# env and `systemctl --user show-environment`". Not a race: that order holds on
+# every install.
+#
+# CONTRACT UNDER TEST (factory/CHECKPOINT.md, issue #26 seams + slice 1 row):
+#
+#   push_dconf_environment <name> <uid>
+#
+#   * runs `systemctl --user set-environment DCONF_PROFILE=<name>` against the
+#     already-running user manager,
+#   * as the target account, through the same sudo/env invocation form install.sh
+#     already builds for running something in another user's session
+#     (install.sh:239-240 —
+#        sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
+#             "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus"),
+#   * behind the same reserved/valid-name guard as configure_no_idle_lock.
+#
+# Every literal asserted below is read off that contract, not off any
+# implementation: there is none yet.
+#
+# HOW IT IS TESTED. The same PATH-shim technique slice 4 uses for useradd and
+# slice 5 uses for dconf/chown — the suite never runs as root and must never
+# reach the real systemd. `sudo` is shimmed to record its own argv and then run
+# the tail, so the real /usr/bin/env in the middle sets the two variables and
+# execs the SHIMMED systemctl, which records the argv it was actually handed and
+# the two variables that actually reached its environment. That distinction is
+# the point: seeing "DCONF_PROFILE=..." somewhere on sudo's command line does not
+# prove it arrives at systemctl as one argument, and seeing XDG_RUNTIME_DIR as a
+# word in sudo's argv does not prove it is in systemctl's environment.
+make_push_env_shims() {  # dir systemctl_rc -> echoes the call log path
+  local d="$1" rc="$2"
+  mkdir -p "$d"
+
+  # A deliberately thin sudo: record everything, remember who -u named, then run
+  # whatever command followed. Anything else it is handed is recorded and
+  # skipped, so a differently-flagged invocation still shows up in the log
+  # rather than silently doing nothing.
+  cat > "$d/sudo" <<EOF
+#!/usr/bin/env bash
+{ echo "== sudo"; printf '[%s]\n' "\$@"; } >> "$d/calls.log"
+sudo_user=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -u) sudo_user="\$2"; shift 2 ;;
+    -*) shift ;;
+     *) break ;;
+  esac
+done
+echo "sudo-user=\$sudo_user" >> "$d/calls.log"
+[ \$# -gt 0 ] || exit 0
+exec "\$@"
+EOF
+
+  # systemctl records its argv AND the two session variables as they reached its
+  # own environment — empty if they never did.
+  cat > "$d/systemctl" <<EOF
+#!/usr/bin/env bash
+{ echo "== systemctl"; printf '[%s]\n' "\$@"
+  echo "env-XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-}"
+  echo "env-DBUS_SESSION_BUS_ADDRESS=\${DBUS_SESSION_BUS_ADDRESS:-}"
+  echo "env-whoami=\$(id -un)"; } >> "$d/calls.log"
+exit $rc
+EOF
+
+  chmod +x "$d/sudo" "$d/systemctl"
+  : > "$d/calls.log"
+  echo "$d/calls.log"
+}
+
+PUSH_OUT=""
+PUSH_RC=0
+
+run_push_env() {  # shim_dir name uid
+  PUSH_OUT="$(DC_DRY_RUN= PATH="$1:$PATH" push_dconf_environment "$2" "$3" 2>&1)"
+  PUSH_RC=$?
+  return 0
+}
+
+# A missing function exits 127 having run nothing, which would make the guard
+# test's "systemctl was never invoked" assertion pass vacuously.
+require_push_dconf_environment() {  # label
+  declare -F push_dconf_environment >/dev/null && return 0
+  fail "$1: push_dconf_environment() is not defined"
+  return 1
+}
+
+# The whole point of the slice: the value has to reach the RUNNING manager, and
+# it reaches it as `systemctl --user set-environment DCONF_PROFILE=<name>` run in
+# the account's own session. Asserted at systemctl's own argv and environment, so
+# a rewrite that pushes the wrong variable name, the uid instead of the name, the
+# system manager instead of the user one, or loses the bus address on the way
+# fails here.
+#
+# TWO DIFFERENT (name, uid) PAIRS, deliberately (breaker lap 1, CHECKPOINT row 5).
+# With one literal pair this test could not tell `set-environment
+# "DCONF_PROFILE=$1"` from `set-environment DCONF_PROFILE=dreamconnect-host`, nor
+# /run/user/$2 from /run/user/1234 — both mutants matched the single fixture and
+# stayed green. The second pair shares no substring with the first, so every
+# assertion below is now a function of the arguments rather than of one fixture.
+# "dc_host2" is chosen to also exercise the underscore and the trailing digit
+# valid_account_name allows, and 4242 a uid with no digit in common with 1234.
+test_push_dconf_environment_invokes_set_environment_with_the_profile_name() {
+  local shims log calls name uid i pair
+  require_push_dconf_environment "set-environment invocation" || return 0
+
+  i=0
+  for pair in "dreamconnect-host 1234" "dc_host2 4242"; do
+    read -r name uid <<<"$pair"
+    shims="$TMP/shims-push-env-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+
+    run_push_env "$shims" "$name" "$uid"
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "push_dconf_environment ($name/$uid): it ran the shims, not something missing from PATH"
+    assert_eq "$PUSH_RC" "0" \
+      "push_dconf_environment ($name/$uid) exits 0 when set-environment succeeds"
+
+    calls="$(cat "$log" 2>/dev/null || true)"
+    assert_line "$calls" "== systemctl" "systemctl is invoked at all ($name/$uid)"
+    assert_line "$calls" "[--user]" \
+      "the target is the USER manager (--user), the one holding the session's environment ($name/$uid)"
+    assert_not_contains "$calls" "[--system]" \
+      "the system manager is never touched ($name/$uid)"
+    assert_line "$calls" "[set-environment]" \
+      "the verb is set-environment — pushing into the already-running manager ($name/$uid)"
+    assert_line "$calls" "[DCONF_PROFILE=$name]" \
+      "DCONF_PROFILE=<name> reaches systemctl as ONE argument, built from ARGUMENT 1 ($name), not a baked-in account name"
+
+    assert_line "$calls" "sudo-user=$name" \
+      "it runs as the display-host account named by argument 1 ($name), not as the caller"
+    assert_line "$calls" "env-XDG_RUNTIME_DIR=/run/user/$uid" \
+      "XDG_RUNTIME_DIR=/run/user/<uid> is in systemctl's environment, built from ARGUMENT 2 ($uid) — install.sh:239-240 form"
+    assert_line "$calls" "env-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+  done
+}
+
+# THE BLAST-RADIUS GUARD, same one configure_no_idle_lock carries and for the
+# same reason: "user" is dconf's own default profile and "local" its conventional
+# system db, and "root" is the account every rail here exists to protect. Pushing
+# DCONF_PROFILE=user into a live manager would point that session at dconf's
+# default profile. Refuse, and run nothing at all.
+test_push_dconf_environment_refuses_reserved_dconf_names() {
+  local shims log name
+  require_push_dconf_environment "reserved-name guard" || return 0
+
+  for name in root user local; do
+    shims="$TMP/shims-push-reserved-$name"; log="$(make_push_env_shims "$shims" 0)"
+    run_push_env "$shims" "$name" 1234
+    [ "$PUSH_RC" -ne 127 ] || { fail "reserved name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "reserved name '$name': the refusal came from the guard, not the shell"
+    [ "$PUSH_RC" -ne 0 ] || fail "reserved name '$name': expected non-zero exit, got $PUSH_RC"
+    [ -n "$PUSH_OUT" ] || fail "reserved name '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "reserved name '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# The OTHER HALF of that guard, which the reserved-name test above cannot see
+# (breaker lap 1, CHECKPOINT row 5: deleting push_dconf_environment's
+# `valid_account_name` call left the whole suite green). The reserved `case`
+# compares the STRING, so "./user" walks straight past it — and the name is
+# pasted both into the pushed VALUE and into the account `sudo -u` switches to,
+# which is the same asymmetry test_configure_no_idle_lock_refuses_malformed_
+# account_names closes on the write side. Same five names as that test, same
+# assertion style: refuse, non-zero, say why, invoke nothing at all.
+#
+# "1000" matters twice over here: `sudo -u 1000` resolves by UID, not by name, so
+# an unvalidated numeric name would push DCONF_PROFILE=1000 into whichever
+# account owns that uid — typically the human desktop user.
+test_push_dconf_environment_refuses_malformed_account_names() {
+  local shims log name i
+  require_push_dconf_environment "malformed-name guard" || return 0
+
+  i=0
+  for name in ./user .. . 1000 "dc host"; do
+    shims="$TMP/shims-push-malformed-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+    run_push_env "$shims" "$name" 1234
+    [ "$PUSH_RC" -ne 127 ] || { fail "malformed name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "malformed name '$name': the refusal came from the guard, not the shell"
+    [ "$PUSH_RC" -ne 0 ] || fail "malformed name '$name': expected non-zero exit, got $PUSH_RC"
+    [ -n "$PUSH_OUT" ] || fail "malformed name '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "malformed name '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# --- issue #26, breaker lap 1: the UNPUSH, unpush_dconf_environment ------------
+#
+# THE DEFECT (factory/CHECKPOINT.md row 4). push_dconf_environment above has no
+# undo. `install.sh --uninstall` deletes /etc/dconf/profile/<name> via
+# remove_no_idle_lock (install.sh:127) but never clears DCONF_PROFILE from the
+# account's live `systemd --user` manager — and for a REUSED account
+# (DREAMCONNECT_HOST_ACCOUNT naming a pre-existing human, CREATED_ACCOUNT=0) that
+# manager is never stopped either: install.sh gates `loginctl terminate-user` /
+# account deletion on CREATED_ACCOUNT=1 (install.sh:139-153), and disable-linger
+# alone does not kill a manager with a live session. So the manager keeps
+# DCONF_PROFILE=<name> pointing at a profile file that has just been deleted.
+#
+# WHERE THE EXPECTED BEHAVIOUR COMES FROM — two independent sources, neither of
+# them any implementation (there is none):
+#
+#   1. dconf's own behaviour, observed on this box (breaker, verbatim):
+#        $ DCONF_PROFILE=dreamconnect-host gsettings set org.gnome.desktop.session idle-delay 42
+#        dconf-WARNING: unable to open named profile (dreamconnect-host): using
+#        the null configuration.
+#        The key is not writable
+#      A DCONF_PROFILE naming an absent profile does not fall back to the default
+#      profile — it falls to the NULL configuration, and every gsettings read and
+#      write in that session fails until the manager is restarted. Uninstalling
+#      this tool must not leave a human's account in that state.
+#
+#   2. systemd's own interface for the inverse of set-environment, systemctl(1):
+#        "unset-environment VARIABLE... — Unset one or more systemd manager
+#         environment variables. If only a variable name is specified, it will be
+#         removed REGARDLESS OF ITS VALUE. If a variable and a value are
+#         specified, the variable is only removed if it has the specified value."
+#      The bare-name form is the one required here, and the distinction is
+#      load-bearing rather than stylistic: remove_no_idle_lock deletes
+#      /etc/dconf/profile/<name> unconditionally, so the clear has to be
+#      unconditional too. `unset-environment DCONF_PROFILE=<name>` would leave the
+#      variable in place whenever the live manager holds a DCONF_PROFILE this
+#      run's push did not write — a re-install under a different account name, or
+#      a value the account's own drop-in set — which is exactly the dangling
+#      state the null-configuration failure above comes from.
+#
+# CONTRACT UNDER TEST:
+#
+#   unpush_dconf_environment <name> <uid>
+#
+#   * runs `systemctl --user unset-environment DCONF_PROFILE` against the
+#     already-running user manager — the bare variable name, one argument;
+#   * as the target account, through the same sudo/env invocation form
+#     push_dconf_environment uses (install.sh:239-240);
+#   * behind the same reserved/valid-name guard as push_dconf_environment,
+#     refusing before anything at all is invoked.
+#
+# WHY A SEPARATE FUNCTION rather than a third `uid` parameter on
+# remove_no_idle_lock (both are wireable — install.sh's uninstall path has
+# $target_uid in scope at line 74): remove_no_idle_lock's contract says "THE
+# DRY-RUN BOUNDARY IS EXACTLY ONE COMMAND. Only `dconf update` goes through
+# run()" (this file, lines 987-994), and its ten existing tests drive it with two
+# arguments through make_dconf_shim, which shims `dconf` and NOT sudo/systemctl.
+# Folding a sudo call into it would send every one of those tests at the real
+# sudo with an empty uid — /run/user//bus — breaking the suite's one safety rail
+# ("never run as root ... must not be able to reach the real system", lines
+# 11-13). The pairing is also the one this diff already established:
+# configure_no_idle_lock/remove_no_idle_lock own the FILES,
+# push_dconf_environment/unpush_dconf_environment own the LIVE MANAGER.
+#
+# Shimmed with make_push_env_shims, exactly as the push tests are: the suite has
+# no root, no second account and no user manager to talk to.
+UNPUSH_OUT=""
+UNPUSH_RC=0
+
+run_unpush_env() {  # shim_dir name uid
+  UNPUSH_OUT="$(DC_DRY_RUN= PATH="$1:$PATH" unpush_dconf_environment "$2" "$3" 2>&1)"
+  UNPUSH_RC=$?
+  return 0
+}
+
+# A missing function exits 127 having run nothing, which would make the guard
+# test's "systemctl was never invoked" assertion pass vacuously.
+require_unpush_dconf_environment() {  # label
+  declare -F unpush_dconf_environment >/dev/null && return 0
+  fail "$1: unpush_dconf_environment() is not defined — --uninstall deletes /etc/dconf/profile/<name> and leaves DCONF_PROFILE=<name> set in the account's live user manager, which puts dconf into the null configuration for that account until it logs out"
+  return 1
+}
+
+# Two (name, uid) pairs for the same reason the push invocation test carries
+# them: one literal pair cannot distinguish "$1"/"$2" from a baked-in fixture.
+test_unpush_dconf_environment_unsets_the_profile_from_the_running_manager() {
+  local shims log calls name uid i pair
+  require_unpush_dconf_environment "unset-environment invocation" || return 0
+
+  i=0
+  for pair in "dreamconnect-host 1234" "dc_host2 4242"; do
+    read -r name uid <<<"$pair"
+    shims="$TMP/shims-unpush-env-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+
+    run_unpush_env "$shims" "$name" "$uid"
+    assert_not_contains "$UNPUSH_OUT" "command not found" \
+      "unpush_dconf_environment ($name/$uid): it ran the shims, not something missing from PATH"
+    assert_eq "$UNPUSH_RC" "0" \
+      "unpush_dconf_environment ($name/$uid) exits 0 when unset-environment succeeds"
+
+    calls="$(cat "$log" 2>/dev/null || true)"
+    assert_line "$calls" "== systemctl" "systemctl is invoked at all ($name/$uid)"
+    assert_line "$calls" "[--user]" \
+      "the target is the USER manager (--user), the one still holding DCONF_PROFILE ($name/$uid)"
+    assert_not_contains "$calls" "[--system]" \
+      "the system manager is never touched ($name/$uid)"
+    assert_line "$calls" "[unset-environment]" \
+      "the verb is unset-environment — the inverse of the push, against the same running manager ($name/$uid)"
+    assert_not_contains "$calls" "[set-environment]" \
+      "unpush must not re-push: set-environment is the verb this function undoes ($name/$uid)"
+    assert_line "$calls" "[DCONF_PROFILE]" \
+      "the BARE variable name reaches systemctl as one argument — systemctl(1): a name alone is removed regardless of its value ($name/$uid)"
+    assert_not_contains "$calls" "[DCONF_PROFILE=" \
+      "never the VALUE-QUALIFIED form: 'unset-environment DCONF_PROFILE=<name>' only removes the variable if the manager happens to hold exactly that value, and remove_no_idle_lock deletes the profile file unconditionally ($name/$uid)"
+
+    assert_line "$calls" "sudo-user=$name" \
+      "it runs against the account named by argument 1 ($name), not the caller's own manager"
+    assert_line "$calls" "env-XDG_RUNTIME_DIR=/run/user/$uid" \
+      "XDG_RUNTIME_DIR=/run/user/<uid> is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+    assert_line "$calls" "env-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+  done
+}
+
+# The same blast-radius guard push_dconf_environment carries, and sharper for the
+# same reason remove_no_idle_lock's is sharper than configure_no_idle_lock's: on
+# the removal side <name> comes off install.state, a FILE, so a tampered or
+# truncated record is what reaches this function. Both halves — the reserved
+# `case` and valid_account_name — and nothing invoked at all on a refusal.
+# `sudo -u root systemctl --user unset-environment ...` against root's manager,
+# or `sudo -u 1000 ...` against whoever owns uid 1000, is precisely the blast
+# radius every other rail in this file exists to prevent.
+test_unpush_dconf_environment_refuses_reserved_and_malformed_names() {
+  local shims log name i
+  require_unpush_dconf_environment "unpush name guard" || return 0
+
+  i=0
+  for name in root user local ./user .. . 1000 "dc host"; do
+    shims="$TMP/shims-unpush-guard-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+    run_unpush_env "$shims" "$name" 1234
+    [ "$UNPUSH_RC" -ne 127 ] || { fail "unpush guard '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$UNPUSH_OUT" "command not found" \
+      "unpush guard '$name': the refusal came from the guard, not the shell"
+    [ "$UNPUSH_RC" -ne 0 ] || fail "unpush guard '$name': expected non-zero exit, got $UNPUSH_RC"
+    [ -n "$UNPUSH_OUT" ] || fail "unpush guard '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "unpush guard '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# --- reviewer finding 2 (non-blocking): the dry-run boundary for the live pair --
+#
+# THE CONTRACT, quoted, not invented. DC_DRY_RUN=1 means "nothing on this machine
+# changed" — this file states it for the write side already: "DC_DRY_RUN=1 must
+# mean 'nothing on this machine changed', and a bare `> "$dir/$name"` redirect
+# would silently punch through the dry run" (contract D, lines 650-656). run() is
+# the single mechanism that makes it mean that ("Run a command, or announce it
+# when DC_DRY_RUN=1. Lets the destructive steps be exercised by the tests without
+# touching the real system." — install-lib.sh:11-15), and every other
+# state-mutating call in the library goes through it: `run useradd`, `run userdel`,
+# `run loginctl`, `run install -D`, `run dconf update`.
+#
+# push_dconf_environment/unpush_dconf_environment are the two that do not
+# (reviewer aff9b0d603bacaf5f, CHECKPOINT row 7), which is why this test exists.
+#
+# THE WHOLE INVOCATION IS THE BOUNDARY HERE, unlike its sibling
+# test_configure_no_idle_lock_gates_only_dconf_update_behind_run (lines 1292-1318)
+# where only `dconf update` is gated: that function's four writes land in
+# fixture-overridable paths (DC_DCONF_DIR, <home>) that are always safe in a test,
+# and this pair has no fixture equivalent — `sudo -u <name> ... systemctl --user
+# set-environment` reaches a real account's real running manager, exactly like
+# slice 4's useradd/userdel, where every invocation is gated.
+#
+# WHAT IS ASSERTED, and where each expected value comes from:
+#   * exit 0 — run()'s own dry-mode shape, `echo "DRY: $*"` as its last statement,
+#     pinned by test_run_suppresses_execution_when_dry (lines 88-96). A dry run is
+#     not a failure, and install.sh's push call site warns on non-zero.
+#   * an EMPTY shim call log — the only place "the binary did not run" is
+#     observable, and the same assertion the guard tests above use.
+#   * the announcement names the command and what it would have done — contract D
+#     again: "The emitted command must name the destination path, so a dry run is
+#     auditable" (line 655). The model test asserts "DRY: dconf update", not a
+#     bare "DRY:", for the same reason. The verbs and the DCONF_PROFILE forms are
+#     read off the slice 1 / slice 4 contracts above (lines 1386-1397, 1611-1620),
+#     not off any implementation.
+#
+# One (name, uid) pair only, deliberately: argument derivation is already pinned
+# by the two-pair non-dry tests above, and re-pinning it here would duplicate that
+# coverage rather than add any.
+test_push_and_unpush_dconf_environment_gate_the_invocation_behind_run() {
+  local shims log out rc
+  require_push_dconf_environment "push dry-run boundary" || return 0
+  require_unpush_dconf_environment "unpush dry-run boundary" || return 0
+
+  shims="$TMP/shims-push-dry"; log="$(make_push_env_shims "$shims" 0)"
+  out="$(DC_DRY_RUN=1 PATH="$shims:$PATH" \
+         push_dconf_environment dreamconnect-host 1234 2>&1)"; rc=$?
+  assert_not_contains "$out" "command not found" \
+    "dry push: the shims are on PATH, so an empty call log means gated — not missing"
+  assert_eq "$rc" "0" "dry push: exits 0, as run() does when it announces (out: $out)"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "DC_DRY_RUN=1: push_dconf_environment executes neither sudo nor systemctl"
+  assert_contains "$out" "DRY: sudo" \
+    "dry push: the WHOLE invocation is announced, from sudo onwards"
+  assert_contains "$out" "set-environment DCONF_PROFILE=dreamconnect-host" \
+    "dry push: the announcement names what would have been pushed (auditable)"
+
+  shims="$TMP/shims-unpush-dry"; log="$(make_push_env_shims "$shims" 0)"
+  out="$(DC_DRY_RUN=1 PATH="$shims:$PATH" \
+         unpush_dconf_environment dreamconnect-host 1234 2>&1)"; rc=$?
+  assert_not_contains "$out" "command not found" \
+    "dry unpush: the shims are on PATH, so an empty call log means gated — not missing"
+  assert_eq "$rc" "0" "dry unpush: exits 0, as run() does when it announces (out: $out)"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "DC_DRY_RUN=1: unpush_dconf_environment executes neither sudo nor systemctl"
+  assert_contains "$out" "DRY: sudo" \
+    "dry unpush: the WHOLE invocation is announced, from sudo onwards"
+  assert_contains "$out" "unset-environment DCONF_PROFILE" \
+    "dry unpush: the announcement names the variable that would have been cleared (auditable)"
+}
+
 # --- breaker pass 2, defect #1: the two HOME files are clobbered without backup -
 #
 # WHY THESE TESTS EXIST. DREAMCONNECT_HOST_ACCOUNT may name an account that
@@ -5129,6 +5548,296 @@ test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up() {
     "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
 }
 
+# --- issue #26, slice 2: the push_dconf_environment CALL SITE -----------------
+#
+# Slice 1's two tests (lines 1375-1523) can be green with the function orphaned,
+# and today they are: install.sh never mentions push_dconf_environment, so every
+# install still leaves DCONF_PROFILE out of the live user manager — the whole of
+# issue #26 ("DCONF_PROFILE was absent from both the gnome-shell process env and
+# `systemctl --user show-environment`"). install.sh cannot be executed here (it
+# demands root, a real GDM and a real systemd, and does top-level work on
+# sourcing), so the wiring is asserted by line ordering, the same technique the
+# wait_for_user_bus call-order tests (e)/(e2) above use.
+#
+# WHERE THE ORDER COMES FROM — factory/CHECKPOINT.md, issue #26 seams, verbatim:
+#   "install.sh call site: push_dconf_environment "$USER_NAME" "$USER_UID"
+#    immediately after configure_no_idle_lock, before enable_autologin."
+# Both bounds are load-bearing, not layout preference:
+#   * AFTER configure_no_idle_lock — that is what writes the profile the pushed
+#     value names (issue #26: "/etc/dconf/db/<name>.d/00-display-host (+ compiled
+#     db) and ~/.config/environment.d/dconf-profile.conf"). Pushing first points
+#     the live session at a profile that does not exist yet.
+#   * BEFORE enable_autologin — the plan's ordering for the host-account branch;
+#     enable_autologin is the last step of session setup for that account.
+# The argument check is from the same line of the plan: the second argument is
+# the UID, and $USER_HOME is one slip away in a block that reads
+# `configure_no_idle_lock "$USER_NAME" "$USER_HOME"` two lines up. Handing the
+# home path over would build XDG_RUNTIME_DIR=/run/user//home/<name>, which no
+# other test in this suite can see.
+test_install_sh_pushes_dconf_environment_after_configure_no_idle_lock_and_before_autologin() {
+  local sh idle pushed auto stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  idle="$(first_code_line "$sh" 'configure_no_idle_lock')"
+  [ -n "$idle" ] || { fail "call site: no 'configure_no_idle_lock' line in install.sh"; return 0; }
+  auto="$(first_code_line "$sh" 'enable_autologin' "$idle")"
+  [ -n "$auto" ] || { fail "call site: no 'enable_autologin' line after configure_no_idle_lock"; return 0; }
+
+  # Searched from the top of the file, not from $idle, so that a call placed too
+  # EARLY is reported as too early rather than as missing. Anchored on a
+  # non-identifier character so it cannot match the uninstall path's
+  # `unpush_dconf_environment`, which appears EARLIER in the file (install.sh:127
+  # region) and would otherwise be reported here as a push placed before
+  # configure_no_idle_lock.
+  pushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])push_dconf_environment')"
+  [ -n "$pushed" ] || {
+    fail "call site: install.sh never calls push_dconf_environment (configure_no_idle_lock at line $idle, enable_autologin at line $auto) — the helper is orphaned and issue #26 is not fixed: DCONF_PROFILE reaches the drop-in on disk and never the running user manager"
+    return 0; }
+
+  [ "$idle" -lt "$pushed" ] || \
+    fail "call site: push_dconf_environment (line $pushed) must come AFTER configure_no_idle_lock (line $idle) — before it, the dconf profile it names has not been written or compiled yet"
+  [ "$pushed" -lt "$auto" ] || \
+    fail "call site: push_dconf_environment (line $pushed) must come BEFORE enable_autologin (line $auto)"
+
+  stmt="$(logical_statement_at "$sh" "$pushed")"
+  [ -n "$stmt" ] || { fail "call site: could not read the statement at install.sh:$pushed"; return 0; }
+  [[ "$stmt" == *USER_NAME* && "$stmt" == *USER_UID* ]] || \
+    fail "call site: install.sh:$pushed must call push_dconf_environment with the account name and its UID — the UID is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the running manager. Statement was: [$stmt]"
+}
+
+# --- issue #26, slice 3: that call's FAILURE HANDLING -------------------------
+#
+# The ordering test above is green against the bare
+# `push_dconf_environment "$USER_NAME" "$USER_UID"` install.sh carries today, and
+# so is every other test here — but install.sh runs under `set -euo pipefail`
+# (line 34), so ANY non-zero exit from that call aborts the whole install at the
+# last host-account step, after /opt, the user unit and the SC drop-in are all
+# already in place. push_dconf_environment can exit non-zero for reasons that are
+# not install-fatal at all: a reserved or invalid account name (install-lib.sh
+# returns 1 before invoking anything) or a live user manager that refuses
+# set-environment.
+#
+# WHERE THE REQUIRED FORM COMES FROM — factory/CHECKPOINT.md, issue #26, slice 3
+# row, verbatim: "failure handling: a failed set-environment warns (non-fatal),
+# never silently swallowed (no `|| true`)"; the plan spells that same form as
+# `|| echo "!! ..."`, never `|| true` / `|| :`. Both halves are load-bearing:
+#   * NON-FATAL — this push is a belt on top of the braces. The
+#     ~/.config/environment.d/dconf-profile.conf that configure_no_idle_lock
+#     wrote one line above is still on disk and still takes effect at the next
+#     full manager start (a reboot — which host-account mode does anyway, being
+#     autologin by construction). Losing an otherwise-complete install over the
+#     redundant half is strictly the worse outcome.
+#   * NEVER SWALLOWED — with `|| true` the push is gone AND silent, so the
+#     session runs with DCONF_PROFILE unset until the next reboot and nothing in
+#     the install log ever said so. That invisible state is precisely what issue
+#     #26 was filed about; a warning is what makes it diagnosable.
+# The `!!` marker is install.sh's own convention for a warning the operator has
+# to read (lines 345, 390 and 402 today), not this test's preference — the
+# message wording is deliberately NOT asserted and may be rewritten freely. No
+# `>&2` is required either: install.sh's top-level warnings, including the
+# enable_autologin non-fatal path at line 390, all go to stdout.
+test_install_sh_warns_but_does_not_swallow_a_failed_dconf_environment_push() {
+  local sh pushed stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  # Same non-identifier anchor as the ordering test above: `unpush_dconf_
+  # environment` in the uninstall path must not be mistaken for this call.
+  pushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])push_dconf_environment')"
+  [ -n "$pushed" ] || {
+    fail "failure handling: install.sh never calls push_dconf_environment at all"
+    return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$pushed")"
+  [ -n "$stmt" ] || { fail "failure handling: could not read the statement at install.sh:$pushed"; return 0; }
+
+  # (1) Handled at all, and visibly: `|| echo <something>`.
+  [[ "$stmt" =~ \|\|[[:space:]]*echo[[:space:]]+[^[:space:]] ]] || \
+    fail "failure handling: install.sh:$pushed must handle a push_dconf_environment failure with '|| echo <warning>' — unhandled, set -euo pipefail (install.sh:34) aborts the entire install over a push that is redundant to the environment.d drop-in written one line above. Statement was: [$stmt]"
+
+  # (2) Recognisable as a warning, by install.sh's own marker.
+  assert_contains "$stmt" '!!' \
+    "failure handling: install.sh:$pushed must mark the warning with install.sh's '!!' operator-warning prefix (lines 345/390/402). Statement was: [$stmt]"
+
+  # (3) Never silently swallowed.
+  assert_not_contains "$stmt" "|| true" \
+    "failure handling: install.sh:$pushed swallows a failed DCONF_PROFILE push — the live session keeps an unset DCONF_PROFILE and the log never says so"
+  assert_not_contains "$stmt" "|| :" \
+    "failure handling: install.sh:$pushed swallows a failed DCONF_PROFILE push — the live session keeps an unset DCONF_PROFILE and the log never says so"
+
+  # (4) ...and never fatal: aborting here is the outcome the non-fatal
+  # requirement exists to prevent, whether spelled `|| die` or `|| { ...; exit; }`.
+  [[ "$stmt" =~ (^|[^[:alnum:]_])(die|exit)([^[:alnum:]_]|$) ]] && \
+    fail "failure handling: install.sh:$pushed must NOT abort the install when the push fails — the environment.d drop-in still applies at the next manager start, so a warning is the correct response. Statement was: [$stmt]"
+
+  return 0
+}
+
+# --- issue #26, breaker lap 1: the unpush_dconf_environment CALL SITE ----------
+#
+# The two unpush tests at lines 1541+ can be green with the function orphaned,
+# and today they would be: install.sh's uninstall path never mentions it, so
+# every uninstall still leaves the account's live manager holding
+# DCONF_PROFILE=<name> after remove_no_idle_lock has deleted the profile file
+# that name points at. install.sh cannot be executed here (root, real GDM, real
+# systemd, top-level work on sourcing), so the wiring is asserted by line
+# ordering and statement text, the technique the push call-site tests above and
+# the wait_for_user_bus tests before them already use.
+#
+# THE THREE BOUNDS, each load-bearing:
+#
+#   * INSIDE uninstall() — the call must sit between `uninstall()` and the
+#     `remove_no_idle_lock` call, which is itself inside that function's
+#     `if [ -n "$HOST_ACCOUNT" ]` block (install.sh:124-128). Anywhere else and
+#     the uninstall path does not run it.
+#   * BEFORE remove_no_idle_lock — the reverse of the install order (write the
+#     profile, then push; unset, then delete the profile). The other way round
+#     the live manager spends the rest of the uninstall — the AccountsService
+#     revert, userdel, the state file — naming a profile that is already gone,
+#     which is the dconf null configuration this fix exists to prevent, not a
+#     layout preference.
+#   * WITH THE UID — $target_uid (install.sh:74, `target_uid="$HOST_UID"`, read
+#     off install.state) is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the
+#     running manager. $target_home is one slip away in a block whose previous
+#     line reads `remove_no_idle_lock "$HOST_ACCOUNT" "$target_home"`, and
+#     handing the home path over would build /run/user//home/<name>, which no
+#     other test in this suite can see.
+#
+# AND NON-FATAL, for the reason install.sh already gives at its neighbour
+# (install.sh:125-128, verbatim): "Never fatal: a refusal here (a reserved name
+# in a tampered state file) must not stop the account deletion below, which is
+# the whole point." install.sh runs under `set -euo pipefail` (line 34), and
+# unpush_dconf_environment returns non-zero for a guard refusal or a manager that
+# is simply not running any more — neither of which may abort an uninstall
+# before userdel and the state file. Wording is deliberately not asserted; `||
+# true` and `|| :` are refused because a silently swallowed failure leaves the
+# operator with no record that the account's dconf is still pointing at nothing.
+test_install_sh_unpushes_dconf_environment_on_uninstall() {
+  local sh ustart removed unpushed stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall call site: no 'uninstall()' definition in install.sh"; return 0; }
+  removed="$(first_code_line "$sh" '(^|[^[:alnum:]_])remove_no_idle_lock' "$ustart")"
+  [ -n "$removed" ] || { fail "uninstall call site: no 'remove_no_idle_lock' call inside uninstall()"; return 0; }
+
+  unpushed="$(first_code_line "$sh" 'unpush_dconf_environment')"
+  [ -n "$unpushed" ] || {
+    fail "uninstall call site: install.sh never calls unpush_dconf_environment (uninstall() at line $ustart, remove_no_idle_lock at line $removed) — the helper is orphaned and the defect stands: --uninstall deletes /etc/dconf/profile/<name> and leaves DCONF_PROFILE=<name> set in the account's live user manager, so dconf falls to the null configuration and that account can neither read nor write any gsettings key until it logs out"
+    return 0; }
+
+  [ "$ustart" -lt "$unpushed" ] || \
+    fail "uninstall call site: unpush_dconf_environment (line $unpushed) is above uninstall() (line $ustart) — it must be called from the uninstall path, not the install path"
+  [ "$unpushed" -lt "$removed" ] || \
+    fail "uninstall call site: unpush_dconf_environment (line $unpushed) must come BEFORE remove_no_idle_lock (line $removed) — deleting /etc/dconf/profile/<name> first leaves the live manager pointing at an absent profile for the rest of the uninstall, which is the null-configuration state this call exists to prevent"
+
+  stmt="$(logical_statement_at "$sh" "$unpushed")"
+  [ -n "$stmt" ] || { fail "uninstall call site: could not read the statement at install.sh:$unpushed"; return 0; }
+
+  [[ "$stmt" == *HOST_ACCOUNT* || "$stmt" == *target_name* ]] || \
+    fail "uninstall call site: install.sh:$unpushed must pass the recorded account name (\$HOST_ACCOUNT/\$target_name). Statement was: [$stmt]"
+  [[ "$stmt" == *HOST_UID* || "$stmt" == *target_uid* ]] || \
+    fail "uninstall call site: install.sh:$unpushed must pass that account's UID (\$target_uid, install.sh:74) — the UID is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the running manager, and \$target_home one line up would build /run/user//home/<name>. Statement was: [$stmt]"
+
+  [[ "$stmt" =~ \|\|[[:space:]]*echo[[:space:]]+[^[:space:]] ]] || \
+    fail "uninstall call site: install.sh:$unpushed must handle an unpush_dconf_environment failure with '|| echo <warning>' — unhandled, set -euo pipefail (install.sh:34) aborts the uninstall before the AccountsService revert, userdel and the state file, exactly what install.sh:125-128 already says must not happen. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" \
+    "uninstall call site: install.sh:$unpushed swallows a failed unpush — the account's manager keeps a dangling DCONF_PROFILE and the log never says so"
+  assert_not_contains "$stmt" "|| :" \
+    "uninstall call site: install.sh:$unpushed swallows a failed unpush — the account's manager keeps a dangling DCONF_PROFILE and the log never says so"
+  [[ "$stmt" =~ (^|[^[:alnum:]_])(die|exit)([^[:alnum:]_]|$) ]] && \
+    fail "uninstall call site: install.sh:$unpushed must NOT abort the uninstall when the unpush fails — the account deletion and state-file cleanup below are the whole point of --uninstall. Statement was: [$stmt]"
+
+  return 0
+}
+
+# --- issue #26, breaker lap 2: the unpush must beat disable-linger ------------
+#
+# The test above pins the unpush to BEFORE remove_no_idle_lock, and that bound
+# holds either way — so it stays green while the call sits (install.sh:132) AFTER
+# `loginctl disable-linger` (install.sh:122), which is the defect. From
+# factory/CHECKPOINT.md row 6, verbatim:
+#
+#   "`unpush_dconf_environment` call (install.sh:132) sits AFTER `loginctl
+#    disable-linger` (install.sh:122) — in the exact reused-account/same-boot/
+#    no-graphical-session case the fix targets, disable-linger is the only thing
+#    keeping user@uid.service up and is NOT gated on CREATED_ACCOUNT, so the
+#    manager (and /run/user/<uid>) is already gone by line 132: the unpush either
+#    fails with a false-alarm warning on a normal uninstall, or races a dying
+#    manager. Move the unpush call to before disable-linger (near the other
+#    user-manager calls at lines 87-100)."
+#
+# Why that is a mechanism and not a preference: with CREATED_ACCOUNT=0 the
+# account-deleting branch (install.sh:146) never runs, so
+# uninstall_host_account's own `loginctl terminate-user` (install-lib.sh:934) is
+# never reached — uninstall()'s unconditional disable-linger is the one and only
+# thing that stops user@<uid>.service, and systemd tears /run/user/<uid> down
+# with it. unpush_dconf_environment talks to that manager over
+# XDG_RUNTIME_DIR=/run/user/<uid> (install-lib.sh:811), so after the linger drop
+# there is nothing left to unset.
+#
+# WHICH disable-linger: the one in install.sh's own uninstall(), found from the
+# `uninstall()` definition and required to be above that function's closing
+# brace. install-lib.sh:930 has its own `run loginctl disable-linger` inside
+# uninstall_host_account — a different file, never scanned here, and gated behind
+# CREATED_ACCOUNT=1 anyway, so it is deliberately NOT the anchor.
+#
+# The lower bound (after $target_uid is assigned) is here because the fix moves
+# this call EARLIER: past install.sh:74/81 it would expand to
+# XDG_RUNTIME_DIR=/run/user/ against an empty account name. Only enforced when
+# the statement actually names those locals, so a rewrite onto $HOST_ACCOUNT/
+# $HOST_UID is not falsely failed.
+test_install_sh_unpushes_dconf_environment_before_disabling_linger() {
+  local sh ustart uend linger unpushed stmt uidset
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "linger ordering: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "linger ordering: could not find the end of uninstall() in install.sh"; return 0; }
+
+  linger="$(first_code_line "$sh" 'loginctl disable-linger' "$ustart")"
+  [ -n "$linger" ] || { fail "linger ordering: no 'loginctl disable-linger' call after uninstall() (line $ustart) in install.sh"; return 0; }
+  [ "$linger" -lt "$uend" ] || {
+    fail "linger ordering: the 'loginctl disable-linger' found at line $linger is outside uninstall() (which ends at line $uend) — this test anchors on the one uninstall() runs itself, not install-lib.sh's"
+    return 0; }
+
+  # From the top of the file, so a call placed too early reads as too early
+  # rather than as missing.
+  unpushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])unpush_dconf_environment')"
+  [ -n "$unpushed" ] || {
+    fail "linger ordering: install.sh never calls unpush_dconf_environment (uninstall() at line $ustart, disable-linger at line $linger)"
+    return 0; }
+
+  [ "$ustart" -lt "$unpushed" ] || {
+    fail "linger ordering: unpush_dconf_environment (line $unpushed) is above uninstall() (line $ustart) — it must be called from the uninstall path"
+    return 0; }
+
+  [ "$unpushed" -lt "$linger" ] || \
+    fail "linger ordering: unpush_dconf_environment (line $unpushed) must come BEFORE 'loginctl disable-linger' (line $linger), and today it comes after. On a reused account (CREATED_ACCOUNT=0, uninstalled in the same boot with no session ever started) that disable-linger is the only thing stopping user@<uid>.service — uninstall_host_account's terminate-user never runs — so by line $unpushed the manager and /run/user/<uid> are gone and the unpush can only warn about a normal uninstall or race a dying manager"
+
+  stmt="$(logical_statement_at "$sh" "$unpushed")"
+  [ -n "$stmt" ] || { fail "linger ordering: could not read the statement at install.sh:$unpushed"; return 0; }
+
+  # The last `target_uid=` assignment inside uninstall() above the linger drop
+  # (install.sh:74 and :81 today — the two branches of the HOST_ACCOUNT test).
+  uidset="$(awk -v start="$ustart" -v end="$linger" \
+    'NR > start && NR < end && /target_uid=/ && $0 !~ /^[[:space:]]*#/ { n = NR } END { if (n) print n }' "$sh")"
+  if [ -n "$uidset" ] && { [[ "$stmt" == *target_uid* ]] || [[ "$stmt" == *target_name* ]]; }; then
+    [ "$uidset" -lt "$unpushed" ] || \
+      fail "linger ordering: unpush_dconf_environment (line $unpushed) uses \$target_uid/\$target_name but is above the last assignment of \$target_uid (line $uidset) — moving the call up past install.sh:74/81 makes it run as XDG_RUNTIME_DIR=/run/user/ for an empty account name. Statement was: [$stmt]"
+  fi
+
+  return 0
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
   test_sourcing_is_side_effect_free \
@@ -5172,6 +5881,12 @@ for CURRENT in \
   test_configure_no_idle_lock_points_the_session_at_the_profile \
   test_configure_no_idle_lock_skips_gnome_initial_setup \
   test_configure_no_idle_lock_refuses_reserved_dconf_names \
+  test_push_dconf_environment_invokes_set_environment_with_the_profile_name \
+  test_push_dconf_environment_refuses_reserved_dconf_names \
+  test_push_dconf_environment_refuses_malformed_account_names \
+  test_unpush_dconf_environment_unsets_the_profile_from_the_running_manager \
+  test_unpush_dconf_environment_refuses_reserved_and_malformed_names \
+  test_push_and_unpush_dconf_environment_gate_the_invocation_behind_run \
   test_configure_no_idle_lock_is_byte_identical_on_a_second_run \
   test_remove_no_idle_lock_reverts_everything_configure_wrote \
   test_remove_no_idle_lock_is_a_no_op_when_nothing_was_configured \
@@ -5268,7 +5983,11 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
-  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up
+  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
+  test_install_sh_pushes_dconf_environment_after_configure_no_idle_lock_and_before_autologin \
+  test_install_sh_warns_but_does_not_swallow_a_failed_dconf_environment_push \
+  test_install_sh_unpushes_dconf_environment_on_uninstall \
+  test_install_sh_unpushes_dconf_environment_before_disabling_linger
 do
   before=$FAILURES
   "$CURRENT"

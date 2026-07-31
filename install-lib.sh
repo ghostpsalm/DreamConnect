@@ -748,6 +748,71 @@ EOF
   run dconf update
 }
 
+# The drop-in configure_no_idle_lock writes into <home>/.config/environment.d is
+# only ever read by `systemd --user` AT MANAGER START, and install.sh starts that
+# manager (`loginctl enable-linger`) before it writes the file — so on a fresh
+# install the value is correct on disk and absent from the live session, which is
+# issue #26. Push it into the already-running manager as well, from the account's
+# own session, using the same sudo/env form install.sh builds RUN_USER from.
+push_dconf_environment() {  # name uid
+  local name="$1" uid="$2"
+
+  # The same blast radius as configure_no_idle_lock, for the same reason and
+  # before anything is invoked at all: DCONF_PROFILE=user points a live session
+  # at dconf's own default profile, "local" at its conventional system db, and
+  # "root" is the account every rail here exists to protect.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to push DCONF_PROFILE='$name': reserved name" >&2
+      return 1 ;;
+  esac
+
+  # And the other half of that guard: the name is pasted both into the variable
+  # value and into the account sudo switches to, so "./user" reaches exactly what
+  # the case above protects.
+  valid_account_name "$name" || {
+    echo "error: refusing to push DCONF_PROFILE='$name': not a valid account name" >&2
+    return 1; }
+
+  run sudo -u "$name" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      systemctl --user set-environment "DCONF_PROFILE=$name"
+}
+
+# The inverse of the push, and the half --uninstall was missing: remove_no_idle_lock
+# deletes /etc/dconf/profile/<name>, and for a reused pre-existing account the
+# manager holding DCONF_PROFILE=<name> is never stopped (install.sh gates that on
+# CREATED_ACCOUNT=1) — so it is left naming a profile that no longer exists, which
+# drops dconf to its null configuration and costs that account every gsettings read
+# and write until it logs out. Cleared from the live manager the same way it was
+# pushed, from the account's own session.
+unpush_dconf_environment() {  # name uid
+  local name="$1" uid="$2"
+
+  # Same guard as the push, and before anything is invoked: on this side the name
+  # comes off install.state, a file, so a tampered record is what arrives here —
+  # `sudo -u root systemctl --user ...` against root's own manager is exactly the
+  # blast radius the reserved case exists to stop.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to unset DCONF_PROFILE for '$name': reserved name" >&2
+      return 1 ;;
+  esac
+
+  valid_account_name "$name" || {
+    echo "error: refusing to unset DCONF_PROFILE for '$name': not a valid account name" >&2
+    return 1; }
+
+  # The BARE variable name, per systemctl(1): "If only a variable name is
+  # specified, it will be removed regardless of its value." The value-qualified
+  # form would leave the variable behind whenever the manager holds a
+  # DCONF_PROFILE this run did not push, while the profile file is deleted
+  # unconditionally either way.
+  run sudo -u "$name" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      systemctl --user unset-environment DCONF_PROFILE
+}
+
 # Undo: everything configure_no_idle_lock wrote, and nothing else. --uninstall
 # also runs on boxes where the opt-in was never used, so every removal tolerates
 # an absent file. The environment.d directory itself is never deleted — it may
