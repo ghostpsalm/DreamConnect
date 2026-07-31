@@ -130,9 +130,15 @@ uninstall() {
   # would abort the rest of the cleanup below over a display manager we never
   # touched. The empty case is already handled on the next line.
   local conf; conf="$(gdm_conf || true)"
+  # Branched, and never fatal for the same reason as its neighbours: a failed
+  # strip must not stop the account deletion below. On success the backup is
+  # gone with it, so only the failure branch can point at one.
   if [ -n "$conf" ] && [ -f "$conf.dreamconnect.bak" ]; then
-    disable_autologin "$conf"
-    echo ">> disabled the autologin we configured in $conf (backup: $conf.dreamconnect.bak)"
+    if disable_autologin "$conf"; then
+      echo ">> disabled the autologin we configured in $conf"
+    else
+      echo "!! could not disable the autologin we configured in $conf — it may still log in automatically; the pre-install config is at $conf.dreamconnect.bak"
+    fi
   fi
   # Undo the linger install always enables — previously never reverted here,
   # a pre-existing gap (see ROADMAP.md H6).

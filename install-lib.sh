@@ -99,15 +99,73 @@ enable_autologin() {
   rm -f "$tmp"
 }
 
-# Undo: drop the autologin keys we set under [daemon]. Leaves the rest intact.
+# Undo: put back whatever autologin the backup's [daemon] section held, in place
+# of the keys we set there. Leaves the rest intact — a surgical strip and
+# reinsert rather than a wholesale restore from our backup, because custom.conf
+# is shared with the admin and unrelated edits made since install must survive
+# the revert.
+#
+# Reinsert, not simply strip, because enable_autologin's own strip drops ANY
+# AutomaticLogin* key in [daemon] before writing ours: on a box where the admin
+# had already configured autologin for one of their accounts, stripping ours out
+# to nothing loses theirs, and the backup we delete below is the last copy of it.
+#
+# Returns the status of the strip itself (the awk pass and its write-back), not
+# of the scratch-file cleanup, so a caller can tell a reverted config from an
+# untouched one. On success the backup enable_autologin took has no further use
+# and is removed, so nothing of ours is left beside custom.conf; on failure the
+# keys are still live and that backup is the operator's only copy of the
+# pre-install config, so it stays (issue #22).
 disable_autologin() {
-  local conf="$1" tmp
+  local conf="$1" bak="$1.dreamconnect.bak" tmp rc=0 bak_exists=0
+  [ -e "$bak" ] && bak_exists=1
   tmp="$(mktemp)"
-  awk '
-    /^\[.*\]$/ { in_daemon = ($0 == "[daemon]"); print; next }
-    { if (in_daemon && $0 ~ /^[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
-  ' "$conf" > "$tmp" && cat "$tmp" > "$conf"
+  # awk opens the backup itself rather than taking its lines through -v, which
+  # would run C escape expansion over content we do not control. The lines it
+  # collects are the same set enable_autologin's strip ate — live or commented —
+  # and they go back verbatim, at the head of [daemon] where GDM reads them. A
+  # backup whose [daemon] section had none (or no backup at all) restores none,
+  # which is the strip this function has always done.
+  #
+  # getline answers -1 for both "no such file" and "there is a file but it could
+  # not be read", and those two are opposites here: the first is the ordinary
+  # no-backup case above, the second means the only copy of the pre-install
+  # autologin is sitting there unread. So the shell's own existence check
+  # separates them, and a read failure over a backup that DOES exist fails
+  # closed — exit non-zero before the write-back, leaving the live keys and the
+  # backup exactly where they are, the same way a failed strip does (issue #22).
+  awk -v bak="$bak" -v bak_exists="$bak_exists" '
+    BEGIN {
+      n = 0
+      while ((r = (getline line < bak)) > 0) {
+        if (line ~ /^\[.*\]$/) { in_bak_daemon = (line == "[daemon]"); continue }
+        if (in_bak_daemon && line ~ /^[[:space:]]*#?[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) saved[++n] = line
+      }
+      close(bak)
+      if (r < 0 && bak_exists == "1") {
+        print "error: cannot read " bak > "/dev/stderr"
+        failed = 1
+        exit 1
+      }
+    }
+    /^\[.*\]$/ {
+      in_daemon = ($0 == "[daemon]"); print
+      if (in_daemon) { for (i = 1; i <= n; i++) print saved[i]; done = 1 }
+      next
+    }
+    # The same pattern the collect pass above matches, `#?` included: a commented
+    # hint this function itself restored on an earlier call has to be recognised
+    # as ours to strip, or the fresh collection reprints it beside the old copy
+    # and every repeated revert grows [daemon] by one more.
+    { if (in_daemon && $0 ~ /^[[:space:]]*#?[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
+    END { if (!failed && !done && n) { print ""; print "[daemon]"; for (i = 1; i <= n; i++) print saved[i] } }
+  ' "$conf" > "$tmp" && cat "$tmp" > "$conf" || rc=$?
   rm -f "$tmp"
+  [ "$rc" -eq 0 ] || return "$rc"
+  # The revert has happened by here, so a backup we cannot unlink is not a
+  # failure of it: the cleanup's status stays out of the return value.
+  rm -f "$bak"
+  return 0
 }
 
 # --- package manager --------------------------------------------------------
