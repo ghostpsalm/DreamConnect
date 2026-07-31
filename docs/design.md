@@ -60,7 +60,23 @@ the X11 one. The agent swaps that peer for its own, so one seam reroutes every
 | `Robot.mouseMove(x,y)`                | `NotifyPointerMotionAbsolute`                            |
 | `Robot.mousePress/Release(buttons)`   | `NotifyPointerButton`                                    |
 | `Robot.mouseWheel(amt)`               | `NotifyPointerAxisDiscrete`                              |
-| `Robot.keyPress/keyRelease(keycode)`  | `NotifyKeyboardKeycode` (AWT vk → evdev keycode map)     |
+| `Robot.keyPress/keyRelease(keycode)`  | `NotifyKeyboardKeysym` or `NotifyKeyboardKeycode` — see *Key routing* below |
+
+#### Key routing
+
+An AWT virtual keycode takes the **first** of these four that applies:
+
+1. **Character key** (letters, digits, punctuation) → `NotifyKeyboardKeysym`
+   with the base X11 keysym, so the guest's own layout picks the keycode.
+2. **Physical/functional key** (modifiers, whitespace/control, navigation,
+   function row, numpad, locks) → `NotifyKeyboardKeycode`, from the AWT vk →
+   evdev keycode map.
+3. **Unmapped vk that lands in printable ASCII** → best-effort keysym from the
+   vk itself.
+4. **Anything else** → dropped silently, with no line put on the control socket.
+
+Order matters: several functional vks (VK_F1 = 0x70) fall inside step 3's
+printable-ASCII range, so the tables must be consulted before the fallback.
 
 ### Injection mechanism
 The client runs from a systemd unit we control (`connectwisecontrol-<id>.service`),

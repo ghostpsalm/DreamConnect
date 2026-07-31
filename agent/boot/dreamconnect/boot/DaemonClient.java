@@ -13,8 +13,10 @@ import java.nio.charset.StandardCharsets;
  * socket. Runs inside ScreenConnect's JVM (bootstrap classloader). One command
  * per line; one reply line. Reconnects transparently on failure so a daemon
  * restart doesn't wedge the client.
+ *
+ * Not final: BootTests substitutes a subclass that captures input() lines.
  */
-final class DaemonClient {
+class DaemonClient {
     private static final long READ_TIMEOUT_MS = 2000;
 
     private final String path;

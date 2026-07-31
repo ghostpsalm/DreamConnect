@@ -45,18 +45,25 @@ Reader: read `seq_end`, copy pixels, read `seq_begin`; if they match (and are
 non-zero) the frame is intact, else retry.
 
 ### Control socket — default `$XDG_RUNTIME_DIR/dreamconnect.sock`
-Line-based ASCII, one reply line per command:
+Line-based ASCII. Control commands get exactly one reply line; **input commands
+are fire-and-forget and get no reply at all** (`—` below), so the agent's hot
+input path never waits for an ack — errors on them are logged daemon-side, not
+returned, which keeps the reply stream aligned with control commands only.
 
 | command | meaning | reply |
 |---------|---------|-------|
 | `PING` | liveness | `PONG` |
 | `GEOM` | stream size | `<w> <h>` |
 | `NODE` | PipeWire node id | `<id>` |
-| `M <x> <y>` | pointer absolute move (screen px) | `OK` |
-| `B <evdev_button> <state>` | pointer button (state 1/0) | `OK` |
-| `W <axis> <steps>` | wheel (axis 0=vert 1=horiz) | `OK` |
-| `K <evdev_keycode> <state>` | key by evdev keycode | `OK` |
-| `KS <keysym> <state>` | key by keysym (fallback) | `OK` |
+| `M <x> <y>` | pointer absolute move (screen px) | — |
+| `B <evdev_button> <state>` | pointer button (state 1/0) | — |
+| `W <axis> <steps>` | wheel (axis 0=vert 1=horiz) | — |
+| `K <evdev_keycode> <state>` | key by evdev keycode (modifiers, whitespace, navigation, function, numpad, locks) | — |
+| `KS <keysym> <state>` | key by keysym — character-producing keys, plus the agent's printable-ASCII fallback; guest layout resolves the keycode | — |
+
+An unrecognised command replies `ERR unknown cmd <X>`. The table above lists the
+commands the agent's Robot path uses; the daemon also serves `WHO`, `WAKELOCK`,
+`BLANK` and `TYPE` (see `handle()` in `dreamconnect_daemon.py`).
 
 Coordinates and button/key codes are already in Wayland/evdev terms — the Java
 agent does the AWT→evdev translation (see `../keymap/`) before sending.
