@@ -1,0 +1,169 @@
+{
+  "recorded_at": "2026-07-28T22:44:50Z",
+  "repo": "uninstall-reversal",
+  "branch": "install/uninstall-reversal",
+  "base": "6cf6641d4c8ef1f19be776c924df6e499538a22a",
+  "window_start": "2026-07-28T14:04:32+10:00",
+  "head": "9a9ee2aa7e9fe346c7899a917d4f4c3a25cceec7",
+  "issue": {
+    "number": 21,
+    "state": "CLOSED",
+    "title": "install.sh: DREAMCONNECT_HOST_ACCOUNT pointed at an existing account is not fully reversible",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/21"
+  },
+  "commits": [
+    {
+      "sha": "9a9ee2aa7e9fe346c7899a917d4f4c3a25cceec7",
+      "subject": "Merge main into install/uninstall-reversal (issue #24's wait_for_user_bus fix, v1.4)"
+    },
+    {
+      "sha": "5ae17db1946b633847a0bb803cdeb44985395ad6",
+      "subject": "Factory: record v1.4 release for issue #24"
+    },
+    {
+      "sha": "7d35ad9ba74592a4ece7f2b009347a82ae08fdfa",
+      "subject": "Factory: record issue #21's run + hazards"
+    },
+    {
+      "sha": "7acf24a86549b8c59b7bd7988151e257538dfc53",
+      "subject": "Installer: make an existing DREAMCONNECT_HOST_ACCOUNT fully reversible (#21)"
+    },
+    {
+      "sha": "d8bebe84654c2b1a9824235f4774740beb1a36f8",
+      "subject": "Roadmap: add v1.4 to version history"
+    },
+    {
+      "sha": "fe43c5bfd8fcf1fa0fe5226cfb312fdb6dfe52b7",
+      "subject": "Installer: wait for the user bus before systemctl --user (#24) (#31)"
+    }
+  ],
+  "commit_count": 6,
+  "diffstat": "12 files changed, 3267 insertions(+), 38 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 1016,
+      "output_tokens": 441519,
+      "cache_read_input_tokens": 130449420,
+      "cache_creation_input_tokens": 2579778
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 44,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 57051,
+        "duration_ms": 166310,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 12,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 705726,
+        "duration_ms": 2235479,
+        "models": []
+      },
+      "builder": {
+        "spawns": 15,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 515135,
+        "duration_ms": 1692652,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 9,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 424773,
+        "duration_ms": 1895589,
+        "models": []
+      },
+      "breaker": {
+        "spawns": 6,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 388022,
+        "duration_ms": 1918925,
+        "models": []
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 60878,
+        "duration_ms": 224662,
+        "models": []
+      }
+    },
+    "usage_blocks": 509,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "ced3d65d-00e5-416b-931a-c7414257453a.jsonl",
+        "usage_blocks": 509
+      }
+    ],
+    "agent_wall_clock_ms": 8133617,
+    "first_activity": "2026-07-28T08:02:56.938000+00:00",
+    "last_activity": "2026-07-28T22:44:33.796000+00:00",
+    "notification_tokens": 2151585,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "<task-notification>\n<task-id>ad0bf531fec775325</task-id>\n<tool-use-id>toolu_014jLoSweyPDLv661dC7qdgF</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/ad0bf531fec775325.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle for valid_home_dir normalization fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\n\n**slice:** #21 slice 3, breaker lap 1 finding #1 \u2014 `valid_home_dir` reserved-path rail bypassed by non-canonical spellings.\n\n**seam:** `valid_home_dir` (pure predicate, `install-lib.sh:171`) + its write-side consumer `configure_no_idle_lock`.\n\n**tests:** `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/test_install.sh`\n- `::test_valid_home_dir_rejects_noncanonical_spellings_of_the_shared_roots` (new, registered in the runner list)\n- `::test_valid_home_dir_rejects_dotdot_components` (extended \u2014 `..`-rail regression guard: `/root/../etc`, `/home/x/..`, `//home//x//..`, `/root/.././root` still rejected; `/var/lib/dc..host`, `/home/..john` still accepted)\n- `::test_configure_no_idle_lock_refuses_an_unusable_home` (extended \u2014 round 3: the breaker's exact call `configure_no_idle_lock dreamconnect-host \"/root/\"`, skipped under root because the call is itself destructive while the guard is missing)\n\n**expected value from:** POSIX 4.13 pathname resolution (`.` names the directory itself; a slash run \u2261 one slash; trailing `/` \u2261 trailing `/.`) \u2014 so each string *is* `/`, `/home` or `/root`; plus `factory/CHECKPOINT.md` breaker lap 1 finding #1, quoted in the test header. Independence caveat: the current implementation is visible (this is a fix to existing code), so I took every value from the resolution rules and the finding, not from the c",
+    "<task-notification>\n<task-id>a3a45ffa5366840e1</task-id>\n<tool-use-id>toolu_01AAnW75EneswarrxJeunXqG</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a3a45ffa5366840e1.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder for valid_home_dir normalization\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Done. Both fixes in `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/install-lib.sh`.\n\n**`valid_home_dir`** \u2014 reserved-root rail now compares a normalized path; the `..` rail still runs against the raw `$home`, unmoved in substance (now placed after the reserved rail):\n\n```bash\n-  case \"$home\" in /|/home|/root) return 1 ;; esac\n+  p=\"$home/\"                                                      # bracket the tail\n+  while [ \"$p\" != \"${p//\\/\\//\\/}\" ]; do p=\"${p//\\/\\//\\/}\"; done   # collapse slash runs\n+  while [ \"$p\" != \"${p//\\/.\\//\\/}\" ]; do p=\"${p//\\/.\\//\\/}\"; done # drop \".\" components\n+  [ \"$p\" = \"/\" ] || p=\"${p%/}\"                                    # strip the trailing slash\n+  case \"$p\" in /|/home|/root) return 1 ;; esac\n```\n(plus `local ... p`, and a comment block in the file's existing register). I traced the prototype on all 34 spellings from the tests before editing \u2014 `/root/ //root /root/. /./root` \u2192 `/root`; `/var/lib/dc..host`, `/home/dchost`, `/var/lib/./dc..host` unchanged/valid.\n\n**`host_account_removable`** \u2014 rail 2 delegates instead of duplicating literals:\n\n```bash\n-  case \"$home\" in\n-    /|/home|/root) echo \"refusing to remove $name: home directory is $home\" &gt;&amp;2; return 1 ;;\n-  esac\n+  valid_home_dir \"$home\" || {\n+    echo \"refusing to remove $name: home directory is $home\" &gt;&amp;2; return 1; }\n```\nMessage unchanged; the",
+    "<task-notification>\n<task-id>adf50eee6c9e0fe45</task-id>\n<tool-use-id>toolu_01AKxHEbLkKxqSRuQQXcQymq</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/adf50eee6c9e0fe45.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle for absent-account uninstall fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\n\n**slice:** issue #21 slice 3, breaker lap 1 defect 2 \u2014 a hand-deleted host account must not strand `install.state` forever\n\n**seam:** `install-lib.sh::uninstall_host_account`, driven from `test_install.sh` via the existing `DC_PASSWD_DB` / `DC_STATE_FILE` / `DC_DRY_RUN` fixtures + the `make_uninstall_shims` PATH doubles for `loginctl`/`userdel`\n\n**tests:**\n- `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/test_install.sh::test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed`\n- `\u2026::test_uninstall_host_account_still_refuses_an_account_that_is_really_there`\n\n**contract asserted** (written above the tests in full, lines ~2245-2295):\n0. Non-empty `&lt;name&gt;` with **no passwd entry at all** \u2192 return **0**, having emitted/executed **nothing** (no `disable-linger`, no `terminate-user`, no `userdel`), output naming the account. Nothing to remove is the success case, so `install.sh`'s `account_removed=1` clears `install.state`.\n0b. **Empty** `&lt;name&gt;` still refuses (non-zero) \u2014 an empty name names no account.\n1-4. A name that **does** have a passwd entry: completely unchanged, `host_account_removable` consulted first, every rail refusing as before. `host_account_removable`'s own contract is untouched.\n\n**expected value from:** issue #21's own repro scenario + `install.sh:144-159`'s caller contract (`account_re",
+    "<task-notification>\n<task-id>a15417a48f8052575</task-id>\n<tool-use-id>toolu_01MN682G1omZMEhgjGfSGWPK</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a15417a48f8052575.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder for absent-account uninstall fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Slice green.\n\n**Seam** `uninstall_host_account` (install-lib.sh), driven through the test harness's `run_uninstall_dry` / `run_uninstall_shimmed`.\n\n**Change** \u2014 one hunk, `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/install-lib.sh` lines 770-782, inserted between `local name=...` (768) and the existing `host_account_removable` call (now 784):\n\n```sh\n  if [ -n \"$name\" ] &amp;&amp; [ -z \"$(passwd_entry \"$name\")\" ]; then\n    echo \"note: display-host account '$name' is already gone from the passwd source; nothing to remove\" &gt;&amp;2\n    return 0\n  fi\n```\n\nplus an 11-line comment above it in this file's idiom (why the refusal would strand `install.state`, why an empty name is not this case). Message goes to stderr, matching the `warning:` lines at 421/670/753; it does not start with `DRY: ` so `uninstall_dry_all` still sees nothing emitted. Nothing else in the file changed.\n\n**Before** \u2014 `bash test_install.sh`: 121 PASS, `2 assertion failure(s)`, both in `test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed`:\n```\nFAIL: an account already deleted by hand: uninstall_host_account exits 0 ...: expected [0], got [1]\nFAIL: hand-deleted (real run): exits 0: expected [0], got [1]\n```\n**After** \u2014 122 PASS, 0 FAIL, final line `installer shell tests passed`. `test_uninstall_host_account_still_refuses_an_account_that_is_really_there` pa",
+    "<task-notification>\n<task-id>a6362a44ac17e600f</task-id>\n<tool-use-id>toolu_01GTEfYpKYbcN6KwPxTBpngv</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a6362a44ac17e600f.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph re-verify slice 3 breaker fixes\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source) | Observed | Verdict |\n|---|---|---|\n| #21 sub-1: one-host-account-per-box, no stranded predecessor | `host_account_installable` + sticky `CREATED_ACCOUNT`; 10 slice-1 tests green | PASS |\n| #21 sub-2: `remove_no_idle_lock` validates `home` | `valid_home_dir` gates home-half, dconf revert still runs, exit 0 | PASS |\n| #21 sub-3: `root` reserved + locale-independent `valid_account_name` | `local LC_ALL=C`; root refused at all 7 sites | PASS |\n| Fix 1: normalize before reserved-root compare | 240-combo brute force of `/`,`/home`,`/root` spellings: **zero accepted**; `/root/`,`//root`,`/root/.`,`/./root` all rejected | PASS |\n| Fix 1: `host_account_removable` delegates | fixture homes `/root/`,`//root`,`/root/.`,`/./root`,`/root`,`/home`,`/` \u2192 all refused; `/var/lib/dchost` accepted (non-vacuous) | PASS |\n| Fix 2: absent passwd entry \u2192 exit 0, no commands | `rc=0`, tripwire shims `userdel`/`loginctl` **never invoked**; DRY emits nothing | PASS |\n| Fix 2: no weakening of `host_account_removable` | wrong GECOS / state mismatch / `CREATED_ACCOUNT=0` / empty name / `root` present \u2192 all still rc=1; valid account still emits `disable-linger, terminate-user, userdel -r` | PASS |\n| #21 motivating repro unstuck (install.state cleared) | install.sh:135\u2013157 hand-trace: `account_removed=1` \u2192 `if un",
+    "<task-notification>\n<task-id>af6fb150361eb45c1</task-id>\n<tool-use-id>toolu_01HHNMT9kK6zySkenXXRNUvv</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/af6fb150361eb45c1.output</output-file>\n<status>completed</status>\n<summary>Agent \"Breaker lap 2 (final) on slice 3\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Breaker report\nVERDICT: defect-found (one low-severity fail-open; one high-value missing guard-test)\n\n### \u26a0 Incident I caused and repaired \u2014 read first\nMy `git stash`/`stash pop` (to get a shellcheck baseline) raced a sibling worktree: **`refs/stash` is repo-global across worktrees**. My pop took `install/host-account-fixes`'s stash into this tree. I restored this tree from the recovered stash commit `ce6e2dfc` \u2014 verified identical to session start (1922 insertions, 122/122 PASS, `bash -n` clean). **The sibling line's work is NOT in its worktree**; I tagged it `recovery-host-account-fixes-stash` (= `079c1fb`, 654 insertions). Recover with `git -C /home/kogies/.factory/worktrees/dreamconnect/host-account-fixes checkout recovery-host-account-fixes-stash -- install.sh install-lib.sh test_install.sh`. No agent may ever run `git stash` in a shared-repo worktree.\n\n### Defects\n1. `install-lib.sh:770` (`uninstall_host_account`) \u00b7 a passwd *lookup failure* is indistinguishable from *absence*, so it reports success and the caller deletes `install.state`, orphaning a real account with linger+autologin and no state left to retry. **Trigger** (demonstrated): `getent` exiting non-zero with empty output (broken NSS module, `getent` absent) \u2014 shimmed `getent` exit 2 \u2192 `uninstall_host_account dchost john` returns 0, no `loginctl`/`userdel` run. Pre-fix it refused loudly and preserved st",
+    "<task-notification>\n<task-id>a9fa9a7231496969c</task-id>\n<tool-use-id>toolu_01R9R6qqf9zGFVBhGNWtAckB</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a9fa9a7231496969c.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle: backfill host_account_removable regression test\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>`install-lib.sh` is restored (sha256 matches the pre-edit checksum) and the suite is green.\n\n## Test authored\nslice: #21 slice 3 \u2014 regression backfill for `host_account_removable` rail 2\nseam: `host_account_removable &lt;name&gt; &lt;protected_user&gt;` (exit status + stderr), driven via the existing `DC_PASSWD_DB` / `DC_STATE_FILE` fixture convention\ntest: `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/test_install.sh::test_host_account_removable_refuses_a_reserved_home_however_it_is_spelled`\nexpected value from: breaker lap 1 finding #1 as quoted in `test_install.sh:4124-4127` (\"/root/, //root, /root/., /./root\") + POSIX 4.13 pathname resolution \u2014 all six fixture homes resolve to `/`, `/home` or `/root`; consequence at this seam is `userdel -r`. Not derived from the code.\nstubs created: none (code already exists and is correct)\n\nred observed (mutation, not a real red): the code is already fixed, so the honest report is:\n- **Passes now**: `bash test_install.sh` \u2192 `PASS: test_host_account_removable_refuses_a_reserved_home_however_it_is_spelled` / `installer shell tests passed`.\n- **Has teeth**: with rail 2 temporarily reverted to `case \"$home\" in /|/home|/root) ... esac`, `bash test_install.sh` \u2192 `FAILED: test_host_account_removable_refuses_a_reserved_home_however_it_is_spelled`, `18 assertion failure(s)`, e.g. `FAIL: userdel -r wou",
+    "<task-notification>\n<task-id>a72f8c207107fe4fe</task-id>\n<tool-use-id>toolu_015CnnSbfrjjcuKeWR2UzJLR</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a72f8c207107fe4fe.output</output-file>\n<status>completed</status>\n<summary>Agent \"Reviewer for issue #21\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Verdict: ship. Nothing blocking. Two doc-level edits I'd make first (both comment/prose, no logic).\n\n**1. `install.sh:20-27` (header env docs) / `README.md:107` \u2014 `in-scope`, not blocking.** The one-host-account-per-box invariant is a user-facing behaviour change documented only in code comments. Scenario: operator reads the header block, installs with `DREAMCONNECT_HOST_ACCOUNT=dchost`, later re-runs with `=dchost2` \u2014 now dies with \"this box already has a display-host account installed\". Nothing user-facing says that's by design or that `--uninstall` is the intended path. One clause in the header env-var block closes it.\n\n**2. `install-lib.sh:218-222` \u2014 `in-scope`, not blocking.** The comment asserts \"So a caller gets a complete identity or nothing.\" That invariant is false for a home containing whitespace: `/home/john doe` still shifts the caller's `read -r`. The gap *is* honestly disclosed in `test_install.sh:4380-4384`, but a future reader in `install-lib.sh` alone takes the stronger claim at face value. Add \"(a home containing whitespace still shifts \u2014 known gap)\".\n\n**3. `install.sh:210` \u2014 `in-scope`, low, needs a tampered/corrupt `install.state`.** The generic `|| die \"this box already has a display-host account installed\u2026\"` also fires when the *recorded* name is reserved/malformed, and the remedy it names can't recover: with `HOST_ACCOUNT=root, CREATED_ACCOUNT=1`, `--unins",
+    "<task-notification>\n<task-id>a07065dd289deb997</task-id>\n<tool-use-id>toolu_01Wrn9rzg9oL1aV1YtVGj1My</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a07065dd289deb997.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder: reviewer's 4 polish items for issue #21\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Done. All 4 applied; no test-file edits (`test_install.sh` untouched \u2014 its diff vs HEAD is the prior slices' oracle work, unchanged by me).\n\n**Diffs** (`/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/`):\n\n1. `install.sh` header (~L26), appended to the `DREAMCONNECT_HOST_ACCOUNT` block:\n```\n#                              detected desktop user, exactly as before. One host\n#                              account per box: once one is installed, a re-run\n#                              naming a DIFFERENT account is refused \u2014 run\n#                              --uninstall first to switch.\n```\n2. `install-lib.sh` `resolve_host_identity` (~L221): `...complete identity or nothing (a` / `# home containing whitespace still shifts the caller's read \u2014 known gap, out` / `# of scope for this fix).`\n3. `install.sh` (~L212) die extended (uses `$(install_state_file)`, matching L158's idiom):\n```\n  || die \"this box already has a display-host account installed; run $0 --uninstall first\n   (if install.state itself records an invalid or reserved account name, --uninstall\n   will refuse it too; delete $(install_state_file) by hand to recover)\"\n```\n4. `install.sh` classic-mode call only (~L368; host-account call at L363 untouched):\n```\n    # Non-fatal here, unlike the host-account call above: this is the very last\n    # step and the daemon is already installed, so a",
+    "<task-notification>\n<task-id>a0101100b146a5911</task-id>\n<tool-use-id>toolu_01BnNvT5itsosJppn4kz7MzR</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-uninstall-reversal/ced3d65d-00e5-416b-931a-c7414257453a/tasks/a0101100b146a5911.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder: fix misleading post-refusal messages\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Done.\n\n**Change** (only edit, `/home/kogies/.factory/worktrees/dreamconnect/uninstall-reversal/install.sh` lines 370-383; diff vs last commit, so it also folds in the uncommitted polish pass):\n\n```\n-    enable_autologin \"$GDM_CONF\" \"$USER_NAME\" \\\n-      || echo \"!! could not enable autologin for $USER_NAME \u2014 ...\"\n-    echo \"   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt.\"\n-    echo \"   backup: $GDM_CONF.dreamconnect.bak \u00b7 reboot to verify unattended survival.\"\n+    if enable_autologin \"$GDM_CONF\" \"$USER_NAME\"; then\n+      echo \"   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt.\"\n+      echo \"   backup: $GDM_CONF.dreamconnect.bak \u00b7 reboot to verify unattended survival.\"\n+    else\n+      # Nothing was written, so neither the security warning nor the backup path\n+      # below would be true \u2014 the refusal is the whole of the output.\n+      echo \"!! could not enable autologin for $USER_NAME \u2014 the daemon install itself succeeded; check the account name and re-run, or configure autologin manually\"\n+    fi\n```\n\nThe pre-existing \"Non-fatal here, unlike the host-account call above\" comment stays above the `if`. Host-account call site untouched. `if cmd; then` matches the file's convention (`if valid_home_dir \"$target_home\"; then`, line 95).\n\n**Verification observed:**\n- `bash -n install.sh install-li",
+    "/submit",
+    "/ship"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 4519,
+    "ask: This edits a version number.": 2637,
+    "ask: This would publish a GitHub release, which ships to real devices.": 906,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 897,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 839,
+    "block: editing the deployed factory directly": 6275,
+    "block: writing to a file the harness owns": 839,
+    "block: touching a secret/credential file": 4118,
+    "block: force push (never rewrite published history)": 952,
+    "block: editing an existing migration": 836,
+    "block: hard reset discards work": 790,
+    "block: TRUNCATE destroys data": 84,
+    "block: destructive SQL DDL": 3889,
+    "block: unqualified DELETE (no WHERE)": 49,
+    "block: sending a secret/credential file to a network client": 8215,
+    "block: sending ~/.claude.json to a network client": 550,
+    "block: disk-destructive command": 91,
+    "block: world-writable recursive chmod": 161,
+    "block: piping remote content straight to a shell": 73,
+    "block: git clean deletes untracked files": 64,
+    "block: writing into the ~/.claude root directory": 2,
+    "block: push --all (push the current branch only)": 29,
+    "block: fork bomb": 19,
+    "block: reading ~/.claude.json, which holds a live credential": 2,
+    "block: writing to ~/.claude.json, which holds a live credential": 8,
+    "block: sending a file the harness owns to a network client": 2
+  },
+  "status": "done",
+  "note": "Released v1.4.1. PR #35 merged (squash) after resolving a real merge conflict against main's issue #24 work (wait_for_user_bus) -- git's default diff falsely spliced two unrelated test functions together on first attempt, redone with diff3/patience and hand-verified against each side's pre-merge content. 138/138 combined test suite green post-merge, shellcheck clean. Version bumped as PATCH (v1.4.1, not v1.5) per owner correction -- this is hardening on already-shipped H6, not a new feature.",
+  "outcome": {}
+}

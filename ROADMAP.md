@@ -315,15 +315,30 @@ documented in [`docs/troubleshooting.md`](docs/troubleshooting.md). Only Fedora 
 tested end to end; other distros' names are best-effort.
 
 #### H6 — Reboot survival / autologin
-**Status:** ✅ DONE · **Priority:** medium
+**Status:** ✅ DONE (autologin shipped v1.3; display-host account code-complete, needs on-device verification) · **Priority:** medium
 
-`install.sh` configures GDM autologin on explicit opt-in
-(`DREAMCONNECT_AUTOLOGIN=1`) — a section-aware, idempotent edit of
-`/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up, and
-is reverted on `--uninstall`. Without the opt-in it warns and points at it. Warns
-if `WaylandEnable=false` (the bridge needs a Wayland session at boot). Reboot
-survival itself is the operator's on-device verification. See F3 (wake lock) for
-the idle/lock case.
+Two ways to survive an unattended reboot:
+
+- **Autologin the human's session** (`DREAMCONNECT_AUTOLOGIN=1`) — `install.sh`
+  configures GDM autologin on explicit opt-in: a section-aware, idempotent edit
+  of `/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up,
+  and is reverted on `--uninstall`. Without the opt-in it warns and points at it.
+  Warns if `WaylandEnable=false` (the bridge needs a Wayland session at boot).
+  The trade-off is the box booting straight into that human's unlocked session.
+- **A dedicated display-host account** (`DREAMCONNECT_HOST_ACCOUNT=<name>`) —
+  creates a hidden, sudo-less, password-disabled account and runs the daemon
+  there instead, so no human's session is ever exposed. Idle-lock and
+  idle-suspend are disabled for that account (a lock or a suspend kills the
+  remote session — see F3 for the attended case), and autologin is always
+  configured for it, so `DREAMCONNECT_AUTOLOGIN` isn't consulted in this mode.
+  `--uninstall` reverts the lot: deletes the account if this installer created
+  it (behind seven safety rails), restores anything it had to overwrite on a
+  pre-existing account, and undoes the idle-lock and autologin changes.
+  **Code-complete and unit-tested** (`test_install.sh`, 86 assertions); account
+  creation, reboot survival and uninstall reversal are not yet confirmed on a
+  physical box.
+
+Reboot survival itself is the operator's on-device verification either way.
 
 ---
 
@@ -380,6 +395,18 @@ a time.
 ---
 
 ## Version history
+- **v1.4.1** (2026-07-29) — hardening: `DREAMCONNECT_HOST_ACCOUNT` pointed at an
+  existing account is now fully reversible (H6) — a crash-safe one-host-account-
+  per-box invariant, `root`/`user`/`local` reserved everywhere without breaking
+  classic-mode autologin, and home-directory validation covering the account's
+  own hand-deleted-account scenario; the account path itself still needs a full
+  on-device reboot verification (unchanged from v1.4).
+- **v1.4** (2026-07-28) — layout-independent keyboard via keysym for correct
+  characters on any guest layout (H1), full logical-desktop multi-monitor
+  capture via RecordArea (H2), and a dedicated display-host account as a
+  second reboot-survival path (H6), hardened against a systemd user-bus
+  startup race found in on-device testing; the account path itself still
+  needs a full on-device reboot verification.
 - **v1.3** (2026-07-19) — hardening: distro-agnostic dependency install
   (apt/dnf/zypper/pacman) (H5), opt-in GDM autologin for reboot survival (H6),
   and reconnect/resilience fixes — session-restart subscription leak + restart
