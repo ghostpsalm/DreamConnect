@@ -1,0 +1,148 @@
+{
+  "recorded_at": "2026-07-31T23:16:01Z",
+  "repo": "build-integrity",
+  "branch": "agent/build-integrity",
+  "base": "fd474176ac2f707c6fdae00c24e1531f5f1c6b3a",
+  "window_start": "2026-07-31T21:21:10+10:00",
+  "head": "08d7690d15037c1e9964b79b9c54b1ce8f3fb5de",
+  "issue": {
+    "number": 43,
+    "state": "OPEN",
+    "title": "agent/build.sh: verify the ByteBuddy jar's SHA-256 after download",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/43"
+  },
+  "commits": [
+    {
+      "sha": "08d7690d15037c1e9964b79b9c54b1ce8f3fb5de",
+      "subject": "agent/build.sh: verify the ByteBuddy jar's SHA-256 after download (#43)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "4 files changed, 373 insertions(+)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 304,
+      "output_tokens": 124927,
+      "cache_read_input_tokens": 15395176,
+      "cache_creation_input_tokens": 391160
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 13,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 33263,
+        "duration_ms": 156180,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 129736,
+        "duration_ms": 763131,
+        "models": []
+      },
+      "builder": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 98959,
+        "duration_ms": 270058,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 124502,
+        "duration_ms": 290987,
+        "models": []
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 113835,
+        "duration_ms": 591881,
+        "models": []
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 32717,
+        "duration_ms": 148265,
+        "models": []
+      }
+    },
+    "usage_blocks": 153,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "17f77045-f3cf-4ece-907b-0f20b859feb1.jsonl",
+        "usage_blocks": 153
+      }
+    ],
+    "agent_wall_clock_ms": 2220502,
+    "first_activity": "2026-07-31T22:08:48.488000+00:00",
+    "last_activity": "2026-07-31T23:15:55.147000+00:00",
+    "notification_tokens": 533012,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "<task-notification>\n<task-id>a792c607732e49c42</task-id>\n<tool-use-id>toolu_0155uhbd1VoKysZUfsteawXL</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a792c607732e49c42.output</output-file>\n<status>completed</status>\n<summary>Agent \"Implement ByteBuddy checksum verification\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>**Slice: pinned-hash verification of the ByteBuddy jar in `agent/build.sh` (issue #43)**\n\n**Seam** \u2014 whole-script subprocess run against a sandboxed copy of `agent/`, per `agent/test_build.sh`.\n\n**Red observed first** (`bash agent/test_build.sh`): 3 failures in `test_a_poisoned_cached_jar_fails_the_build_before_anything_is_produced` \u2014 `dreamconnect-boot.jar` produced, `&gt;&gt; compile` in output, no integrity wording; build died later at `javac ... zip END header not found`.\n\n**Change** \u2014 `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/build.sh`, two hunks:\n\n```sh\nBB_SHA256=\"e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435cbdd180f6ffdb821\"\n...\n[ -f \"$BB_JAR\" ] || curl -fsSL \"$BB_URL\" -o \"$BB_JAR\"\n\necho \"&gt;&gt; verify ByteBuddy against pinned hash\"\necho \"$BB_SHA256  $BB_JAR\" | sha256sum -c -\n```\n\nPlus a 4-line comment on the constant, and 2 doc lines in `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/README.md` under `## Build`.\n\nOne non-obvious constraint the test enforced: my first banner read `&gt;&gt; verify ByteBuddy checksum`, which made the **happy-path** output match `reads_like_an_integrity_failure` (case B failed). Reworded the banner to `against pinned hash`; the check itself is unchanged. `sha256sum -c` prints `&lt;path&gt;: OK` on success and `&lt;path&gt;: FAILED` + `WARNING: 1 computed checksum did NOT match` o",
+    "<task-notification>\n<task-id>a80f0bdfcf6ee7b5e</task-id>\n<tool-use-id>toolu_0169bqQCecCMgWRGpVMTWvWA</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a80f0bdfcf6ee7b5e.output</output-file>\n<status>completed</status>\n<summary>Agent \"Gate check ByteBuddy checksum fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source, issue #43) | Observed | Verdict |\n|---|---|---|\n| Pin expected SHA-256 as a constant | `BB_SHA256=\"e32f4...b821\"` in `agent/build.sh:12` | PASS |\n| Verify after download; fail build on mismatch | `echo \"$BB_SHA256  $BB_JAR\" \\| sha256sum -c -` at line 30, under `set -euo pipefail` | PASS |\n| Defends against poisoned cache (not just fresh download) | Verify line runs unconditionally after the `[ -f \"$BB_JAR\" ] \\|\\| curl ...` gate \u2014 cache-hit path is verified too | PASS |\n| Correct hash | Live `curl` to Maven Central's `.sha256` sidecar today returned `e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435cbdd180f6ffdb821` \u2014 matches constant exactly, and matches a freshly-downloaded jar's own `sha256sum` | PASS |\n\n### Standards \u2014 does it hold up as code?\n| Claim | Oracle (exact command) | Observed | Verdict |\n|---|---|---|---|\n| `bash agent/test_build.sh` passes | ran directly | 3/3 non-skipped cases PASS, exit 0. Case B (happy-path cache-hit) initially SKIPPED (no local jar) | see below |\n| Case B actually exercised | `DC_BYTEBUDDY_JAR=&lt;real downloaded jar&gt; bash agent/test_build.sh` | all 3 pass, no skip, `dreamconnect-agent.jar` assembled | PASS |\n| `./run-tests.sh` (gate) green | ran directly, exit code checked | Java boot tests, Python daemon tests, installer shell tests, agent build shell ",
+    "<task-notification>\n<task-id>a11bf5e409772117d</task-id>\n<tool-use-id>toolu_01GTwtfexdux3xfMKM2W2Nzk</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a11bf5e409772117d.output</output-file>\n<status>completed</status>\n<summary>Agent \"Red team ByteBuddy checksum fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Breaker report\nVERDICT: defect-found\n\n### Defects (most severe first)\n\n**1. `agent/test_build.sh:176-199` (Case B) \u00b7 skipped on every clean checkout, yet printed as `PASS` \u2014 the suite's only guard against a degenerate fix is absent exactly where the gate runs.** `agent/lib/` is gitignored (`.gitignore:18`) and the sandbox `curl` stub blocks the network, so `fixture_jar()` finds nothing. **Trigger: `git clone &amp;&amp; ./run-tests.sh`** \u2014 this worktree has no `agent/lib`, and the real gate output above shows `SKIP` followed by `PASS: test_a_correctly_hashed_cached_jar_still_builds`. **Demonstrated:** a mutant replacing line 30 with `echo \"$BB_JAR: FAILED checksum\" &gt;&amp;2; exit 1` \u2014 a build.sh that can never build anything \u2014 passes the entire suite, `RC=0`. Missing test: the fixture-unavailable case must fail (or the fixture must be constructible offline, e.g. pin against a hash computed from a synthesised file). `in-scope`.\n\n**2. `agent/build.sh:27-30` \u00b7 a rejected jar stays in the cache, wedging every subsequent build with no remediation path.** **Trigger:** interrupt the download (Ctrl-C / dropped connection / ENOSPC \u2014 `curl -f -o` leaves a truncated file, no `--remove-on-error`). **Demonstrated:** run 1 \u2192 `rc=18`, 1000-byte file left in `lib/`; runs 2 and 3 with a *perfectly healthy* network \u2192 `FAILED`, `rc=1`, forever, because `[ -f \"$BB_JAR\" ]` short-circuits the r",
+    "<task-notification>\n<task-id>a81caf05c49b13ee1</task-id>\n<tool-use-id>toolu_01YQunYhx9eme2ShHsERxQsD</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a81caf05c49b13ee1.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write red test for cache self-heal\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>build.sh is unchanged by me (that diff is the pre-existing slice-1 fix). Only `agent/test_build.sh` was edited.\n\n## Test authored\nslice: reject-and-recover \u2014 a jar that fails the pinned-hash check must not wedge the cache\nseam: `agent/build.sh` run as a subprocess against a sandboxed `agent/` copy \u2014 exit code, output, and the artifacts it leaves behind (the file's existing declared seam, unchanged)\ntest: `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/test_build.sh::test_a_poisoned_cached_jar_is_removed_so_the_next_run_can_recover` (new Case C, inserted between Case A and Case B, added to the runner loop; no existing assertion touched)\nexpected value from: breaker's reproduction as recorded in `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/factory/CHECKPOINT.md` slice 1 \u2014 \"poisoned cached jar is never removed on failure, wedging the cache forever\". **Not** in issue #43 or `agent/README.md`; the only written source is that defect report. Independence caveat: build.sh already exists and I read it, so I took the required behaviour from the defect report, not from the code.\nstubs created: none\nred observed: `bash agent/test_build.sh` \u2192\n```\nFAIL: poisoned cached jar: the rejected file must be removed, not left to poison every later run: expected file NOT to exist: /tmp/tmp.kToKnWDubP/sandbox.TN9UK9/lib/byte-buddy-1.18.11.jar\nFAIL: poisoned cach",
+    "<task-notification>\n<task-id>a79ee2122f50ff236</task-id>\n<tool-use-id>toolu_01TWoJCG5KV9T2qmMxWRDCLV</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a79ee2122f50ff236.output</output-file>\n<status>completed</status>\n<summary>Agent \"Implement cache self-heal on checksum failure\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Slice green. No test-file edits.\n\n## Slice: remove the rejected jar so the next run can recover (issue #43 follow-on)\n\n**Seam** \u2014 `agent/build.sh` run as a whole subprocess against a sandboxed copy of `agent/`, observed via exit code, output, and files left on disk.\n\n**Test** \u2014 `test_a_poisoned_cached_jar_is_removed_so_the_next_run_can_recover` in `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/test_build.sh` (oracle's).\n\n**Red observed before the change:**\n```\nFAIL: ...the rejected file must be removed...: expected file NOT to exist: /tmp/tmp.3jq.../lib/byte-buddy-1.18.11.jar\nFAIL: ...the next run must be free to re-fetch...: expected output to contain [NETWORK-BLOCKED-BY-TEST]\nFAILED: test_a_poisoned_cached_jar_is_removed_so_the_next_run_can_recover\n2 assertion failure(s)   (exit 1)\n```\n\n**Change** \u2014 only `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/build.sh`, replacing the bare verify line:\n```bash\necho \"&gt;&gt; verify ByteBuddy against pinned hash\"\n# On mismatch, drop the rejected jar as well as failing: the cache is keyed on\n# the file merely existing, so leaving a truncated or poisoned copy in lib/\n# would make every later run reject that same stale file forever.\nif ! echo \"$BB_SHA256  $BB_JAR\" | sha256sum -c -; then\n  rm -f \"$BB_JAR\"\n  echo \"removed the rejected jar; re-run to fetch it again\" &gt;&amp;2\n  exit 1\n",
+    "<task-notification>\n<task-id>aff4ce37bdae4e62a</task-id>\n<tool-use-id>toolu_01CHGv5qsD64oLJnV4gQsAhA</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/aff4ce37bdae4e62a.output</output-file>\n<status>completed</status>\n<summary>Agent \"Gate check self-heal fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source: `/implement 43` verbatim in hooks.jsonl, cwd-matched) | Observed | Verdict |\n|---|---|---|\n| Fix breaker finding: rejected jar left on disk forever wedges cache | `agent/build.sh:33-37` now does `rm -f \"$BB_JAR\"` inside the mismatch branch before `exit 1` | PASS |\n| Original #43 abort-on-mismatch behavior unchanged | Same `if ! ... sha256sum -c -` gate, still under `set -euo pipefail` (line 6), still `exit 1`, message still names `$BB_JAR_NAME` via `echo \"... $BB_JAR\"` piped into sha256sum output | PASS |\n| Happy path (correct hash) unaffected | `if` block only executes on mismatch; success falls through untouched to `rm -rf \"$BUILD\"` etc. | PASS |\n\n### Standards \u2014 does it hold up as code?\n| Claim | Oracle (exact command) | Observed | Verdict |\n|---|---|---|---|\n| Fix is scoped only to build.sh for this round | `git diff HEAD --stat` | `agent/README.md`(+3) `agent/build.sh`(+14) `run-tests.sh`(+4), `agent/test_build.sh` untracked | PASS \u2014 README/run-tests wiring belongs to the round-1 slice already recorded in CHECKPOINT; this round's actual behavioral change is confined to the build.sh mismatch branch |\n| New test proves recovery, not gameable | Read `agent/test_build.sh:187-201` | Asserts file absence after run 1, then a *second* `run_build` and asserts `NET_MARKER` (curl-stub invocation) appears \u2014",
+    "<task-notification>\n<task-id>a21609683952046aa</task-id>\n<tool-use-id>toolu_013YB7ZdpDsSpp8Lz14aiM6s</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a21609683952046aa.output</output-file>\n<status>completed</status>\n<summary>Agent \"Red team self-heal fix, lap 2\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Breaker report\nVERDICT: defect-found\n\n### Defects (most severe first)\n\n**1. `agent/build.sh:33-54` \u00b7 The integrity check is verify-then-reread: the bytes hashed at line 33 are not the bytes javac uses (line 49) or `unzip` shades into the shipped jar (line 54), so the same adversary the check names \u2014 anyone who can write `agent/lib/` \u2014 defeats it by writing *after* verification instead of before.** `security`, `adjacent` (in-scope for issue #43's control, not for the `rm -f` line itself). **Demonstrated**: sandbox copy of `build.sh`, real ByteBuddy 1.18.11 in `lib/` (hash matches the pin), a `javac` wrapper that replaces the jar after the compile step. Result: `EXIT=0`, build reports success, and `unzip -l target/dist/dreamconnect-agent.jar` contains `net/PWNED.class` \u2014 a class from a jar that was never hashed. Missing test: \"the bytes shaded into the agent jar are the bytes that were verified\" (verify and consume the same path/copy). Repo-wide grep: `sha256sum` appears exactly once, so this is the only instance.\n\n**2. `agent/build.sh:33-37` \u00b7 The `then` branch fires on *any* non-zero exit from the pipeline, not only on a checksum mismatch, so a good cached jar is deleted and the operator is told it was \"rejected\".** `in-scope` (the deletion is new in this diff; pre-fix this merely failed). **Demonstrated**: jar whose hash matches the pin, `sha256sum` shadowed by a stub exitin",
+    "<task-notification>\n<task-id>a52242256e2dfd093</task-id>\n<tool-use-id>toolu_0178xCaRQHJeECVZPViDcpX1</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a52242256e2dfd093.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write red test for verify-failure-type guard\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Test authored\n\n**slice:** distinguish \"verifier ran and found a mismatch\" from \"verifier could not run\" (breaker finding 2, `factory/CHECKPOINT.md` line 7)\n\n**seam:** `agent/build.sh` run as a subprocess against a sandboxed copy of `agent/` \u2014 exit code, combined output, and the artifacts it did/didn't leave\n\n**test:** `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/test_build.sh::test_an_unrunnable_verifier_fails_closed_without_destroying_the_cached_jar` (lines 203\u2013286, inserted between Case C and Case B; plus one name added to the runner list at line 322). Helpers added alongside it: `reads_like_an_unrunnable_verifier()`, `toolbox_without_sha256sum()`, `BUILD_SH_TOOLS`. **No existing assertion touched.**\n\n**expected value from:** issue #43 (\"fail the build on mismatch\" \u2014 deletion is scoped to an *observed* mismatch) + `factory/CHECKPOINT.md` line 7, breaker finding (2). Not derived from the code. Refactor caveat: I can see the current `build.sh`, so my assertions are stated as negatives against the recorded defect rather than positives read off the code.\n\n**stubs created:** none \u2014 `build.sh` already exists.\n\n**red observed:** `bash agent/test_build.sh` \u2192\n```\nFAIL: unrunnable verifier: the cached jar was never checked, so it must not be deleted:\n      expected file to exist: /tmp/tmp.kexeyfokCE/sandbox.6LK9KW/lib/byte-buddy-1.18.11.jar\nFAIL:",
+    "<task-notification>\n<task-id>ad4a28dbe69336081</task-id>\n<tool-use-id>toolu_01YSzYx1LtfqBJiaoC7FC6jX</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/ad4a28dbe69336081.output</output-file>\n<status>completed</status>\n<summary>Agent \"Fix verify-failure-type distinction\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Slice green. No test-file edits.\n\n**Seam** \u2014 `agent/build.sh` run end-to-end as a subprocess against a sandboxed copy of `agent/`, observed via exit code, output, and surviving artifacts.\n\n**Test** \u2014 `agent/test_build.sh::test_an_unrunnable_verifier_fails_closed_without_destroying_the_cached_jar` (Case D): PATH holding every tool `build.sh` needs *except* `sha256sum`.\n\n**Observed red** (before change):\n```\nFAIL: unrunnable verifier: the cached jar was never checked, so it must not be deleted\nFAIL: unrunnable verifier: the cached jar must be left byte-for-byte alone: expected [cached jar bytes...], got []\nFAIL: unrunnable verifier: build.sh must not claim it removed a jar it never verified\nFAIL: unrunnable verifier: nothing was rejected -- the verifier never ran\nFAIL: unrunnable verifier: output must say the check could not be performed\n5 assertion failure(s)\n```\n\n**Change** \u2014 my only edit this slice, in `/home/kogies/.factory/worktrees/dreamconnect/build-integrity/agent/build.sh`, inserted between the `&gt;&gt; verify` echo and the existing mismatch branch:\n\n```bash\n# Check the verifier itself first. Without this, a missing sha256sum (minimal\n# container, mangled PATH, macOS) exits non-zero from the pipeline below and is\n# indistinguishable from a real mismatch -- so a perfectly good cached jar gets\n# deleted and reported as rejected, when in truth nothing was ever checked",
+    "<task-notification>\n<task-id>a25d33abd333b537f</task-id>\n<tool-use-id>toolu_014MQAvFjg2GpFjyDMg2bUkE</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a25d33abd333b537f.output</output-file>\n<status>completed</status>\n<summary>Agent \"Final gate check on verify-failure fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>All evidence gathered. Final report below.\n\n## Report\nSTATUS: pass\n\n### Spec \u2014 does it do what was asked?\n| Requirement (source, issue #43) | Observed | Verdict |\n|---|---|---|\n| Pin expected SHA-256 as a constant | `BB_SHA256=\"e32f...db821\"` at agent/build.sh:12 | PASS |\n| Verify with `sha256sum -c`, fail build on mismatch | Lines 42-46; independently re-fetched Maven Central sidecar (`curl .../byte-buddy-1.18.11.jar.sha256`) matches this constant exactly and matches `sha256sum` of the real cached jar | PASS |\n| Defends against a poisoned local cache, not just fresh downloads | Verification is unconditional (runs whether or not `curl` ran); `test_a_poisoned_cached_jar_fails_the_build_before_anything_is_produced` proves this | PASS |\n| #46/#47/#48 genuinely out of scope | #43's text asks only \"pin a hash, verify it, fail on mismatch\" \u2014 fully satisfied without any of the three. #46 is a test-suite gap (skip vs fail), #47 is install.sh's stdout handling, #48 is a TOCTOU/staging design decision explicitly deferred by CHECKPOINT as needing its own review | PASS |\n\n### Standards \u2014 does it hold up as code?\n| Claim | Oracle (exact command) | Observed | Verdict |\n|---|---|---|---|\n| `bash agent/test_build.sh` (no env var) | ran directly | 4 PASS, 1 SKIP (Case B, no local matching jar), exit 0 | PASS |\n| Same, with `DC_BYTEBUDDY_JAR=/home/kogies/dreamconnect/agent/lib/byte-buddy",
+    "<task-notification>\n<task-id>a39e56c3361a0536c</task-id>\n<tool-use-id>toolu_01Df3pgXEcoz6qJ9eh5JZK3V</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity/17f77045-f3cf-4ece-907b-0f20b859feb1/tasks/a39e56c3361a0536c.output</output-file>\n<status>completed</status>\n<summary>Agent \"Final review of ByteBuddy checksum change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>## Judgment: SHIP\n\nThe core fix is sound and complete for what #43 asked. I verified the load-bearing fact independently: the pin `e32f454c\u2026db821` matches Maven Central's live `.sha256` sidecar (fetched just now) *and* the bytes of the cached jar at `/home/kogies/dreamconnect/agent/lib/byte-buddy-1.18.11.jar`. Verification is unconditional (placed after the `[ -f ] || curl` line, so cache hits are covered \u2014 the actual threat in #43), fails closed before `rm -rf \"$BUILD\"` and any `javac`, self-heals via `rm -f`, and the `command -v sha256sum` preflight correctly separates \"rejected\" from \"never checked\". Deferring #46/#47/#48 is the right call: none is exploitable by the attacker #43 names.\n\n### Findings\n\n**1. `agent/test_build.sh:293` \u2014 `in-scope`, non-blocking, honesty-of-report**\nCase B (happy path) **skips in this worktree** \u2014 `agent/lib/` does not exist here and `DC_BYTEBUDDY_JAR` is unset, so `fixture_jar` returns 1. Nothing in `run-tests.sh` ever runs `build.sh` to completion. Scenario: pin mistyped by one char \u2192 Cases A/C/D still pass (all expect failure), Case B skips, gate reports green, every build breaks. That is #46, correctly filed \u2014 but it means \"gate green\" here does **not** include \"the build still works\". Mitigated twice: the suite prints `SKIPPED \u2026 NOT exercised on this box`, and I confirmed the pin upstream. Requirement: the `/submit` report must s",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 905,
+    "ask: This edits a version number.": 494,
+    "ask: This would publish a GitHub release, which ships to real devices.": 165,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 166,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 162,
+    "block: editing the deployed factory directly": 1134,
+    "block: writing to a file the harness owns": 162,
+    "block: touching a secret/credential file": 818,
+    "block: force push (never rewrite published history)": 163,
+    "block: editing an existing migration": 162,
+    "block: hard reset discards work": 170,
+    "block: sending a secret/credential file to a network client": 90,
+    "block: sending ~/.claude.json to a network client": 6,
+    "ask: This would rewrite package.json's version and tag it.": 1,
+    "block: piping remote content straight to a shell": 2
+  },
+  "status": "done",
+  "note": "No .github/workflows/CI exists in this repo -- run-tests.sh (this run's gate) was the only check. Case B (happy-path full build) skips on this box for lack of a locally cached ByteBuddy jar; confirmed passing separately with DC_BYTEBUDDY_JAR pointed at the main checkout's real cache. Filed #46/#47/#48/#49 for deferred findings, reasoning recorded in each.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "slices": "3",
+    "laps": "2",
+    "findings_fixed": "2",
+    "findings_deferred": "4",
+    "breaker_verdict": "defect-found",
+    "reviewer_blocking": "0",
+    "tests_added": "5"
+  }
+}
