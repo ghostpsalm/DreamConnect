@@ -59,7 +59,7 @@ returned, which keeps the reply stream aligned with control commands only.
 | `B <evdev_button> <state>` | pointer button (state 1/0) | — |
 | `W <axis> <steps>` | wheel (axis 0=vert 1=horiz) | — |
 | `K <evdev_keycode> <state>` | key by evdev keycode (modifiers, whitespace, navigation, function, numpad, locks) | — |
-| `KS <keysym> <state>` | key by keysym — character-producing keys, plus the agent's printable-ASCII fallback; guest layout resolves the keycode | — |
+| `KS <keysym> <state>` | key by keysym — character-producing keys; guest layout resolves the keycode | — |
 
 An unrecognised command replies `ERR unknown cmd <X>`. The table above lists the
 commands the agent's Robot path uses; the daemon also serves `WHO`, `WAKELOCK`,
