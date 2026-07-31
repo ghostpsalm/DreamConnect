@@ -1,0 +1,143 @@
+{
+  "recorded_at": "2026-07-31T23:05:22Z",
+  "repo": "host-account-fixes-2",
+  "branch": "install/host-account-fixes-2",
+  "base": "e152847b5c3312cb6f20df74b1ca1141f55f6afd",
+  "window_start": "2026-07-31T23:18:14+10:00",
+  "head": "9e4c2037d585c047837bf0795a5c142b24094fbf",
+  "issue": {
+    "number": 22,
+    "state": "OPEN",
+    "title": "install.sh: enable_autologin's backup (.dreamconnect.bak) is never removed on uninstall",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/22"
+  },
+  "commits": [
+    {
+      "sha": "9e4c2037d585c047837bf0795a5c142b24094fbf",
+      "subject": "Installer: clean up enable_autologin's orphaned backup on uninstall (#22)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "3 files changed, 641 insertions(+), 9 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 264,
+      "output_tokens": 115686,
+      "cache_read_input_tokens": 24589324,
+      "cache_creation_input_tokens": 708130
+    },
+    "subagents": {
+      "input_tokens": 26,
+      "output_tokens": 24800,
+      "cache_read_input_tokens": 612710,
+      "cache_creation_input_tokens": 14969
+    },
+    "subagent_spawns": 13,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 5872,
+        "cache_read_input_tokens": 32551,
+        "total_tokens": 41656,
+        "duration_ms": 125775,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "oracle": {
+        "spawns": 3,
+        "output_tokens": 3814,
+        "cache_read_input_tokens": 206082,
+        "total_tokens": 212200,
+        "duration_ms": 1367469,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "builder": {
+        "spawns": 3,
+        "output_tokens": 3351,
+        "cache_read_input_tokens": 115564,
+        "total_tokens": 122616,
+        "duration_ms": 526613,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "seraph": {
+        "spawns": 3,
+        "output_tokens": 5017,
+        "cache_read_input_tokens": 116762,
+        "total_tokens": 123135,
+        "duration_ms": 349589,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 5059,
+        "cache_read_input_tokens": 108801,
+        "total_tokens": 116671,
+        "duration_ms": 665127,
+        "models": [
+          "claude-opus-5"
+        ]
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 1687,
+        "cache_read_input_tokens": 32950,
+        "total_tokens": 36227,
+        "duration_ms": 191275,
+        "models": [
+          "claude-opus-5"
+        ]
+      }
+    },
+    "usage_blocks": 96,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "0f5e0aba-45a0-4bcb-b7c3-33c80de2ca1f.jsonl",
+        "usage_blocks": 96
+      }
+    ],
+    "agent_wall_clock_ms": 3225848,
+    "first_activity": "2026-07-31T13:18:14.343000+00:00",
+    "last_activity": "2026-07-31T23:05:21.233000+00:00",
+    "notification_tokens": 0,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 26",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "ask: This edits a version number.": 193,
+    "ask: This would publish a GitHub release, which ships to real devices.": 67,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 68,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 64,
+    "block: recursive/forced delete": 362,
+    "block: editing the deployed factory directly": 448,
+    "block: writing to a file the harness owns": 64,
+    "block: touching a secret/credential file": 321,
+    "block: force push (never rewrite published history)": 65,
+    "block: editing an existing migration": 64,
+    "block: hard reset discards work": 65,
+    "block: sending a secret/credential file to a network client": 60,
+    "block: sending ~/.claude.json to a network client": 4,
+    "ask: This would rewrite package.json's version and tag it.": 1,
+    "block: piping remote content straight to a shell": 2
+  },
+  "status": "done",
+  "note": "Breaker's 2-lap budget both found real defects: lap 1 was severe data loss (a real pre-existing GDM AutomaticLogin setting was permanently destroyed by uninstall's new .bak-delete-on-success; fixed by extracting and restoring the backup's original AutomaticLogin*/AutomaticLoginEnable content surgically, not a wholesale file restore) plus a return-code bug; lap 2 found a lower-probability unreadable-backup data-loss path (fail-closed now) plus an unbounded duplicate-restore bug on repeated calls. All fixed and gate re-verified, no lap 3. Reviewer found 3 more non-blocking follow-ups (enable_autologin's cp -a backup write is still non-atomic; a two-[daemon]-header edge case; a now-3x-duplicated regex) -- could NOT file these as GitHub issues, the token lacks issues:write scope (403 on attempt despite read access working); recorded in the commit message and CHECKPOINT archive instead, owner needs to file by hand or grant the scope. Pre-existing unrelated Java boot-test failure (VK_A -> evdev 30) reconfirmed to reproduce on a clean tree, owned by the separate fix-boottests-evdev-keycodes line. No CI workflows configured in this repo; the local gate (run-tests.sh) was the only check.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0"
+  }
+}
