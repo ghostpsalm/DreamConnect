@@ -93,6 +93,7 @@ uninstall() {
   # (the SC drop-in, the dconf revert, the account, the state file) is exactly
   # what a box whose account is already gone still needs reverted.
   if valid_home_dir "$target_home"; then
+    rm -f "$target_home/.config/systemd/user/graphical-session.target.wants/dreamconnect-daemon.service"
     rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service"
   else
     echo "!! skipping the daemon unit removal for $target_name: unusable home directory '$target_home' — continuing"

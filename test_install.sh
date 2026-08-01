@@ -7430,6 +7430,149 @@ test_install_sh_branches_on_the_disable_autologin_result() {
   return 0
 }
 
+# --- issue #28: the enablement symlink --uninstall leaves dangling ------------
+#
+# THE DEFECT — factory/CHECKPOINT.md, issue #28 root cause, verbatim:
+#   "`systemctl --user disable --now dreamconnect-daemon.service` (line 87)
+#    bundles a live stop into the call via `--now`, which needs a reachable bus.
+#    When the host account's user manager isn't up (never initialized, or box
+#    rebooted since last login), the WHOLE invocation errors (not a partial
+#    no-op) and `2>/dev/null || true` swallows it -- so the on-disk enablement
+#    symlink is never removed, dangling after the unit file itself is deleted a
+#    few lines later."
+# And the owner-confirmed shape of the fix, from the same file:
+#   "remove the symlink directly and unconditionally, independent of whether the
+#    live systemctl call succeeded."
+#
+# WHICH SYMLINK — and this is where the written contract is WRONG. Issue #28's
+# suggested-fix text and CHECKPOINT.md's slice row both name
+# `.config/systemd/user/default.target.wants/dreamconnect-daemon.service`. This
+# repo's own unit does not go there. systemd/dreamconnect-daemon.service ends:
+#
+#     [Install]
+#     WantedBy=graphical-session.target
+#
+# and has done since it was first committed (447a2ca, 0fc6606, b0a1faa — every
+# revision in `git log --follow`). `systemctl enable` places the symlink in
+# <WantedBy>.wants/, so the path that actually exists on a box is
+# graphical-session.target.wants/. Measured on this machine, 2026-08-01, systemd
+# 259 (259.6-1.fc44), enabling THIS unit file offline into a scratch root:
+#
+#     $ systemctl --global --root=$R enable dreamconnect-daemon.service
+#     Created symlink '$R/etc/systemd/user/graphical-session.target.wants/
+#       dreamconnect-daemon.service' -> '/etc/systemd/user/dreamconnect-daemon.service'
+#
+# `default.target.wants/dreamconnect-daemon.service` has therefore never existed
+# on any install of this project: an `rm -f` aimed there removes nothing, and
+# issue #28 would stand with the suite green. So the expected directory is read
+# HERE off the unit's own `[Install] WantedBy=` rather than hard-coded — if that
+# line ever changes, the removal in uninstall() must change with it, and this
+# test says so instead of silently pinning a stale literal.
+#
+# THE FOUR BOUNDS, each load-bearing:
+#
+#   * INSIDE uninstall() — between the `uninstall()` definition and its closing
+#     brace. install.sh's install path (line 358) also names this unit; a removal
+#     that lands there is not an uninstall.
+#   * UNCONDITIONAL — not gated on the `systemctl --user disable --now` call at
+#     install.sh:87, whose failure is exactly the case this fix exists for. So:
+#     no `systemctl`/`$?` in the removal's own statement, no `if`/`elif` opened
+#     between the home guard and it, and the preceding code line must not end in
+#     `&&`, `||` or a backslash continuation that would chain it onto the live
+#     call. `if systemctl ... disable ...; then rm ...; fi` is the wrong fix.
+#   * BEFORE the unit-file `rm -f` — the reverse of the install order: the unit
+#     file is written first (install.sh:348-350), then `enable --now` creates the
+#     symlink pointing at it (install.sh:358). Undoing that order leaves the
+#     symlink pointing at a deleted target for the rest of the uninstall.
+#   * INSIDE THE SAME `valid_home_dir "$target_home"` BLOCK (install.sh:95-99),
+#     not a second guard of its own and not at top level. $target_home is passwd
+#     field 6 verbatim; empty (account deleted by hand before --uninstall) it
+#     points the rm at root's own /.config/systemd/user, which is precisely what
+#     install.sh:88-94 already says that guard is there to stop.
+#
+# install.sh cannot be executed here (root, real GDM, real systemd, top-level
+# work on sourcing — see this file's header), so this is a source-text assertion,
+# the technique every call-site test above uses.
+test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file() {
+  local sh unit wants wants_re ustart uend guard symrm unitrm stmt boundary opener prev
+  sh="$HERE/install.sh"
+  unit="$HERE/systemd/dreamconnect-daemon.service"
+  assert_file_exists "$sh" "install.sh is present"
+  assert_file_exists "$unit" "the daemon unit is present"
+  { [ -f "$sh" ] && [ -f "$unit" ]; } || return 0
+
+  wants="$(awk -F'=' '/^[[:space:]]*WantedBy[[:space:]]*=/ {
+             n = split($2, a, /[[:space:]]+/)
+             for (i = 1; i <= n; i++) if (a[i] != "") { print a[i]; exit }
+           }' "$unit")"
+  [ -n "$wants" ] || {
+    fail "enablement symlink: systemd/dreamconnect-daemon.service has no '[Install] WantedBy=' line, so there is no telling which <target>.wants/ directory 'systemctl --user enable' populates — this test cannot say what uninstall() must remove"
+    return 0; }
+  # Dots are the only regex metacharacter in a unit/target name; escape them so
+  # 'graphical-session.target.wants' cannot match 'graphical-sessionXtargetYwants'.
+  # Doubled, because first_code_line passes the pattern through `awk -v`, which
+  # processes escape sequences in the assignment: `\\.` there arrives as `\.`.
+  wants_re="$(printf '%s.wants/dreamconnect-daemon.service' "$wants" | sed 's/\./\\\\./g')"
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "enablement symlink: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "enablement symlink: could not find the end of uninstall() in install.sh"; return 0; }
+
+  # Backslashes doubled for the same `awk -v` reason as $wants_re below. The
+  # trailing 'user/dreamconnect-daemon' cannot match the symlink path, whose
+  # <target>.wants/ component sits between the two.
+  unitrm="$(first_code_line "$sh" 'rm[[:space:]]+-f.*\\.config/systemd/user/dreamconnect-daemon\\.service' "$ustart")"
+  [ -n "$unitrm" ] || {
+    fail "enablement symlink: uninstall() (line $ustart) no longer removes \$target_home/.config/systemd/user/dreamconnect-daemon.service — this test anchors the symlink removal on that neighbour"
+    return 0; }
+
+  guard="$(first_code_line "$sh" 'if[[:space:]]+valid_home_dir' "$ustart")"
+  [ -n "$guard" ] || {
+    fail "enablement symlink: uninstall() (line $ustart) has no 'if valid_home_dir ...' guard around the removals under \$target_home"
+    return 0; }
+
+  symrm="$(first_code_line "$sh" "$wants_re" "$ustart")"
+  [ -n "$symrm" ] && [ "$symrm" -lt "$uend" ] || {
+    fail "enablement symlink: uninstall() (lines $ustart-$uend) never removes \"\$target_home/.config/systemd/user/$wants.wants/dreamconnect-daemon.service\" (found at line ${symrm:-none}). install.sh:87 is 'systemctl --user disable --now ... 2>/dev/null || true': on a host account whose user manager is not up, that whole call errors and the '|| true' swallows it, so the enablement symlink survives while the unit file it points at is deleted at line $unitrm — issue #28. The removal must not depend on that call having worked"
+    return 0; }
+
+  [ "$guard" -lt "$symrm" ] || \
+    fail "enablement symlink: the removal at line $symrm is above the 'if valid_home_dir \$target_home' guard (line $guard) — \$target_home is passwd field 6 verbatim and is empty for an account deleted by hand before --uninstall, which points the rm at root's own /.config/systemd/user (install.sh:88-94)"
+  [ "$symrm" -lt "$unitrm" ] || \
+    fail "enablement symlink: the removal at line $symrm must come BEFORE the unit-file 'rm -f' (line $unitrm) — install writes the unit file first and lets 'enable --now' create the symlink pointing at it, so uninstall reverses that: symlink, then the file it names"
+
+  boundary="$(awk -v a="$guard" -v b="$unitrm" \
+    'NR > a && NR < b && $0 ~ /^[[:space:]]*(fi|else|elif)([[:space:];]|$)/ { print NR; exit }' "$sh")"
+  [ -z "$boundary" ] || \
+    fail "enablement symlink: line $boundary closes or branches the 'if valid_home_dir' block (line $guard) before the unit-file removal (line $unitrm) — both removals belong in that one guard's then-branch, not in a second guard of their own"
+
+  opener="$(awk -v a="$guard" -v b="$symrm" \
+    'NR > a && NR < b && $0 !~ /^[[:space:]]*#/ && $0 ~ /^[[:space:]]*(if|elif)([[:space:]]|$)/ { print NR; exit }' "$sh")"
+  [ -z "$opener" ] || \
+    fail "enablement symlink: line $opener opens a conditional between the home guard (line $guard) and the removal (line $symrm) — the symlink removal must run whether or not the live 'systemctl --user disable --now' at install.sh:87 succeeded, and that failure is the whole of issue #28"
+
+  prev="$(awk -v n="$symrm" 'NR < n && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*#/ { p = $0 } END { print p }' "$sh")"
+  [[ "$prev" =~ (\&\&|\|\||\\)[[:space:]]*$ ]] && \
+    fail "enablement symlink: the code line above the removal (line $symrm) ends in '&&', '||' or a continuation, so the removal is chained onto it rather than run unconditionally. Preceding line was: [$prev]"
+
+  stmt="$(logical_statement_at "$sh" "$symrm")"
+  [ -n "$stmt" ] || { fail "enablement symlink: could not read the statement at install.sh:$symrm"; return 0; }
+
+  [[ "$stmt" =~ (^|[^[:alnum:]_])rm([[:space:]]|$) ]] || \
+    fail "enablement symlink: install.sh:$symrm names $wants.wants/dreamconnect-daemon.service but does not 'rm' it. Statement was: [$stmt]"
+  assert_contains "$stmt" "target_home" \
+    "enablement symlink: install.sh:$symrm must remove the symlink under \$target_home (install.sh:75/82 — the account being uninstalled), the same variable the unit-file removal at line $unitrm uses"
+  assert_contains "$stmt" ".config/systemd/user/" \
+    "enablement symlink: install.sh:$symrm must remove the symlink from the account's own unit directory .config/systemd/user/, where install.sh:347-358 put it"
+  assert_not_contains "$stmt" "systemctl" \
+    "enablement symlink: install.sh:$symrm ties the removal to a systemctl invocation — the case issue #28 is about is precisely the one where systemctl cannot reach the account's bus at all"
+  assert_not_contains "$stmt" '$?' \
+    "enablement symlink: install.sh:$symrm gates the removal on a previous command's exit status — it must be unconditional"
+
+  return 0
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
   test_sourcing_is_side_effect_free \
@@ -7610,7 +7753,8 @@ for CURRENT in \
   test_install_sh_unpushes_dconf_environment_on_uninstall \
   test_install_sh_unpushes_dconf_environment_before_disabling_linger \
   test_install_sh_passes_the_uid_to_uninstall_host_account \
-  test_install_sh_branches_on_the_disable_autologin_result
+  test_install_sh_branches_on_the_disable_autologin_result \
+  test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file
 do
   before=$FAILURES
   "$CURRENT"
