@@ -21,3 +21,4 @@ number would misrepresent cost.
 | 2026-07-31T13:17:24Z | issue-26 | done | #26 | 1 commits | - | 122m | out 167,400 - cache-read 23,691,916 - agents 1,018,890 total across 20 spawns | bounces=0 guard_tests=0 |
 | 2026-07-31T23:05:22Z | issue-22 | done | #22 | 1 commits | - | 587m | out 140,486 - cache-read 25,202,034 - agents 652,505 total across 13 spawns | bounces=0 guard_tests=0 |
 | 2026-08-01T01:11:33Z | issue-25 | done | #25 | 1 commits | - | 125m | out 136,163 - cache-read 34,497,835 - agents 1,176,052 total across 16 spawns | bounces=0 guard_tests=2 |
+| 2026-08-01T02:31:10Z | issue-28 | done | #28 | 1 commits | - | 79m | out 72,912 - cache-read 32,982,713 - agents 336,833 total across 7 spawns | bounces=0 guard_tests=0 |
