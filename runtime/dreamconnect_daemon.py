@@ -92,7 +92,18 @@ class FrameBuffer:
         # bypasses DAC — so owner-only keeps other local users from scraping the
         # screen out of /dev/shm (which is world-traversable). fchmod overrides
         # any inherited umask.
-        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        except PermissionError:
+            # Leftover file from a different uid, still owned by (or in a
+            # directory owned by) this uid: O_CREAT is a no-op on an
+            # existing path, so we'd hit this same error forever. Unlink
+            # and retry once. A file left by a genuinely different uid
+            # under /dev/shm's sticky bit can't be reclaimed this way —
+            # see install.sh, which cleans that case up at migration time
+            # while it still holds root.
+            os.unlink(self.path)
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
         os.fchmod(self.fd, 0o600)
         os.ftruncate(self.fd, size)
         self.mm = mmap.mmap(self.fd, size)

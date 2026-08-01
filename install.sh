@@ -329,6 +329,12 @@ loginctl enable-linger "$USER_NAME"
 # --user calls below need its bus to exist first (issue #24).
 wait_for_user_bus "$USER_UID" \
   || die "the user bus for $USER_NAME (uid $USER_UID) never came up after 'loginctl enable-linger'; check 'systemctl status user@$USER_UID.service'"
+# A prior install identity (e.g. a migration off/onto a
+# DREAMCONNECT_HOST_ACCOUNT, issue #35) can leave the frame file under
+# /dev/shm owned by a uid this daemon never runs as; the sticky bit means an
+# unprivileged daemon can never clear that itself (issue #27). Reclaim it here
+# while still root, before the daemon's own O_CREAT ever runs.
+reclaim_stale_shm_frame "/dev/shm/dreamconnect.frame" "$USER_UID"
 "${RUN_USER[@]}" systemctl --user daemon-reload
 "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-daemon.service
 

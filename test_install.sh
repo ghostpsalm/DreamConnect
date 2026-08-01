@@ -5129,6 +5129,228 @@ test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up() {
     "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
 }
 
+# --- new slice: install-time cleanup of a stale, foreign-owned shm frame ----
+#
+# Issue #27 re-scope. runtime/dreamconnect_daemon.py's FrameBuffer.ensure()
+# retries os.open() once by unlinking a leftover /dev/shm/dreamconnect.frame,
+# but a breaker found that under /dev/shm's sticky bit (mode 1777) a file
+# genuinely owned by a DIFFERENT uid (e.g. left behind across exactly the
+# DREAMCONNECT_HOST_ACCOUNT migration issue #35 made reversible) can't be
+# unlinked by an unprivileged daemon at all: sticky-bit unlink demands the
+# caller own the file, own the directory, or be root (fs/namei.c may_delete).
+# Owner decision: the daemon does not attempt privilege escalation for this
+# (see runtime/test_daemon.py::TestFrameBufferEnsureStickyBitUnlink, which
+# now asserts ensure() correctly raises PermissionError rather than papering
+# over it). The real fix belongs here instead: install.sh already runs as
+# root (line 44, `[ "$(id -u)" -eq 0 ] || die`) during exactly this
+# migration, so it can unlink the stale file trivially before the daemon
+# ever starts.
+#
+# reclaim_stale_shm_frame <path> <target_uid> — named to match this file's
+# verb_noun convention (ensure_host_account, configure_no_idle_lock,
+# wait_for_user_bus). target_uid mirrors the local variable install.sh's own
+# uninstall() already uses for the same idea (target_uid="$HOST_UID" / "$(id
+# -u "$target_name")") — the uid the daemon is about to run as, resolved at
+# install.sh:230 (`read -r USER_NAME USER_UID USER_HOME _ <<<"$IDENTITY"`)
+# and available at the call site around install.sh:337. The call-site wiring
+# itself is a follow-up slice, the same way
+# test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call
+# pins wait_for_user_bus's call site above once that function exists.
+#
+# A second breaker pass, on the single-argument version this slice originally
+# shipped (`[ -e "$path" ] && run rm -f "$path"`, unconditional), found it
+# deletes the file on EVERY install.sh run, not only a uid migration — even
+# when the current daemon (same uid) is already live and the file legitimate.
+# install.sh restarts the SC unit unconditionally right after (~line 349), so
+# SC then opens a shm file that no longer exists and shows black forever,
+# silently. Issue #27's own title says what actually matters: "stale
+# /dev/shm frame owned by a DIFFERENT uid" — not "any file present". So the
+# contract is an ownership comparison, not existence alone:
+#
+#   * path does not exist                  -> no-op, exit 0.
+#   * path exists, owner uid != target_uid -> unlink it, exit 0.
+#   * path exists, owner uid == target_uid -> leave it untouched, exit 0.
+#
+# The third case must still exit 0: install.sh calls this bare — no `|| true`,
+# no `|| die` — under `set -euo pipefail` (install.sh:34), so a non-zero exit
+# from the ordinary "leave it alone" outcome would abort the whole install.
+#
+# Both cases below are reproduced against the actual hard case with the same
+# technique runtime/test_daemon.py's TestFrameBufferEnsureStickyBitUnlink
+# already uses in this repo (a synthetic directory, not /dev/shm itself,
+# chmod+chowned via `sudo -n` to match /dev/shm's real mode/ownership — 1777,
+# root:root) rather than the DC_DRY_RUN/DC_*_DIR fixture style the rest of
+# this suite uses, because the whole point under test is ownership the
+# sticky bit enforces. The function itself is invoked under `sudo -n` too in
+# BOTH cases: install.sh's call site always runs as root (line 44), and that
+# matters for the second case as much as the first — per
+# TestFrameBufferEnsureStickyBitUnlink's own docstring, once the DIRECTORY is
+# root-owned, root may unlink ANY file inside it regardless of that file's
+# own owner, so an unprivileged invocation of the "leave it alone" case would
+# prove nothing about whether the code actually compares ownership; only a
+# root invocation running unconditional code would still get it wrong.
+require_reclaim_stale_shm_frame() {  # label
+  declare -F reclaim_stale_shm_frame >/dev/null && return 0
+  fail "$1: reclaim_stale_shm_frame() is not defined"
+  return 1
+}
+
+test_reclaim_stale_shm_frame_unlinks_a_root_owned_file_under_a_sticky_bit_dir() {
+  local dir path target_uid errf rc
+  require_reclaim_stale_shm_frame "sticky-bit foreign-owned frame" || return 0
+
+  if ! sudo -n true 2>/dev/null; then
+    skip "reclaim_stale_shm_frame: requires passwordless sudo to create a root-owned file under a sticky-bit directory (issue #27 reproduction)"
+    return 0
+  fi
+
+  dir="$TMP/shm-stale-frame"; mkdir -p "$dir"
+  path="$dir/dreamconnect.frame"
+  chmod 1777 "$dir"
+  sudo -n chown root:root "$dir" || { fail "precondition: could not chown fixture dir to root:root"; return 0; }
+  sudo -n touch "$path" || { fail "precondition: could not create fixture file"; return 0; }
+  sudo -n chown root:root "$path" || { fail "precondition: could not chown fixture file to root:root"; return 0; }
+  sudo -n chmod 600 "$path" || { fail "precondition: could not chmod fixture file"; return 0; }
+
+  # The fixture really does reproduce the hard case, not just an ordinary
+  # tmp file — same guarantee runtime/test_daemon.py's setUp gets implicitly
+  # from `check=True` on each sudo call.
+  assert_eq "$(stat -c '%u' "$path")" "0" "precondition: fixture file is root-owned"
+  assert_eq "$(stat -c '%u' "$dir")" "0" "precondition: fixture directory is root-owned"
+  assert_eq "$(stat -c '%a' "$dir")" "1777" "precondition: fixture directory has the sticky bit"
+
+  # A target uid genuinely different from the fixture's owner (0/root) — the
+  # invoking test user, never root here. This is the issue #27 migration
+  # shape itself: a file left behind by the identity install.sh is moving
+  # AWAY from.
+  target_uid="$(id -u)"
+
+  errf="$TMP/reclaim.err"; : > "$errf"
+  sudo -n bash -c 'set -euo pipefail; . "$1"; reclaim_stale_shm_frame "$2" "$3"' \
+    _ "$LIB" "$path" "$target_uid" 2>"$errf" >/dev/null
+  rc=$?
+
+  # Reclaim the fixture back to this uid regardless of outcome, BEFORE
+  # asserting: a partially-completed (or wholly failed) reclaim can leave the
+  # directory root-owned, which this suite's own unprivileged `rm -rf "$TMP"`
+  # (the trap at the top of this file) can never remove — same reasoning as
+  # TestFrameBufferEnsureStickyBitUnlink.tearDown in runtime/test_daemon.py.
+  sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
+
+  assert_eq "$rc" "0" \
+    "reclaim_stale_shm_frame: exits 0 against a root-owned file under a sticky-bit dir, target uid $target_uid ($(cat "$errf" 2>/dev/null))"
+  assert_file_absent "$path" \
+    "reclaim_stale_shm_frame: unlinks a file owned by a DIFFERENT uid (0) than the target ($target_uid) so the daemon's own O_CREAT succeeds fresh"
+}
+
+# The critical new case — issue #27's own re-scope, and what the breaker
+# found missing from slice 3b's unconditional version: a file ALREADY owned
+# by the target uid, the normal/live/same-identity case that is true on
+# every ordinary re-run and not only a migration, must be left alone.
+# Running the unconditional implementation against this exact fixture is the
+# regression itself: it deletes a live, correctly-owned frame out from under
+# a running daemon on every install.sh run.
+test_reclaim_stale_shm_frame_leaves_a_file_already_owned_by_the_target_uid_untouched() {
+  local dir path target_uid errf rc
+  require_reclaim_stale_shm_frame "sticky-bit same-uid frame" || return 0
+
+  if ! sudo -n true 2>/dev/null; then
+    skip "reclaim_stale_shm_frame: requires passwordless sudo to create a root-owned sticky-bit directory (issue #27 reproduction)"
+    return 0
+  fi
+
+  dir="$TMP/shm-live-frame"; mkdir -p "$dir"
+  path="$dir/dreamconnect.frame"
+  target_uid="$(id -u)"
+  # Created as THIS test's own uid, deliberately BEFORE the directory below
+  # is chowned away — the file's real owner is the invoking user, i.e.
+  # target_uid: the "already correctly owned" case.
+  : > "$path"
+  chmod 1777 "$dir"
+  # Only the DIRECTORY moves to root:root, matching /dev/shm's real
+  # ownership; the file inside keeps its own owner (target_uid). Required for
+  # the fixture to mean anything (see the block comment above this test): a
+  # same-uid-owned directory would let this test's own uid unlink the file
+  # regardless of what the code under test decided, proving nothing.
+  sudo -n chown root:root "$dir" || { fail "precondition: could not chown fixture dir to root:root"; return 0; }
+
+  assert_eq "$(stat -c '%u' "$path")" "$target_uid" "precondition: fixture file is owned by the target uid"
+  assert_eq "$(stat -c '%u' "$dir")" "0" "precondition: fixture directory is root-owned"
+  assert_eq "$(stat -c '%a' "$dir")" "1777" "precondition: fixture directory has the sticky bit"
+
+  errf="$TMP/reclaim-same-uid.err"; : > "$errf"
+  # Invoked as ROOT, exactly like install.sh's own call site (line 44) — and
+  # exactly why this fixture is decisive rather than ambiguous: root owns the
+  # directory, so `rm -f` on this file would ALWAYS succeed if the code
+  # attempted it (may_delete grants the directory owner unlink regardless of
+  # the file's own owner). There is no permission-related way for the file to
+  # "coincidentally" survive; if it is gone afterward, the code chose to
+  # unlink it.
+  sudo -n bash -c 'set -euo pipefail; . "$1"; reclaim_stale_shm_frame "$2" "$3"' \
+    _ "$LIB" "$path" "$target_uid" 2>"$errf" >/dev/null
+  rc=$?
+
+  sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
+
+  assert_eq "$rc" "0" \
+    "reclaim_stale_shm_frame: exits 0 when the file already belongs to the target uid $target_uid ($(cat "$errf" 2>/dev/null))"
+  assert_file_exists "$path" \
+    "reclaim_stale_shm_frame: leaves a file already owned by the target uid ($target_uid) untouched — root's rm would always succeed here, so 'gone' can only mean the code unlinked it regardless of ownership"
+}
+
+# (f) The call site's ORDERING relative to the two restarts that actually
+# close issue #27's residual gap — a reviewer flagged that nothing pins this
+# before ship, and the comment introducing reclaim_stale_shm_frame above
+# explicitly deferred it: "a follow-up slice, the same way
+# test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call
+# pins wait_for_user_bus's call site above once that function exists." This
+# is that slice.
+#
+# reclaim_stale_shm_frame only clears the stale FILE; an already-running
+# ScreenConnect JVM can still hold an mmap'd fd to the old inode until
+# something makes it reopen the path. install.sh's unconditional
+# `systemctl restart "$SC_UNIT"` (~line 349) is what forces that reopen
+# against the now-correct file, so reclaim must run strictly before it. A
+# reorder, or making the SC restart conditional, would silently reopen the
+# exact "stale mmap in an already-running JVM" gap issue #27 fixes, with
+# nothing to catch it.
+#
+# The reclaim call site's own comment (install.sh:335-336, "before the
+# daemon's own O_CREAT ever runs") independently documents the same
+# requirement against the daemon's own
+# `systemctl --user enable --now dreamconnect-daemon.service` (~line 339):
+# FrameBuffer.ensure() cannot clear a foreign-uid file itself past the
+# sticky bit (see the sticky-bit tests above) and now correctly raises
+# PermissionError instead of papering over it, so a daemon start ahead of
+# reclaim fails the install outright — a distinct, also-worth-pinning
+# failure mode from the SC-restart one above.
+test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable() {
+  local sh reclaim daemon_enable sc_restart
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  reclaim="$(first_code_line "$sh" 'reclaim_stale_shm_frame "/dev/shm/dreamconnect.frame"')"
+  [ -n "$reclaim" ] || {
+    fail "call site: no reclaim_stale_shm_frame call in install.sh"
+    return 0; }
+
+  daemon_enable="$(first_code_line "$sh" 'systemctl --user enable --now dreamconnect-daemon.service' "$reclaim")"
+  [ -n "$daemon_enable" ] || {
+    fail "call site: no 'systemctl --user enable --now dreamconnect-daemon.service' line after the reclaim call"
+    return 0; }
+
+  sc_restart="$(first_code_line "$sh" 'systemctl restart "[$]SC_UNIT"' "$reclaim")"
+  [ -n "$sc_restart" ] || {
+    fail "call site: no unconditional systemctl restart \"\$SC_UNIT\" line after the reclaim call — issue #27's residual-gap fix (forcing SC to reopen the shm file post-reclaim) appears missing or made conditional"
+    return 0; }
+
+  [ "$reclaim" -lt "$sc_restart" ] || \
+    fail "call site: reclaim_stale_shm_frame (line $reclaim) must come BEFORE systemctl restart \"\$SC_UNIT\" (line $sc_restart) — the SC restart is what forces its already-running JVM to reopen the shm file; reclaiming after it leaves that JVM mmap'd to the stale file, reopening issue #27's residual gap"
+  [ "$reclaim" -lt "$daemon_enable" ] || \
+    fail "call site: reclaim_stale_shm_frame (line $reclaim) must come BEFORE the daemon's own enable --now (line $daemon_enable) — the daemon's O_CREAT must never race a stale, foreign-owned frame it cannot clear itself past the sticky bit"
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
   test_sourcing_is_side_effect_free \
@@ -5268,7 +5490,10 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
-  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up
+  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
+  test_reclaim_stale_shm_frame_unlinks_a_root_owned_file_under_a_sticky_bit_dir \
+  test_reclaim_stale_shm_frame_leaves_a_file_already_owned_by_the_target_uid_untouched \
+  test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable
 do
   before=$FAILURES
   "$CURRENT"

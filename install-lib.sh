@@ -871,3 +871,21 @@ uninstall_host_account() {  # name protected_user
   # reported to the caller as a completed one. No `return 0` after it.
   run userdel -r "$name"
 }
+
+# --- stale shm frame (issue #27) ---------------------------------------------
+# /dev/shm carries the sticky bit (1777), so unlinking a file there requires
+# owning the file, owning the directory, or being root — no other DAC path
+# exists (fs/namei.c may_delete). A prior install identity (e.g. a migration
+# from a per-user install to a DREAMCONNECT_HOST_ACCOUNT one, issue #35) can
+# leave the frame file owned by a uid the daemon never runs as, and an
+# unprivileged daemon then can never clear it itself; the owner decided the
+# daemon must not attempt privilege escalation for this at runtime. install.sh
+# already runs as root (line 44), so it reclaims the file here, before the
+# daemon's systemd unit (re)starts, but only when it's owned by some other
+# uid -- a file already owned by target_uid is live and must be left alone.
+reclaim_stale_shm_frame() {  # path target_uid
+  local path="$1" target_uid="$2"
+  [ -e "$path" ] || return 0
+  [ "$(stat -c '%u' "$path")" != "$target_uid" ] && run rm -f "$path"
+  return 0
+}
