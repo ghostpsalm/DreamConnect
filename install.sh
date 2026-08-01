@@ -169,7 +169,7 @@ uninstall() {
       # state agreement, exact GECOS marker) still prove it's ours.
       local protect_arg="$PROTECTED_USER"
       [ "$protect_arg" != "$HOST_ACCOUNT" ] || protect_arg=""
-      if uninstall_host_account "$HOST_ACCOUNT" "$protect_arg"; then
+      if uninstall_host_account "$HOST_ACCOUNT" "$protect_arg" "$target_uid"; then
         echo ">> removed display-host account $HOST_ACCOUNT"
       else
         echo "!! could not remove display-host account $HOST_ACCOUNT — left in place, check manually"
