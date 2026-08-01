@@ -1,0 +1,143 @@
+{
+  "recorded_at": "2026-08-01T06:15:05Z",
+  "repo": "shm-frame-uid",
+  "branch": "runtime/shm-frame-uid",
+  "base": "fd474176ac2f707c6fdae00c24e1531f5f1c6b3a",
+  "window_start": "2026-07-31T21:21:10+10:00",
+  "head": "8a9860c42d69969dae3d6b38322dc62af762e63f",
+  "issue": {
+    "number": 27,
+    "state": "OPEN",
+    "title": "dreamconnect_daemon: stale /dev/shm frame owned by a different uid blocks capture (PermissionError, no unlink)",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/27"
+  },
+  "commits": [
+    {
+      "sha": "8a9860c42d69969dae3d6b38322dc62af762e63f",
+      "subject": "Daemon: reclaim a stale shm frame left by a different uid (#27)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "5 files changed, 406 insertions(+), 2 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 256,
+      "output_tokens": 124606,
+      "cache_read_input_tokens": 12113926,
+      "cache_creation_input_tokens": 668461
+    },
+    "subagents": {
+      "input_tokens": 34,
+      "output_tokens": 31575,
+      "cache_read_input_tokens": 1004807,
+      "cache_creation_input_tokens": 16567
+    },
+    "subagent_spawns": 17,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 2407,
+        "cache_read_input_tokens": 43650,
+        "total_tokens": 46555,
+        "duration_ms": 166121,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "oracle": {
+        "spawns": 6,
+        "output_tokens": 16036,
+        "cache_read_input_tokens": 534186,
+        "total_tokens": 557285,
+        "duration_ms": 2687680,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "builder": {
+        "spawns": 4,
+        "output_tokens": 3167,
+        "cache_read_input_tokens": 142279,
+        "total_tokens": 148993,
+        "duration_ms": 583832,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "seraph": {
+        "spawns": 3,
+        "output_tokens": 5286,
+        "cache_read_input_tokens": 114372,
+        "total_tokens": 121838,
+        "duration_ms": 336982,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 3494,
+        "cache_read_input_tokens": 123182,
+        "total_tokens": 129698,
+        "duration_ms": 460850,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 1185,
+        "cache_read_input_tokens": 47138,
+        "total_tokens": 48614,
+        "duration_ms": 194762,
+        "models": [
+          "claude-fable-5"
+        ]
+      }
+    },
+    "usage_blocks": 130,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "473b1c61-4bf3-4656-a27a-680ec0c962ad.jsonl",
+        "usage_blocks": 130
+      }
+    ],
+    "agent_wall_clock_ms": 4430227,
+    "first_activity": "2026-08-01T01:57:44.469000+00:00",
+    "last_activity": "2026-08-01T06:14:56.926000+00:00",
+    "notification_tokens": 0,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 27",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 1486,
+    "ask: This edits a version number.": 793,
+    "ask: This would publish a GitHub release, which ships to real devices.": 266,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 268,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 264,
+    "block: editing the deployed factory directly": 1827,
+    "block: writing to a file the harness owns": 261,
+    "block: touching a secret/credential file": 1314,
+    "block: force push (never rewrite published history)": 262,
+    "block: editing an existing migration": 261,
+    "block: hard reset discards work": 270,
+    "block: sending a secret/credential file to a network client": 240,
+    "block: sending ~/.claude.json to a network client": 16,
+    "ask: This would rewrite package.json's version and tag it.": 1,
+    "block: piping remote content straight to a shell": 2
+  },
+  "status": "done",
+  "note": "Breaker found 2 real defects across 2 laps (both fixed, re-verified): sticky-bit unlink EPERM, and an unconditional-delete regression in the install.sh fix. A rejected daemon-side sudo fallback was tried and reverted before the final install.sh-side design. Not verified: no live SC/systemd/GDM environment available, so install.sh's actual runtime flow was checked by code trace + isolated repro, not a full end-to-end install run.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "2"
+  }
+}
