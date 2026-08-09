@@ -5495,8 +5495,272 @@ test_publisher_fails_when_no_display_ever_appears() {
     "no env file may be left behind when there is no display"
 }
 
+# --- slice 11: sudo for the display-host account ------------------------------
+# The host account is created with password '*' (no password can ever match), so
+# any sudo rule for it MUST be NOPASSWD or it is inert — sudo would prompt into a
+# session with no tty and hang. And a malformed file in /etc/sudoers.d can break
+# sudo for everyone on the box, so nothing is installed until visudo has
+# validated it.
+
+stage_sudoers() {  # dir
+  mkdir -p "$1/sudoers.d" "$1/bin"
+  printf 'root ALL=(ALL) ALL\n#includedir /etc/sudoers.d\n' > "$1/sudoers"
+  # A visudo stub: accepts anything containing "ALL", rejects the rest. Enough
+  # to prove the call is wired and its verdict is honoured.
+  cat > "$1/bin/visudo" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in -cf) shift; f="$1" ;; -c|-q|-s) : ;; *) f="$1" ;; esac; shift; done
+grep -q ALL "$f" || { echo "parse error" >&2; exit 1; }
+EOF
+  chmod +x "$1/bin/visudo"
+}
+
+grant_in() {  # dir name -> sets SUDO_OUT / SUDO_RC
+  SUDO_OUT="$(PATH="$1/bin:$PATH" DC_SUDOERS_DIR="$1/sudoers.d" DC_SUDOERS_MAIN="$1/sudoers" \
+              grant_host_account_sudo "$2" 2>&1)"
+  SUDO_RC=$?
+}
+
+test_library_defines_the_host_account_sudo_helpers() {
+  local fn
+  for fn in grant_host_account_sudo revoke_host_account_sudo; do
+    declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
+  done
+}
+
+test_grant_host_account_sudo_writes_a_nopasswd_rule() {
+  local d="$TMP/sudo-grant" body
+  stage_sudoers "$d"
+  grant_in "$d" "screenconnect"
+  assert_eq "$SUDO_RC" "0" "granting sudo succeeds"
+  assert_file_exists "$d/sudoers.d/dreamconnect-screenconnect" "the sudoers drop-in is written"
+  body="$(cat "$d/sudoers.d/dreamconnect-screenconnect" 2>/dev/null)"
+  assert_contains "$body" "screenconnect" "the rule names the account"
+  # Without NOPASSWD the rule is useless: the account has no password to give.
+  assert_contains "$body" "NOPASSWD" \
+    "the rule must be NOPASSWD — the host account's password is '*' and can never be entered"
+}
+
+test_grant_host_account_sudo_file_is_not_group_or_world_writable() {
+  local d="$TMP/sudo-perms" perms
+  stage_sudoers "$d"
+  grant_in "$d" "screenconnect"
+  perms="$(stat -c '%a' "$d/sudoers.d/dreamconnect-screenconnect" 2>/dev/null)"
+  [ -n "$perms" ] || { fail "no sudoers file to check"; return 0; }
+  # sudo itself refuses to read a drop-in that others can write; 0440 is the
+  # convention. Anything writable by group/other is a local root escalation.
+  assert_eq "$perms" "440" "the sudoers drop-in must be mode 0440"
+}
+
+# The load-bearing safety property: a file that visudo rejects must never land in
+# sudoers.d, because sudo refuses to run at all when any drop-in fails to parse.
+test_grant_host_account_sudo_installs_nothing_when_visudo_rejects_it() {
+  local d="$TMP/sudo-invalid"
+  stage_sudoers "$d"
+  printf '#!/bin/sh\necho "parse error" >&2\nexit 1\n' > "$d/bin/visudo"
+  chmod +x "$d/bin/visudo"
+  grant_in "$d" "screenconnect"
+  [ "$SUDO_RC" -ne 0 ] || fail "a visudo rejection must make the grant fail"
+  assert_file_absent "$d/sudoers.d/dreamconnect-screenconnect" \
+    "a rule visudo rejected must not be installed — an unparseable drop-in breaks sudo for every user on the box"
+}
+
+test_grant_host_account_sudo_refuses_a_name_that_escapes_sudoers_d() {
+  local d="$TMP/sudo-traverse"
+  stage_sudoers "$d"
+  grant_in "$d" "../sudoers"
+  [ "$SUDO_RC" -ne 0 ] || fail "a traversing account name must be refused"
+  # The staged main file must still be the one we wrote, not overwritten.
+  assert_contains "$(cat "$d/sudoers" 2>/dev/null)" "includedir" \
+    "a traversing name must not overwrite /etc/sudoers itself"
+}
+
+test_grant_host_account_sudo_warns_when_sudoers_d_is_not_included() {
+  local d="$TMP/sudo-noinclude"
+  stage_sudoers "$d"
+  printf 'root ALL=(ALL) ALL\n' > "$d/sudoers"     # no includedir directive
+  grant_in "$d" "screenconnect"
+  # Non-fatal, but it must say so: the drop-in would be silently inert.
+  assert_contains "$SUDO_OUT" "includedir" \
+    "grant must warn when /etc/sudoers does not include sudoers.d — the rule would do nothing"
+}
+
+test_revoke_host_account_sudo_removes_the_rule_and_is_idempotent() {
+  local d="$TMP/sudo-revoke" rc
+  stage_sudoers "$d"
+  grant_in "$d" "screenconnect"
+  assert_file_exists "$d/sudoers.d/dreamconnect-screenconnect" "rule present before revoke"
+  DC_SUDOERS_DIR="$d/sudoers.d" revoke_host_account_sudo "screenconnect" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "revoke succeeds"
+  assert_file_absent "$d/sudoers.d/dreamconnect-screenconnect" "the rule is removed"
+  DC_SUDOERS_DIR="$d/sudoers.d" revoke_host_account_sudo "screenconnect" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "revoking an absent rule is not an error (uninstall runs it unconditionally)"
+}
+
+test_revoke_host_account_sudo_refuses_a_traversing_name() {
+  local d="$TMP/sudo-revoke-traverse" rc
+  stage_sudoers "$d"
+  printf 'keep me\n' > "$d/sudoers.d/other"
+  DC_SUDOERS_DIR="$d/sudoers.d" revoke_host_account_sudo "../sudoers" >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "revoke must refuse a traversing name"
+  assert_file_exists "$d/sudoers" "revoke must not delete /etc/sudoers"
+}
+
+# Uninstall must revoke unconditionally, the same way it removes the daemon unit:
+# the state file does not record whether sudo was granted.
+test_install_sh_revokes_host_account_sudo_on_uninstall() {
+  local sh
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  grep -q "revoke_host_account_sudo" "$sh" || \
+    fail "install.sh never calls revoke_host_account_sudo — an uninstalled box would keep a passwordless root rule"
+}
+
+# --- slice 11b: the shm frame path is per-account -----------------------------
+# /dev/shm is sticky, so a frame left by an install under a different account
+# cannot be unlinked by the new one — every write fails with EACCES and the
+# operator sees a desktop frozen on the old install's last frame (#27). Hit for
+# real when switching a box to a display-host account. Scoping the path by uid
+# makes the collision impossible; the daemon's reclaim is the backstop.
+
+test_daemon_unit_and_agent_dropin_agree_on_the_shm_path() {
+  local unit conf sh
+  unit="$HERE/systemd/dreamconnect-daemon.service"
+  conf="$HERE/systemd/dreamconnect-agent.conf"
+  sh="$HERE/install.sh"
+  [ -f "$unit" ] && [ -f "$conf" ] && [ -f "$sh" ] || { fail "unit templates missing"; return 0; }
+  # The agent reads the file the daemon writes. If the two templates name it
+  # differently the bridge shows nothing at all, so they must share one
+  # placeholder that install.sh substitutes once.
+  grep -q '@SHM_PATH@' "$conf" || \
+    fail "the agent drop-in must take the shm path from @SHM_PATH@, not hardcode one"
+  grep -q '@SHM_PATH@' "$unit" || \
+    fail "the daemon unit must take the shm path from @SHM_PATH@, not rely on the daemon default"
+  grep -q 'SHM_PATH=' "$sh" || fail "install.sh never defines SHM_PATH"
+}
+
+# A re-run must apply the unit it just wrote. `enable --now` is a no-op against a
+# running unit, so an upgrade would leave the previous ExecStart in memory — the
+# exact way the uid-scoped shm path failed to take effect the first time.
+test_install_sh_restarts_the_units_so_a_rerun_applies_changes() {
+  local sh
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  grep -qE 'systemctl --user restart dreamconnect-(daemon|backstage)\.service' "$sh" || \
+    fail "install.sh only enables its units; a re-run would keep running the previous ExecStart"
+  grep -qE 'systemctl --user enable --now dreamconnect-' "$sh" && \
+    fail "install.sh still uses 'enable --now', which does not apply changes to an already-running unit"
+  return 0
+}
+
+test_install_sh_removes_the_shm_frame_on_uninstall() {
+  local sh body
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  # Scoped to the uninstall function so an install-time cleanup line can't
+  # satisfy this by accident.
+  body="$(awk '/^uninstall\(\) \{/,/^\}/' "$sh")"
+  assert_contains "$body" "/dev/shm/dreamconnect.frame" \
+    "uninstall must remove the shm frame — a survivor blocks the next install under a different account (#27)"
+}
+
+test_install_sh_scopes_the_shm_path_by_uid() {
+  local sh line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  line="$(grep -m1 '^SHM_PATH=' "$sh")"
+  [ -n "$line" ] || { fail "install.sh does not define SHM_PATH"; return 0; }
+  assert_contains "$line" "USER_UID" \
+    "the shm path must be scoped by uid, or two accounts collide on one sticky /dev/shm file (#27)"
+}
+
+# --- slice 12: detect_user must never pick the display manager ----------------
+# The GDM greeter runs a real, active, Wayland logind session (uid 60578,
+# gnome-shell --mode=gdm), so a filter of "active AND graphical" matches it. On a
+# box parked at the greeter — which is every backstage box, permanently, by
+# design — detect_user then returns "gdm-greeter", and a classic-mode install
+# targets the greeter's account while an uninstall silently reverts nothing.
+
+stage_loginctl() {  # dir <<sessions
+  mkdir -p "$1/bin"
+  cat > "$1/bin/loginctl" <<'EOF'
+#!/bin/sh
+# Fixture: sessions live in $FIXTURE/sessions, one "sid uid name class type active" per line.
+case "$1" in
+  list-sessions) awk '{print $1, $2, $3, "seat0"}' "$FIXTURE/sessions" ;;
+  show-session)
+    sid="$2"; prop=""
+    for a in "$@"; do case "$a" in -p) prop=NEXT ;; *) [ "$prop" = NEXT ] && { prop="$a"; break; } ;; esac; done
+    awk -v s="$sid" -v p="$prop" '$1==s {
+      if (p=="Class") print $4; else if (p=="Type") print $5; else if (p=="Active") print $6 }' "$FIXTURE/sessions" ;;
+esac
+EOF
+  chmod +x "$1/bin/loginctl"
+}
+
+detect_user_with() {  # dir -> sets DU_OUT / DU_RC
+  DU_OUT="$(PATH="$1/bin:$PATH" FIXTURE="$1" bash -c '
+      . "$1"; unset DREAMCONNECT_USER; detect_user' _ "$LIB" 2>/dev/null)"
+  DU_RC=$?
+}
+
+test_detect_user_skips_the_greeter_and_picks_the_human() {
+  local d="$TMP/detect-both"
+  stage_loginctl "$d"
+  # The greeter is listed first, exactly as loginctl orders it on a box where
+  # the greeter started before anyone logged in.
+  printf 'c1 60578 gdm-greeter greeter wayland yes\n5 1000 kogies user wayland yes\n' > "$d/sessions"
+  detect_user_with "$d"
+  assert_eq "$DU_OUT" "kogies" \
+    "detect_user must skip the greeter session and return the human, even when the greeter is listed first"
+}
+
+test_detect_user_refuses_a_box_with_only_a_greeter() {
+  local d="$TMP/detect-greeter-only"
+  stage_loginctl "$d"
+  printf 'c1 60578 gdm-greeter greeter wayland yes\n' > "$d/sessions"
+  detect_user_with "$d"
+  [ "$DU_RC" -ne 0 ] || \
+    fail "a box sitting at the greeter has no desktop user; detect_user must fail, not return [$DU_OUT]"
+  assert_not_contains "$DU_OUT" "gdm" \
+    "detect_user must never hand back a display-manager account"
+}
+
+test_detect_user_still_finds_an_ordinary_session() {
+  local d="$TMP/detect-plain"
+  stage_loginctl "$d"
+  printf '3 1000 kogies user wayland yes\n' > "$d/sessions"
+  detect_user_with "$d"
+  assert_eq "$DU_OUT" "kogies" "an ordinary graphical session is still detected"
+}
+
+test_detect_user_ignores_inactive_and_non_graphical_sessions() {
+  local d="$TMP/detect-noise"
+  stage_loginctl "$d"
+  printf '2 1000 kogies user tty yes\n4 1000 kogies user wayland no\n7 1000 realuser user x11 yes\n' > "$d/sessions"
+  detect_user_with "$d"
+  assert_eq "$DU_OUT" "realuser" "only the active graphical session counts"
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
+  test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
+  test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
+  test_install_sh_removes_the_shm_frame_on_uninstall \
+  test_install_sh_scopes_the_shm_path_by_uid \
+  test_detect_user_skips_the_greeter_and_picks_the_human \
+  test_detect_user_refuses_a_box_with_only_a_greeter \
+  test_detect_user_still_finds_an_ordinary_session \
+  test_detect_user_ignores_inactive_and_non_graphical_sessions \
+  test_library_defines_the_host_account_sudo_helpers \
+  test_grant_host_account_sudo_writes_a_nopasswd_rule \
+  test_grant_host_account_sudo_file_is_not_group_or_world_writable \
+  test_grant_host_account_sudo_installs_nothing_when_visudo_rejects_it \
+  test_grant_host_account_sudo_refuses_a_name_that_escapes_sudoers_d \
+  test_grant_host_account_sudo_warns_when_sudoers_d_is_not_included \
+  test_revoke_host_account_sudo_removes_the_rule_and_is_idempotent \
+  test_revoke_host_account_sudo_refuses_a_traversing_name \
+  test_install_sh_revokes_host_account_sudo_on_uninstall \
   test_publisher_writes_the_display_env_file \
   test_publisher_publishes_a_stable_xauthority_path \
   test_publisher_keeps_the_published_xauthority_owner_only \

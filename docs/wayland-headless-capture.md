@@ -163,6 +163,14 @@ Three things the spike could not have shown, all found while wiring it in:
 - **Whether the headless shell idle-locks is untested.** If it does, it self-destructs the same way a
   locked session does (Mutter closes the RemoteDesktop session and refuses to recreate it), so the
   same `configure_no_idle_lock` treatment the display-host account gets is probably needed.
-- **Both modes at once is untested.** If a human logs in on a box running backstage, two shells export
-  `DISPLAY`/`XAUTHORITY` into the same user environment and the env-file snapshot could pick the
-  wrong one. A dedicated `DREAMCONNECT_HOST_ACCOUNT` avoids the overlap entirely.
+- **Both modes at once is untested.** If a human logs in on a box running backstage *in their own
+  account*, two shells export `DISPLAY`/`XAUTHORITY` into the same user environment and the env-file
+  snapshot could pick the wrong one. `DREAMCONNECT_BACKSTAGE=1` + `DREAMCONNECT_HOST_ACCOUNT=<name>`
+  avoids the overlap entirely — separate account, separate user manager, separate environment — and
+  is the recommended deployment.
+- **Running backstage as root is a dead end, tested 2026-08-09.** `gnome-shell --headless` does start
+  under a root user manager and `RecordVirtual` returns a stream, but `RemoteDesktop.Start` fails with
+  `Couldn't connect pipewire context`: PipeWire is a per-user service and root has no PipeWire stack.
+  Standing one up would mean running an entire GNOME desktop plus PipeWire and WirePlumber as root for
+  no security gain, since ScreenConnect is already root. A dedicated unprivileged account is strictly
+  better.

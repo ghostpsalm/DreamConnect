@@ -7,9 +7,25 @@ import socket
 import struct
 import sys
 
-SHM = "/dev/shm/dreamconnect.frame"
 SOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid()),
                     "dreamconnect.sock")
+
+
+def _default_shm():
+    """The installer scopes the frame by the daemon's uid (/dev/shm is sticky, so
+    two accounts must not share one path — see #27). Derive it from the socket's
+    owner rather than guessing, so this works when run as root against a
+    display-host account's daemon. DREAMCONNECT_SHM overrides."""
+    override = os.environ.get("DREAMCONNECT_SHM")
+    if override:
+        return override
+    try:
+        return "/dev/shm/dreamconnect.frame.%d" % os.stat(SOCK).st_uid
+    except OSError:
+        return "/dev/shm/dreamconnect.frame"
+
+
+SHM = _default_shm()
 
 
 def cmd(sock, line):

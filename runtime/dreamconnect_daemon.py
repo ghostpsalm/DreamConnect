@@ -100,6 +100,38 @@ class FrameBuffer:
         self.width = self.height = self.stride = 0
         self.seq = 0
 
+    def _open_frame(self):
+        """Open the shm frame read-write, reclaiming a stale one if needed.
+
+        A frame left behind by a previous install under a *different* account —
+        the usual cause being a switch to a display-host account — is owned by
+        that account and mode 0600, so every open fails with EACCES. Without
+        this the daemon logs the same PermissionError forever and the operator
+        sees a desktop frozen on the last frame the old install wrote (#27).
+
+        Note /dev/shm is sticky, so unlinking only succeeds for a frame this
+        account owns (or when running as root). When it doesn't, say who owns
+        the path rather than retrying silently.
+        """
+        try:
+            return os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        except PermissionError:
+            pass
+        try:
+            owner = os.stat(self.path).st_uid
+        except OSError:
+            owner = -1
+        try:
+            os.unlink(self.path)
+        except OSError as e:
+            raise OSError(
+                f"cannot use the shared-memory frame {self.path}: it is owned by "
+                f"uid {owner}, this process is uid {os.getuid()}, and it could not "
+                f"be removed ({e}). Delete it and restart the daemon."
+            ) from None
+        log(f"reclaimed stale frame {self.path} (was owned by uid {owner})")
+        return os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+
     def ensure(self, width, height, stride):
         if (width, height, stride) == (self.width, self.height, self.stride) and self.mm:
             return
@@ -114,7 +146,7 @@ class FrameBuffer:
         # bypasses DAC — so owner-only keeps other local users from scraping the
         # screen out of /dev/shm (which is world-traversable). fchmod overrides
         # any inherited umask.
-        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.fd = self._open_frame()
         os.fchmod(self.fd, 0o600)
         os.ftruncate(self.fd, size)
         self.mm = mmap.mmap(self.fd, size)

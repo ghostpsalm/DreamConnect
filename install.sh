@@ -16,6 +16,12 @@
 #   DREAMCONNECT_AUTOLOGIN=1   configure GDM autologin so the bridge survives a
 #                              reboot unattended (security trade-off — opt-in).
 #                              Ignored in backstage mode, which needs no login.
+#   DREAMCONNECT_HOST_ACCOUNT_SUDO=1
+#                              give the display-host account passwordless sudo,
+#                              so an operator can administer the box from the
+#                              backstage desktop. NOPASSWD is not a choice: the
+#                              account has no password. Opt-in and reversible;
+#                              only meaningful with DREAMCONNECT_HOST_ACCOUNT.
 #   DREAMCONNECT_BACKSTAGE=1   backstage mode: run the bridge against a headless
 #                              `gnome-shell --headless` started by the lingering
 #                              user manager, capturing a Mutter virtual monitor.
@@ -102,6 +108,11 @@ uninstall() {
   # session itself. Unconditional and quiet, exactly like the daemon line above —
   # a classic install simply has no such unit.
   "${target_run_user[@]}" systemctl --user disable --now dreamconnect-backstage.service 2>/dev/null || true
+  # Drop the shm frame with the daemon that owned it. Leaving it behind is not
+  # just an 8 MB leak: /dev/shm is sticky, so a later install under a different
+  # account cannot unlink it and every write fails with EACCES (#27). Both the
+  # uid-scoped path and the legacy unscoped one.
+  rm -f "/dev/shm/dreamconnect.frame.$target_uid" /dev/shm/dreamconnect.frame
   # $target_home is passwd field 6 verbatim, and an account deleted by hand
   # before --uninstall leaves it empty — which points this rm at root's own
   # /.config/systemd/user. `rm -f` is silent about that today, but silence is an
@@ -144,6 +155,11 @@ uninstall() {
     # must not stop the account deletion below, which is the whole point.
     remove_no_idle_lock "$HOST_ACCOUNT" "$target_home" \
       || echo "!! could not fully revert idle-lock config for $HOST_ACCOUNT — continuing"
+    # Unconditional: install.state does not record whether sudo was granted, and
+    # leaving a passwordless root rule behind for a deleted account is the worst
+    # thing this uninstall could do.
+    revoke_host_account_sudo "$HOST_ACCOUNT" \
+      || echo "!! could not remove the sudo rule for $HOST_ACCOUNT — check /etc/sudoers.d/dreamconnect-$HOST_ACCOUNT by hand"
     # ensure_host_account backs up a pre-existing marker before overwriting it
     # (a pre-existing account may not be ours), or writes one fresh if there
     # wasn't one — this restores the original in the first case, and removes
@@ -217,6 +233,16 @@ if [ "${DREAMCONNECT_BACKSTAGE:-}" = "1" ]; then
     || die "fix DREAMCONNECT_BACKSTAGE_RES and re-run"
   backstage_supported \
     || die "DREAMCONNECT_BACKSTAGE=1 but gnome-shell is not installed; backstage runs 'gnome-shell --headless' and cannot work without it"
+  # The backstage shell runs in the HOME of whatever account it is installed
+  # under, so pointing it at a human's account hands every operator that
+  # person's files — and their app state, which is visible the moment the
+  # desktop restores a session. A dedicated account is the isolated form.
+  if [ -z "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
+    echo "!! WARNING: backstage without DREAMCONNECT_HOST_ACCOUNT runs the headless desktop"
+    echo "   in a human user's HOME — operators get that user's files and app state."
+    echo "   For anything but a test box, isolate it:"
+    echo "     DREAMCONNECT_BACKSTAGE=1 DREAMCONNECT_HOST_ACCOUNT=screenconnect ./install.sh"
+  fi
 fi
 
 # A backstage session has no connector to name — Mutter conjures the monitor —
@@ -384,10 +410,20 @@ else
   DAEMON_ARGS="--monitor $MONITOR"
 fi
 
+# The frame is scoped by uid: /dev/shm is sticky, so a frame left behind by an
+# install under a different account cannot be unlinked by this one — every write
+# fails with EACCES and the operator sees a frozen desktop (#27). Hit for real
+# when a box is switched to a display-host account.
+SHM_PATH="/dev/shm/dreamconnect.frame.$USER_UID"
+# Drop the legacy unscoped frame from a pre-uid-scoping install, so it doesn't
+# sit in /dev/shm forever owned by whoever ran that install.
+rm -f /dev/shm/dreamconnect.frame
+
 echo ">> installing user service"
 install -d -o "$USER_NAME" "$USER_HOME/.config/systemd/user"
 sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
     -e "s#@SESSION_UNIT@#$SESSION_UNIT#g" \
+    -e "s#@SHM_PATH@#$SHM_PATH#g" \
     -e "s#@DAEMON_ARGS@#$DAEMON_ARGS#g" \
     "$HERE/systemd/dreamconnect-daemon.service" \
     > "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
@@ -408,13 +444,18 @@ loginctl enable-linger "$USER_NAME"
 wait_for_user_bus "$USER_UID" \
   || die "the user bus for $USER_NAME (uid $USER_UID) never came up after 'loginctl enable-linger'; check 'systemctl status user@$USER_UID.service'"
 "${RUN_USER[@]}" systemctl --user daemon-reload
+# `enable --now` does nothing to an already-running unit, so a re-run would leave
+# the previous ExecStart live — the new unit file on disk, the old daemon in
+# memory. Enable for boot, then restart to actually apply this run's changes.
 if [ "$BACKSTAGE" -eq 1 ]; then
   # The daemon is WantedBy the backstage unit, so starting the shell pulls the
   # daemon up with it — and does so again at every boot, with nobody logged in.
   "${RUN_USER[@]}" systemctl --user enable dreamconnect-daemon.service
-  "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-backstage.service
+  "${RUN_USER[@]}" systemctl --user enable dreamconnect-backstage.service
+  "${RUN_USER[@]}" systemctl --user restart dreamconnect-backstage.service
 else
-  "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-daemon.service
+  "${RUN_USER[@]}" systemctl --user enable dreamconnect-daemon.service
+  "${RUN_USER[@]}" systemctl --user restart dreamconnect-daemon.service
 fi
 
 # --- ScreenConnect drop-in --------------------------------------------------
@@ -422,6 +463,7 @@ if [ -n "$SC_UNIT" ]; then
   echo ">> installing agent drop-in on $SC_UNIT"
   install -d "/etc/systemd/system/$SC_UNIT.d"
   sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@UID@#$USER_UID#g" \
+      -e "s#@SHM_PATH@#$SHM_PATH#g" \
       "$HERE/systemd/dreamconnect-agent.conf" \
       > "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
   systemctl daemon-reload
@@ -437,6 +479,17 @@ fi
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   echo ">> disabling idle/lock for $USER_NAME (locking or idle-suspend kills the remote session — see ROADMAP.md H6)"
   configure_no_idle_lock "$USER_NAME" "$USER_HOME"
+  if [ "${DREAMCONNECT_HOST_ACCOUNT_SUDO:-}" = "1" ]; then
+    echo ">> granting passwordless sudo to $USER_NAME (DREAMCONNECT_HOST_ACCOUNT_SUDO=1)"
+    if grant_host_account_sudo "$USER_NAME"; then
+      echo "   SECURITY: anything running in the backstage desktop can become root without a password."
+      echo "   ScreenConnect already has a root channel, so this adds a second path, not a first one."
+    else
+      # Not fatal: everything else is installed and working, and a box whose
+      # backstage desktop merely lacks sudo is still a usable bridge.
+      echo "!! could not grant sudo to $USER_NAME — the rest of the install succeeded; see the error above"
+    fi
+  fi
 fi
 
 # --- reboot survival: display-manager autologin -----------------------------

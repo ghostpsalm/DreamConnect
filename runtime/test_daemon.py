@@ -7,7 +7,9 @@ and the virtual-mode tests only exercise pure string/argument construction.
 Run: python3 -m unittest runtime.test_daemon   (or: python3 runtime/test_daemon.py)
 """
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +81,59 @@ class TestHandle(unittest.TestCase):
         self.assertEqual(self.s.calls, [])              # nothing dispatched
         # the next control command still replies correctly
         self.assertEqual(self.cs.handle("PING"), "PONG")
+
+
+class TestFrameBufferReclaim(unittest.TestCase):
+    """A stale /dev/shm frame left by a previous install — a different account,
+    e.g. after switching to a display-host account — makes every write fail with
+    EACCES and the operator sees a permanently frozen desktop (issue #27). The
+    daemon must reclaim the path rather than log the same error forever."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "frame")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_creates_a_frame_when_the_path_is_free(self):
+        fb = d.FrameBuffer(self.path)
+        fb.ensure(4, 2, 16)
+        self.assertTrue(os.path.exists(self.path))
+        self.assertEqual((fb.width, fb.height, fb.stride), (4, 2, 16))
+
+    def test_reclaims_a_frame_it_cannot_open(self):
+        # Stand in for "owned by another uid": a file we cannot open read-write.
+        with open(self.path, "wb") as f:
+            f.write(b"stale")
+        os.chmod(self.path, 0o000)
+        fb = d.FrameBuffer(self.path)
+        fb.ensure(4, 2, 16)          # must not raise
+        self.assertEqual((fb.width, fb.height, fb.stride), (4, 2, 16))
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_reclaimed_frame_is_actually_writable(self):
+        with open(self.path, "wb") as f:
+            f.write(b"stale")
+        os.chmod(self.path, 0o000)
+        fb = d.FrameBuffer(self.path)
+        fb.write(b"\xff" * 32, 4, 2, 16)
+        self.assertEqual(fb.seq, 1)
+
+    def test_gives_an_actionable_error_when_it_cannot_reclaim(self):
+        # Unlink blocked too (no write permission on the directory) — the daemon
+        # cannot fix this itself, so it must say who owns the path.
+        with open(self.path, "wb") as f:
+            f.write(b"stale")
+        os.chmod(self.path, 0o000)
+        os.chmod(self.dir, 0o500)
+        try:
+            fb = d.FrameBuffer(self.path)
+            with self.assertRaises(OSError) as caught:
+                fb.ensure(4, 2, 16)
+            self.assertIn(self.path, str(caught.exception))
+        finally:
+            os.chmod(self.dir, 0o700)
 
 
 class TestParseResolution(unittest.TestCase):

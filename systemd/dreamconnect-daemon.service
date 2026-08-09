@@ -15,7 +15,7 @@ StartLimitIntervalSec=0
 Type=simple
 # @INSTALL_DIR@ and @DAEMON_ARGS@ are substituted by install.sh — the latter is
 # `--monitor <connector>` for physical capture, `--virtual <WxH>` for backstage.
-ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py @DAEMON_ARGS@
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py --shm @SHM_PATH@ @DAEMON_ARGS@
 Restart=always
 RestartSec=2
 # Owner-only files: the root SC JVM reads the shm/socket via DAC override, so

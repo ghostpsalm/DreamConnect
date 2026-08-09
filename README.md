@@ -92,11 +92,23 @@ dependencies via your package manager (`apt`/`dnf`/`zypper`/`pacman`).
 For **unattended / reboot survival**, prefer **backstage** — DreamConnect runs its
 own headless GNOME session under the lingering user manager, so the box is
 reachable from boot with the login prompt still up and no session ever
-auto-unlocked. No monitor or dummy plug either:
+auto-unlocked. No monitor or dummy plug either. Pair it with a dedicated account
+so the session is isolated from every human on the box:
 
 ```sh
-curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh | sudo DREAMCONNECT_BACKSTAGE=1 bash
+curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh \
+  | sudo DREAMCONNECT_BACKSTAGE=1 DREAMCONNECT_HOST_ACCOUNT=screenconnect bash
 ```
+
+That creates a hidden, password-less, greeter-invisible account with its own
+`HOME` and runs the headless desktop there. **Without** `DREAMCONNECT_HOST_ACCOUNT`
+the backstage desktop runs in a human's `HOME`, and operators get that person's
+files and app state — the installer warns about it.
+
+Add `DREAMCONNECT_HOST_ACCOUNT_SUDO=1` to give that account passwordless sudo, so
+an operator can administer the box from the backstage desktop. It has to be
+passwordless (the account has no password); ScreenConnect already runs as root,
+so this is a second path to root rather than a first one.
 
 The operator gets a private admin desktop, **not** the console user's session —
 pick attended mode if "see what the user sees" is the point. Screen size is
@@ -129,8 +141,9 @@ sudo ./install.sh
 Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path>`,
 `DREAMCONNECT_BACKSTAGE=1` + `DREAMCONNECT_BACKSTAGE_RES=<WxH>` (headless session,
 no login), `DREAMCONNECT_HOST_ACCOUNT=<name>` (a dedicated hidden account to run
-it under — combine with backstage and it needs no autologin either; see
-[ROADMAP.md](ROADMAP.md#h6--reboot-survival--autologin)).
+it under — combine with backstage and it needs no autologin either),
+`DREAMCONNECT_HOST_ACCOUNT_SUDO=1` (passwordless sudo for that account); see
+[ROADMAP.md](ROADMAP.md#h6--reboot-survival--autologin).
 </details>
 
 ## Use

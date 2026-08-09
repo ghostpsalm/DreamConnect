@@ -17,8 +17,18 @@ run() {
 # --- detect the desktop user + uid ------------------------------------------
 detect_user() {
   if [ -n "${DREAMCONNECT_USER:-}" ]; then echo "$DREAMCONNECT_USER"; return; fi
-  local sid uid name type active
+  local sid uid name type active class
   while read -r sid uid name _; do
+    class=$(loginctl show-session "$sid" -p Class --value 2>/dev/null || true)
+    # The GDM greeter is a real, active, Wayland session (uid 60578, gnome-shell
+    # --mode=gdm), so "active and graphical" matches it. It is never the desktop
+    # user: returning it would install the daemon into the display manager's
+    # account, and make an uninstall silently revert nothing. Backstage boxes sit
+    # at the greeter permanently, so this is the normal state there, not an edge
+    # case. Class is logind's own answer to "what kind of session is this".
+    case "$class" in
+      greeter|lock-screen) continue ;;
+    esac
     type=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)
     active=$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)
     if { [ "$type" = "wayland" ] || [ "$type" = "x11" ]; } && [ "$active" = "yes" ]; then
@@ -669,6 +679,66 @@ backstage_resolution() {  # [value] -> WxH on stdout, non-zero if unusable
 # forever and the failure would only show up as "no capture" much later.
 backstage_supported() {  # -> 0 if a headless gnome-shell can be started
   command -v gnome-shell >/dev/null 2>&1
+}
+
+# --- sudo for the display-host account ---------------------------------------
+# Opt-in (DREAMCONNECT_HOST_ACCOUNT_SUDO=1). The account is created with password
+# '*', so a rule without NOPASSWD is inert: sudo would prompt into a session with
+# no tty and there is no password that could ever satisfy it.
+#
+# Nothing is installed until visudo has validated it. A drop-in that fails to
+# parse makes sudo refuse to run *for every user on the box* — locking the owner
+# out of their own machine is a far worse outcome than the grant failing.
+sudoers_file() {  # name -> path, non-zero if the name is unusable
+  local name="${1:-}" dir
+  # The name is pasted into a path here and into a sudo rule below, so both the
+  # traversal and the rule-injection risks are refused at the same gate.
+  valid_account_name "$name" || {
+    echo "error: refusing a sudo rule for '$name': not a valid account name" >&2
+    return 1; }
+  dir="${DC_SUDOERS_DIR:-/etc/sudoers.d}"
+  # sudo silently ignores drop-ins whose name contains a dot; valid_account_name
+  # already excludes dots, and the prefix adds none.
+  echo "$dir/dreamconnect-$name"
+}
+
+grant_host_account_sudo() {  # name
+  local name="${1:-}" file tmp main
+  file="$(sudoers_file "$name")" || return 1
+  main="${DC_SUDOERS_MAIN:-/etc/sudoers}"
+
+  # A drop-in in a directory sudo never reads is worse than no drop-in: it looks
+  # configured and does nothing. Warn rather than refuse — the directive spelling
+  # varies (#includedir / @includedir) and a missing one may be deliberate.
+  if [ -f "$main" ] && ! grep -qE '^[[:space:]]*[#@]includedir[[:space:]]' "$main"; then
+    echo "!! $main has no '#includedir' directive for sudoers.d — the rule below will be inert until one is added" >&2
+  fi
+
+  tmp="$(mktemp)" || return 1
+  printf '# Installed by dreamconnect. Removed by install.sh --uninstall.\n' > "$tmp"
+  printf '# NOPASSWD is required: this account has no password (usermod -p "*").\n' >> "$tmp"
+  printf '%s ALL=(ALL) NOPASSWD: ALL\n' "$name" >> "$tmp"
+
+  if ! visudo -cf "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    echo "error: refusing to install a sudo rule for '$name': visudo rejected it" >&2
+    return 1
+  fi
+
+  # 0440 is what sudo requires; it refuses drop-ins that others can write.
+  # Ownership follows the installing process, which is root — install.sh refuses
+  # to run as anything else — so no explicit -o/-g is needed, and leaving them
+  # off keeps this callable (and testable) without root.
+  run install -m 0440 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+revoke_host_account_sudo() {  # name
+  local file
+  file="$(sudoers_file "$1")" || return 1
+  # Absent is success: uninstall calls this unconditionally, since the install
+  # state file does not record whether sudo was ever granted.
+  run rm -f "$file"
 }
 
 # --- no idle lock for the display-host account -------------------------------
