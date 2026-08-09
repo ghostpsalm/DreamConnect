@@ -1,17 +1,21 @@
 [Unit]
 Description=dreamconnect runtime daemon (Wayland capture/input bridge for ScreenConnect)
 Documentation=https://github.com/ghostpsalm/DreamConnect
-# Needs the GNOME/Wayland session (Mutter D-Bus, PipeWire) to be up.
-After=graphical-session.target
-PartOf=graphical-session.target
+# Needs a GNOME/Wayland session (Mutter D-Bus, PipeWire) to be up. @SESSION_UNIT@
+# is substituted by install.sh: graphical-session.target for a real logged-in
+# session, or dreamconnect-backstage.service for the headless backstage shell,
+# which never reaches graphical-session.target.
+After=@SESSION_UNIT@
+PartOf=@SESSION_UNIT@
 # Retry forever: never let a fast crash-loop trip the default start rate-limit
 # (5 starts / 10s) and leave the bridge permanently stopped on an unattended box.
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# @INSTALL_DIR@ and @MONITOR@ are substituted by install.sh.
-ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py --monitor @MONITOR@
+# @INSTALL_DIR@ and @DAEMON_ARGS@ are substituted by install.sh — the latter is
+# `--monitor <connector>` for physical capture, `--virtual <WxH>` for backstage.
+ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py @DAEMON_ARGS@
 Restart=always
 RestartSec=2
 # Owner-only files: the root SC JVM reads the shm/socket via DAC override, so
@@ -19,4 +23,4 @@ RestartSec=2
 UMask=0077
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=@SESSION_UNIT@

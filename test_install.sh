@@ -5129,8 +5129,398 @@ test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up() {
     "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
 }
 
+# --- slice 10: backstage (headless) session ----------------------------------
+# Backstage removes the dummy plug and the autologin requirement by running the
+# bridge against `gnome-shell --headless`. The resolution is load-bearing there
+# in a way it never was for physical capture: a RecordVirtual stream has no
+# intrinsic size, so this value becomes the screen size AND the per-frame shm
+# allocation (w*h*4). An unvalidated one reaches Mutter directly.
+
+test_library_defines_the_backstage_helpers() {
+  local fn
+  for fn in backstage_resolution backstage_supported; do
+    declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
+  done
+}
+
+test_backstage_resolution_defaults_to_1920x1080() {
+  local out rc
+  out="$(backstage_resolution 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "unset resolution is accepted"
+  assert_eq "$out" "1920x1080" "unset resolution defaults"
+  out="$(backstage_resolution "" 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "empty resolution is accepted"
+  assert_eq "$out" "1920x1080" "empty resolution defaults"
+}
+
+test_backstage_resolution_passes_through_a_valid_value() {
+  local out rc
+  out="$(backstage_resolution "1280x720" 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "1280x720 accepted"
+  assert_eq "$out" "1280x720" "1280x720 echoed back"
+}
+
+test_backstage_resolution_accepts_an_uppercase_separator() {
+  local out
+  out="$(backstage_resolution "1600X900" 2>/dev/null)"
+  assert_eq "$out" "1600x900" "uppercase X is normalised to lowercase"
+}
+
+test_backstage_resolution_normalises_leading_zeros() {
+  local out
+  # 08 must not be read as invalid octal by the arithmetic validation.
+  out="$(backstage_resolution "0800x0600" 2>/dev/null)"
+  assert_eq "$out" "800x600" "leading zeros are stripped, not rejected"
+}
+
+assert_res_refused() {  # value label
+  local out rc
+  out="$(backstage_resolution "$1" 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "$2: expected '$1' to be refused, got exit 0 and [$out]"
+  [ -n "$out" ] || fail "$2: refusing '$1' must explain why, got no output"
+}
+
+test_backstage_resolution_refuses_malformed_values() {
+  assert_res_refused "1920"        "no separator"
+  assert_res_refused "1920x"       "missing height"
+  assert_res_refused "x1080"       "missing width"
+  assert_res_refused "1920x1080x1" "three components"
+  assert_res_refused "wide x tall" "non-numeric"
+  assert_res_refused "-1920x1080"  "negative width"
+  assert_res_refused "1920 1080"   "space separator"
+}
+
+test_backstage_resolution_refuses_zero_dimensions() {
+  assert_res_refused "0x1080" "zero width"
+  assert_res_refused "1920x0" "zero height"
+}
+
+# The ceiling exists because the daemon copies w*h*4 bytes per frame into shm.
+# 192000x1080 is a plausible typo and would ask for ~800 MB a frame.
+test_backstage_resolution_refuses_dimensions_past_the_16384_ceiling() {
+  assert_res_refused "192000x1080" "width past the ceiling"
+  assert_res_refused "1920x20000"  "height past the ceiling"
+}
+
+test_backstage_resolution_accepts_the_documented_maximum() {
+  local out rc
+  out="$(backstage_resolution "16384x16384" 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "16384x16384 is accepted"
+  assert_eq "$out" "16384x16384" "16384x16384 echoed back"
+}
+
+# The installer's ceiling and the daemon's MAX_DIMENSION must not drift apart:
+# a value the installer writes into the unit must be one the daemon will accept,
+# or the daemon exits on argument validation and the unit crash-loops.
+test_backstage_ceiling_matches_the_daemon_max_dimension() {
+  local daemon max
+  daemon="$HERE/runtime/dreamconnect_daemon.py"
+  assert_file_exists "$daemon" "daemon source is present"
+  [ -f "$daemon" ] || return 0
+  max="$(sed -n 's/^MAX_DIMENSION[[:space:]]*=[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$daemon" | head -1)"
+  [ -n "$max" ] || { fail "could not read MAX_DIMENSION from $daemon"; return 0; }
+  assert_eq "$max" "16384" \
+    "daemon MAX_DIMENSION and backstage_resolution's ceiling must agree"
+}
+
+# backstage_supported gates on gnome-shell being installed; without it the
+# backstage unit crash-loops forever and the only symptom is "no capture".
+test_backstage_supported_follows_gnome_shell_presence() {
+  local rc
+  ( PATH="$TMP/empty-path"; mkdir -p "$PATH"; backstage_supported ) && rc=0 || rc=1
+  assert_eq "$rc" "1" "backstage_supported is false with no gnome-shell on PATH"
+
+  mkdir -p "$TMP/fake-path"
+  printf '#!/bin/sh\nexit 0\n' > "$TMP/fake-path/gnome-shell"
+  chmod +x "$TMP/fake-path/gnome-shell"
+  ( PATH="$TMP/fake-path:$PATH"; backstage_supported ) && rc=0 || rc=1
+  assert_eq "$rc" "0" "backstage_supported is true when gnome-shell is on PATH"
+}
+
+# --- slice 10b: the unit templates the installer renders ----------------------
+# install.sh substitutes @SESSION_UNIT@/@DAEMON_ARGS@ so one daemon unit serves
+# both modes. If a placeholder is renamed in the template but not in install.sh,
+# the rendered unit ships a literal @...@ and systemd fails at start.
+
+test_daemon_unit_template_placeholders_are_all_substituted_by_install_sh() {
+  local unit sh ph
+  unit="$HERE/systemd/dreamconnect-daemon.service"
+  sh="$HERE/install.sh"
+  assert_file_exists "$unit" "daemon unit template is present"
+  [ -f "$unit" ] && [ -f "$sh" ] || return 0
+  for ph in $(grep -o '@[A-Z_]\{1,\}@' "$unit" | sort -u); do
+    grep -q -- "$ph" "$sh" || \
+      fail "daemon unit uses $ph but install.sh never substitutes it — the rendered unit would keep the literal"
+  done
+}
+
+test_backstage_unit_template_placeholders_are_all_substituted_by_install_sh() {
+  local unit sh ph
+  unit="$HERE/systemd/dreamconnect-backstage.service"
+  sh="$HERE/install.sh"
+  assert_file_exists "$unit" "backstage unit template is present"
+  [ -f "$unit" ] && [ -f "$sh" ] || return 0
+  for ph in $(grep -o '@[A-Z_]\{1,\}@' "$unit" | sort -u); do
+    grep -q -- "$ph" "$sh" || \
+      fail "backstage unit uses $ph but install.sh never substitutes it"
+  done
+}
+
+# The backstage unit must NOT hang off graphical-session.target — that target is
+# never reached by a spawned headless shell (verified on GNOME 50.2), which is
+# the whole reason the autologin requirement went away.
+test_backstage_unit_does_not_depend_on_a_graphical_session() {
+  local unit
+  unit="$HERE/systemd/dreamconnect-backstage.service"
+  [ -f "$unit" ] || { fail "backstage unit template is missing"; return 0; }
+  assert_not_contains "$(grep -E '^(WantedBy|After|Requires|PartOf|BindsTo)=' "$unit")" \
+    "graphical-session.target" \
+    "backstage unit must not depend on graphical-session.target"
+  assert_contains "$(grep '^WantedBy=' "$unit")" "default.target" \
+    "backstage unit is started by the lingering user manager via default.target"
+}
+
+# The agent drop-in reads the display env file with a leading '-' so a classic
+# install, which never writes one, is unaffected.
+test_agent_dropin_tolerates_a_missing_display_env_file() {
+  local conf line
+  conf="$HERE/systemd/dreamconnect-agent.conf"
+  assert_file_exists "$conf" "agent drop-in template is present"
+  [ -f "$conf" ] || return 0
+  line="$(grep '^EnvironmentFile=' "$conf" || true)"
+  [ -n "$line" ] || { fail "agent drop-in must read the backstage display env file"; return 0; }
+  assert_contains "$line" "EnvironmentFile=-" \
+    "the display env file must be optional ('-'), or a classic install fails to start SC"
+}
+
+# --- slice 10c: the X-probe wrapper is display-number agnostic ---------------
+# ScreenConnect's startup probes every X display it can find cookies for, with
+# no timeout of its own, so one display that accepts connections and never
+# completes the handshake blocks SC's main thread forever (it never reaches the
+# relay: "online" never happens). Every gnome-shell creates exactly such a
+# socket for GNOME_SETUP_DISPLAY.
+#
+# The wrapper used to hardcode ":1". Backstage keeps the GDM greeter running
+# permanently, and the greeter's dead socket is ":1025" on this host — so the
+# hardcoded skip missed it and SC hung. The wrapper must therefore key on
+# BEHAVIOUR (did the probe answer in time?), never on a display number.
+
+XPROBE="$HERE/host-fixes/xprobe-skip-broken-display.sh"
+
+# Stage a wrapper whose "real tool" directory is a fixture instead of /usr/bin,
+# so no production path hook has to exist for the sake of the tests.
+stage_xprobe() {  # dir
+  mkdir -p "$1/bin" "$1/real" "$1/run"
+  sed "s#/usr/bin/#$1/real/#g" "$XPROBE" > "$1/bin/xdpyinfo"
+  chmod +x "$1/bin/xdpyinfo"
+}
+
+fake_tool() {  # path body
+  printf '#!/bin/sh\n%s\n' "$2" > "$1"
+  chmod +x "$1"
+}
+
+run_xprobe() {  # dir display -> sets XP_OUT / XP_RC
+  XP_OUT="$(DISPLAY="$2" XDG_RUNTIME_DIR="$1/run" DREAMCONNECT_XPROBE_TIMEOUT=1 \
+            "$1/bin/xdpyinfo" 2>/dev/null)"
+  XP_RC=$?
+}
+
+test_xprobe_wrapper_passes_a_healthy_display_through() {
+  local d="$TMP/xprobe-ok"
+  [ -f "$XPROBE" ] || { fail "x-probe wrapper is missing"; return 0; }
+  stage_xprobe "$d"
+  fake_tool "$d/real/xdpyinfo" 'echo "  dimensions:    1920x1080 pixels"'
+  run_xprobe "$d" ":0"
+  assert_eq "$XP_RC" "0" "a healthy display exits 0"
+  assert_contains "$XP_OUT" "1920x1080" "a healthy display's output reaches SC unchanged"
+}
+
+test_xprobe_wrapper_preserves_a_real_nonzero_exit() {
+  local d="$TMP/xprobe-rc"
+  [ -f "$XPROBE" ] || return 0
+  stage_xprobe "$d"
+  # "no such display" must stay a fast, ordinary failure, not be mistaken for a
+  # hang and cached as a dead display.
+  fake_tool "$d/real/xdpyinfo" 'exit 1'
+  run_xprobe "$d" ":7"
+  [ "$XP_RC" -ne 0 ] || fail "a failing probe must not report success"
+  assert_file_absent "$d/run/dreamconnect-xprobe/_7" \
+    "a fast failure is not a hang and must not be cached as a dead display"
+}
+
+# The regression itself, with the display number that actually bit us.
+test_xprobe_wrapper_gives_up_on_a_hanging_display_whatever_its_number() {
+  local d start elapsed disp
+  [ -f "$XPROBE" ] || return 0
+  for disp in ":1" ":1025" ":42"; do
+    d="$TMP/xprobe-hang${disp//:/_}"
+    stage_xprobe "$d"
+    fake_tool "$d/real/xdpyinfo" 'sleep 30'
+    start=$SECONDS
+    run_xprobe "$d" "$disp"
+    elapsed=$((SECONDS - start))
+    [ "$XP_RC" -ne 0 ] || fail "hanging display $disp: must not report success"
+    [ "$elapsed" -lt 10 ] || \
+      fail "hanging display $disp: wrapper blocked ${elapsed}s — SC's main thread hangs with it"
+  done
+}
+
+test_xprobe_wrapper_short_circuits_a_display_already_known_dead() {
+  local d start elapsed
+  [ -f "$XPROBE" ] || return 0
+  d="$TMP/xprobe-cache"
+  stage_xprobe "$d"
+  fake_tool "$d/real/xdpyinfo" 'sleep 30'
+  run_xprobe "$d" ":1025"                      # first probe pays the timeout
+  start=$SECONDS
+  run_xprobe "$d" ":1025"                      # second must be instant
+  elapsed=$((SECONDS - start))
+  [ "$XP_RC" -ne 0 ] || fail "a cached dead display must keep failing"
+  [ "$elapsed" -le 1 ] || \
+    fail "a known-dead display cost ${elapsed}s again — SC re-probes every few seconds, so this must be free"
+}
+
+test_xprobe_wrapper_does_not_blacklist_other_displays() {
+  local d
+  [ -f "$XPROBE" ] || return 0
+  d="$TMP/xprobe-scope"
+  stage_xprobe "$d"
+  fake_tool "$d/real/xdpyinfo" 'case "$DISPLAY" in :1025) sleep 30 ;; *) echo "  dimensions:    1920x1080 pixels" ;; esac'
+  run_xprobe "$d" ":1025"
+  [ "$XP_RC" -ne 0 ] || fail "the dead display must fail"
+  run_xprobe "$d" ":0"
+  assert_eq "$XP_RC" "0" "a healthy display must still work after another was cached dead"
+  assert_contains "$XP_OUT" "1920x1080" "the healthy display's output is unaffected"
+}
+
+# --- slice 10d: the backstage display publisher -------------------------------
+# The SC drop-in reads DISPLAY/XAUTHORITY from an EnvironmentFile, and systemd
+# reads an EnvironmentFile once, at unit start. Mutter's xauth file carries a
+# fresh random suffix every time the shell starts, so publishing that path
+# directly leaves a long-running SC JVM pointing at a file that no longer exists
+# the moment backstage restarts. The publisher must therefore hand out a STABLE
+# path whose contents it refreshes.
+
+PUBLISHER="$HERE/runtime/dreamconnect-backstage-env.sh"
+
+stage_publisher() {  # dir display xauth_path
+  mkdir -p "$1/bin" "$1/run"
+  cat > "$1/bin/systemctl" <<EOF
+#!/bin/sh
+printf 'DISPLAY=%s\nXAUTHORITY=%s\nWAYLAND_DISPLAY=dreamconnect\n' "$2" "$3"
+EOF
+  chmod +x "$1/bin/systemctl"
+}
+
+run_publisher() {  # dir -> sets PUB_RC
+  ( PATH="$1/bin:$PATH"; XDG_RUNTIME_DIR="$1/run" \
+    DREAMCONNECT_DISPLAY_TIMEOUT=3 sh "$PUBLISHER" >/dev/null 2>&1 )
+  PUB_RC=$?
+}
+
+test_publisher_writes_the_display_env_file() {
+  local d="$TMP/pub-basic"
+  [ -f "$PUBLISHER" ] || { fail "backstage env publisher is missing"; return 0; }
+  mkdir -p "$d/run"
+  printf 'cookie-one\n' > "$d/run/.mutter-Xwaylandauth.AAAAAA"
+  stage_publisher "$d" ":0" "$d/run/.mutter-Xwaylandauth.AAAAAA"
+  run_publisher "$d"
+  assert_eq "$PUB_RC" "0" "publisher succeeds when the shell has exported a display"
+  assert_file_exists "$d/run/dreamconnect-display.env" "the env file is written"
+  assert_contains "$(cat "$d/run/dreamconnect-display.env" 2>/dev/null)" "DISPLAY=:0" \
+    "the env file carries the display the shell reported"
+}
+
+# The regression: a restarted backstage shell gets a NEW random xauth filename,
+# and an already-running SC JVM keeps whatever path it was started with.
+test_publisher_publishes_a_stable_xauthority_path() {
+  local d first second env1 env2
+  [ -f "$PUBLISHER" ] || return 0
+  d="$TMP/pub-stable"
+  mkdir -p "$d/run"
+
+  printf 'cookie-one\n' > "$d/run/.mutter-Xwaylandauth.AAAAAA"
+  stage_publisher "$d" ":0" "$d/run/.mutter-Xwaylandauth.AAAAAA"
+  run_publisher "$d"
+  env1="$(cat "$d/run/dreamconnect-display.env" 2>/dev/null)"
+  first="$(printf '%s\n' "$env1" | sed -n 's/^XAUTHORITY=//p')"
+
+  # Restart with a different mutter xauth file, exactly as a real restart does.
+  printf 'cookie-two\n' > "$d/run/.mutter-Xwaylandauth.BBBBBB"
+  stage_publisher "$d" ":0" "$d/run/.mutter-Xwaylandauth.BBBBBB"
+  run_publisher "$d"
+  env2="$(cat "$d/run/dreamconnect-display.env" 2>/dev/null)"
+  second="$(printf '%s\n' "$env2" | sed -n 's/^XAUTHORITY=//p')"
+
+  [ -n "$first" ] && [ -n "$second" ] || { fail "publisher produced no XAUTHORITY"; return 0; }
+  assert_eq "$second" "$first" \
+    "the published XAUTHORITY path must not change across a backstage restart — a running SC JVM cannot re-read it"
+  assert_not_contains "$first" "AAAAAA" \
+    "the published path must not be mutter's per-start random filename"
+  assert_eq "$(cat "$first" 2>/dev/null)" "cookie-two" \
+    "the stable file's CONTENTS must be refreshed to the current shell's cookie"
+}
+
+test_publisher_keeps_the_published_xauthority_owner_only() {
+  local d xauth perms
+  [ -f "$PUBLISHER" ] || return 0
+  d="$TMP/pub-perms"
+  mkdir -p "$d/run"
+  printf 'cookie\n' > "$d/run/.mutter-Xwaylandauth.CCCCCC"
+  stage_publisher "$d" ":0" "$d/run/.mutter-Xwaylandauth.CCCCCC"
+  run_publisher "$d"
+  xauth="$(sed -n 's/^XAUTHORITY=//p' "$d/run/dreamconnect-display.env" 2>/dev/null)"
+  [ -n "$xauth" ] && [ -f "$xauth" ] || { fail "no published xauth file to check"; return 0; }
+  # An X cookie is a capability to drive the session; other local users must not
+  # be able to read it out of the runtime dir.
+  perms="$(stat -c '%a' "$xauth" 2>/dev/null)"
+  assert_eq "$perms" "600" "the published X cookie must be owner-only"
+}
+
+test_publisher_fails_when_no_display_ever_appears() {
+  local d start elapsed
+  [ -f "$PUBLISHER" ] || return 0
+  d="$TMP/pub-none"
+  mkdir -p "$d/bin" "$d/run"
+  printf '#!/bin/sh\nexit 0\n' > "$d/bin/systemctl"   # exports nothing
+  chmod +x "$d/bin/systemctl"
+  start=$SECONDS
+  run_publisher "$d"
+  elapsed=$((SECONDS - start))
+  [ "$PUB_RC" -ne 0 ] || \
+    fail "publisher must fail when the shell never exported a display, or the daemon starts against nothing"
+  [ "$elapsed" -lt 20 ] || fail "publisher ignored its timeout (${elapsed}s)"
+  assert_file_absent "$d/run/dreamconnect-display.env" \
+    "no env file may be left behind when there is no display"
+}
+
 # --- runner ------------------------------------------------------------------
 for CURRENT in \
+  test_publisher_writes_the_display_env_file \
+  test_publisher_publishes_a_stable_xauthority_path \
+  test_publisher_keeps_the_published_xauthority_owner_only \
+  test_publisher_fails_when_no_display_ever_appears \
+  test_xprobe_wrapper_passes_a_healthy_display_through \
+  test_xprobe_wrapper_preserves_a_real_nonzero_exit \
+  test_xprobe_wrapper_gives_up_on_a_hanging_display_whatever_its_number \
+  test_xprobe_wrapper_short_circuits_a_display_already_known_dead \
+  test_xprobe_wrapper_does_not_blacklist_other_displays \
+  test_library_defines_the_backstage_helpers \
+  test_backstage_resolution_defaults_to_1920x1080 \
+  test_backstage_resolution_passes_through_a_valid_value \
+  test_backstage_resolution_accepts_an_uppercase_separator \
+  test_backstage_resolution_normalises_leading_zeros \
+  test_backstage_resolution_refuses_malformed_values \
+  test_backstage_resolution_refuses_zero_dimensions \
+  test_backstage_resolution_refuses_dimensions_past_the_16384_ceiling \
+  test_backstage_resolution_accepts_the_documented_maximum \
+  test_backstage_ceiling_matches_the_daemon_max_dimension \
+  test_backstage_supported_follows_gnome_shell_presence \
+  test_daemon_unit_template_placeholders_are_all_substituted_by_install_sh \
+  test_backstage_unit_template_placeholders_are_all_substituted_by_install_sh \
+  test_backstage_unit_does_not_depend_on_a_graphical_session \
+  test_agent_dropin_tolerates_a_missing_display_env_file \
   test_sourcing_is_side_effect_free \
   test_library_defines_the_installer_functions \
   test_run_executes_the_command_by_default \

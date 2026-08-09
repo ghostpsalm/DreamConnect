@@ -64,8 +64,30 @@ SC_SESSION_IFACE = "org.gnome.Mutter.ScreenCast.Session"
 SC_STREAM_IFACE = "org.gnome.Mutter.ScreenCast.Stream"
 
 
+# Upper bound on a --virtual resolution. Mutter will happily create an enormous
+# virtual monitor, and every frame is copied into shm at width*height*4 bytes,
+# so a typo (192000x1080) must be refused rather than allocated.
+MAX_DIMENSION = 16384
+
+
 def log(*a):
     print("[dreamconnect]", *a, file=sys.stderr, flush=True)
+
+
+def parse_resolution(text):
+    """'1920x1080' -> (1920, 1080). Raises ValueError on anything else."""
+    parts = str(text).strip().lower().split("x")
+    if len(parts) != 2:
+        raise ValueError(f"expected WxH, got {text!r}")
+    try:
+        w, h = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"expected WxH with integer dimensions, got {text!r}") from None
+    if w < 1 or h < 1:
+        raise ValueError(f"resolution must be positive, got {text!r}")
+    if w > MAX_DIMENSION or h > MAX_DIMENSION:
+        raise ValueError(f"resolution exceeds {MAX_DIMENSION}px per side: {text!r}")
+    return w, h
 
 
 class FrameBuffer:
@@ -112,10 +134,14 @@ class FrameBuffer:
 class Session:
     """Persistent Mutter RemoteDesktop + linked ScreenCast session."""
 
-    def __init__(self, bus, monitor, frame, all_monitors=False):
+    def __init__(self, bus, monitor, frame, all_monitors=False, virtual=None):
         self.bus = bus
         self.monitor = monitor
         self.all_monitors = all_monitors  # capture the whole logical desktop
+        # (w, h) to capture a Mutter-conjured virtual monitor via RecordVirtual
+        # instead of a physical connector — the backstage/headless mode, which
+        # needs no monitor, no dummy plug and no login. None = physical capture.
+        self.virtual = virtual
         self.area_x = 0  # origin of the captured area in desktop coords (RecordArea)
         self.area_y = 0
         self.frame = frame
@@ -325,11 +351,26 @@ class Session:
             GLib.Variant("(a{sv})", ({"remote-desktop-session-id": GLib.Variant("s", sess_id)},)),
             None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
 
+        # Backstage/headless: RecordVirtual takes no connector — Mutter conjures
+        # the monitor, so this works with GetCurrentState reporting zero monitors
+        # (no panel, no dummy plug). The output is origin-anchored, so area_x/y
+        # stay 0 and the pointer maths below is a no-op, same as RecordMonitor.
+        props = {"cursor-mode": GLib.Variant("u", 1)}
+        if self.virtual:
+            self.area_x = self.area_y = 0
+            self.stream_path = self.bus.call_sync(
+                SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordVirtual",
+                GLib.Variant("(a{sv})", (props,)),
+                None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+            log(f"ScreenCast session {self.sc_path} stream {self.stream_path} "
+                f"virtual {self.virtual[0]}x{self.virtual[1]}")
+            self._subscribe_and_start()
+            return
+
         # Multi-monitor: capture the whole logical desktop (RecordArea over the
         # bounding box) when forced, or auto when more than one logical monitor
         # is present. Otherwise keep the proven single-monitor RecordMonitor.
         area = self._desktop_area()
-        props = {"cursor-mode": GLib.Variant("u", 1)}
         if area and (self.all_monitors or area[4] > 1):
             x, y, w, h, n = area
             self.area_x, self.area_y = x, y
@@ -347,6 +388,11 @@ class Session:
                 None, Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
             log(f"ScreenCast session {self.sc_path} stream {self.stream_path} monitor={self.monitor}")
 
+        self._subscribe_and_start()
+
+    def _subscribe_and_start(self):
+        """Common tail of every capture mode: subscribe to the stream/session
+        signals and start the RD session."""
         self._sub_ids.append(self.bus.signal_subscribe(
             SC_DEST, SC_STREAM_IFACE, "PipeWireStreamAdded", self.stream_path, None,
             Gio.DBusSignalFlags.NONE, self._on_stream_added))
@@ -385,13 +431,24 @@ class Session:
         self._start_pipeline()
 
     # ---- PipeWire capture via GStreamer appsink ----------------------------
-    def _start_pipeline(self):
-        desc = (
+    def _pipeline_desc(self):
+        # A RecordVirtual stream has no intrinsic size — the virtual monitor is
+        # sized by what the consumer asks for, and asking for nothing negotiates
+        # a 1x1 frame (verified against mutter 50.1). So the requested size IS
+        # the session resolution and must be pinned here. The physical paths
+        # (RecordMonitor/RecordArea) must NOT pin one: there the size comes from
+        # the monitor, and forcing a different one would scale every frame.
+        caps = "video/x-raw,format=BGRx"
+        if self.virtual:
+            caps += f",width={self.virtual[0]},height={self.virtual[1]}"
+        return (
             f"pipewiresrc path={self.node_id} do-timestamp=true keepalive-time=1000 ! "
-            "videoconvert ! video/x-raw,format=BGRx ! "
+            f"videoconvert ! {caps} ! "
             "appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
         )
-        self.pipeline = Gst.parse_launch(desc)
+
+    def _start_pipeline(self):
+        self.pipeline = Gst.parse_launch(self._pipeline_desc())
         sink = self.pipeline.get_by_name("sink")
         sink.connect("new-sample", self._on_sample)
         self.pipeline.set_state(Gst.State.PLAYING)
@@ -582,15 +639,28 @@ def main():
     ap.add_argument("--all-monitors", action="store_true",
                     help="capture the whole logical desktop (RecordArea) instead "
                          "of a single monitor; auto-enabled when >1 monitor")
+    ap.add_argument("--virtual", metavar="WxH",
+                    help="backstage mode: capture a Mutter-conjured virtual "
+                         "monitor (RecordVirtual) at this resolution instead of a "
+                         "physical connector. Needs no monitor, no dummy plug and "
+                         "no login; overrides --monitor/--all-monitors.")
     ap.add_argument("--shm", default="/dev/shm/dreamconnect.frame")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
     ap.add_argument("--socket", default=os.path.join(runtime_dir, "dreamconnect.sock"))
     args = ap.parse_args()
 
+    virtual = None
+    if args.virtual:
+        try:
+            virtual = parse_resolution(args.virtual)
+        except ValueError as e:
+            ap.error(str(e))
+
     Gst.init(None)
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     frame = FrameBuffer(args.shm)
-    session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors)
+    session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
+                      virtual=virtual)
     session.start()
     ControlServer(args.socket, session).start()
 

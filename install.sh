@@ -14,7 +14,20 @@
 #   INSTALL_DIR=<path>         default /opt/dreamconnect
 #   DREAMCONNECT_SKIP_DEPS=1   don't touch the package manager (deps preinstalled)
 #   DREAMCONNECT_AUTOLOGIN=1   configure GDM autologin so the bridge survives a
-#                              reboot unattended (security trade-off — opt-in)
+#                              reboot unattended (security trade-off — opt-in).
+#                              Ignored in backstage mode, which needs no login.
+#   DREAMCONNECT_BACKSTAGE=1   backstage mode: run the bridge against a headless
+#                              `gnome-shell --headless` started by the lingering
+#                              user manager, capturing a Mutter virtual monitor.
+#                              Needs no monitor, no HDMI dummy plug, no login and
+#                              no autologin — the box is reachable from boot with
+#                              the greeter still up. The operator gets a private
+#                              admin desktop, NOT the console user's session.
+#   DREAMCONNECT_BACKSTAGE_RES=<WxH>
+#                              backstage screen size (default 1920x1080). This is
+#                              the real resolution: a virtual monitor has no
+#                              intrinsic size, so whatever is asked for is what
+#                              the operator sees.
 #   DREAMCONNECT_HOST_ACCOUNT=<name>
 #                              run the bridge in a dedicated display-host account
 #                              instead of the human's session: creates the account
@@ -85,6 +98,10 @@ uninstall() {
                           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$target_uid/bus")
 
   "${target_run_user[@]}" systemctl --user disable --now dreamconnect-daemon.service 2>/dev/null || true
+  # Backstage installs only: stopping the shell unit tears down the headless
+  # session itself. Unconditional and quiet, exactly like the daemon line above —
+  # a classic install simply has no such unit.
+  "${target_run_user[@]}" systemctl --user disable --now dreamconnect-backstage.service 2>/dev/null || true
   # $target_home is passwd field 6 verbatim, and an account deleted by hand
   # before --uninstall leaves it empty — which points this rm at root's own
   # /.config/systemd/user. `rm -f` is silent about that today, but silence is an
@@ -93,7 +110,8 @@ uninstall() {
   # (the SC drop-in, the dconf revert, the account, the state file) is exactly
   # what a box whose account is already gone still needs reverted.
   if valid_home_dir "$target_home"; then
-    rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service"
+    rm -f "$target_home/.config/systemd/user/dreamconnect-daemon.service" \
+          "$target_home/.config/systemd/user/dreamconnect-backstage.service"
   else
     echo "!! skipping the daemon unit removal for $target_name: unusable home directory '$target_home' — continuing"
   fi
@@ -183,7 +201,31 @@ if [ -n "$PROTECTED_USER" ]; then
 else
   RUN_USER=()
 fi
-MONITOR="$(detect_monitor)"
+# --- backstage mode ---------------------------------------------------------
+# Backstage runs the bridge against `gnome-shell --headless` under the lingering
+# user manager: no monitor, no dummy plug, no login, no autologin. Resolved here,
+# before anything is created, because it changes which unit the daemon hangs off
+# and removes the GDM requirement below.
+BACKSTAGE=0
+BACKSTAGE_RES=""
+# A named Wayland display keeps the backstage shell distinct from any real
+# session the human may later log into on the same box.
+BACKSTAGE_WAYLAND_DISPLAY="dreamconnect"
+if [ "${DREAMCONNECT_BACKSTAGE:-}" = "1" ]; then
+  BACKSTAGE=1
+  BACKSTAGE_RES="$(backstage_resolution "${DREAMCONNECT_BACKSTAGE_RES:-}")" \
+    || die "fix DREAMCONNECT_BACKSTAGE_RES and re-run"
+  backstage_supported \
+    || die "DREAMCONNECT_BACKSTAGE=1 but gnome-shell is not installed; backstage runs 'gnome-shell --headless' and cannot work without it"
+fi
+
+# A backstage session has no connector to name — Mutter conjures the monitor —
+# and probing for one on a box with no session would just log a fallback.
+if [ "$BACKSTAGE" -eq 1 ]; then
+  MONITOR=""
+else
+  MONITOR="$(detect_monitor)"
+fi
 
 # --- resolve the identity the daemon/autologin/socket will run under --------
 # "user" and "local" are dconf's own default profile and its shared system db;
@@ -220,8 +262,13 @@ if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   # system rather than leaving a created-but-useless account behind. `|| true`
   # because gdm_conf exits non-zero when there is no GDM, and set -e would
   # otherwise abort here without saying why.
-  GDM_CONF="$(gdm_conf || true)"
-  [ -n "$GDM_CONF" ] || die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT set but no GDM found (/etc/gdm{,3}/custom.conf); DreamConnect's display-host account currently targets GNOME/GDM only."
+  #
+  # Backstage is exempt: it never logs the account in, so there is nothing for a
+  # display manager to do and no reason to require one.
+  if [ "$BACKSTAGE" -eq 0 ]; then
+    GDM_CONF="$(gdm_conf || true)"
+    [ -n "$GDM_CONF" ] || die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT set but no GDM found (/etc/gdm{,3}/custom.conf); DreamConnect's display-host account currently targets GNOME/GDM only. (DREAMCONNECT_BACKSTAGE=1 removes this requirement.)"
+  fi
   ensure_host_account "$DREAMCONNECT_HOST_ACCOUNT"
   HOST_WAS_CREATED="$ACCOUNT_WAS_CREATED"
 fi
@@ -249,7 +296,11 @@ fi
 
 echo ">> desktop user : $USER_NAME (uid $USER_UID)"
 echo ">> SC unit      : ${SC_UNIT:-<none found>}"
-echo ">> capture mon  : $MONITOR"
+if [ "$BACKSTAGE" -eq 1 ]; then
+  echo ">> capture      : backstage virtual monitor $BACKSTAGE_RES (no physical connector)"
+else
+  echo ">> capture mon  : $MONITOR"
+fi
 echo ">> install dir  : $INSTALL_DIR"
 
 # --- dependencies (distro-agnostic, best-effort) ----------------------------
@@ -305,6 +356,7 @@ fi
 echo ">> deploying to $INSTALL_DIR"
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/runtime"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
+install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-backstage-env.sh" "$INSTALL_DIR/runtime/"
 install -o root -g root -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
 
 # --- host fix: broken-:1 display skip wrapper -------------------------------
@@ -318,19 +370,52 @@ install -m 0755 "$HERE/host-fixes/xprobe-skip-broken-display.sh" \
 for t in xdpyinfo xrandr xwininfo xrdb; do ln -sf .dc-xprobe-wrapper "/usr/local/bin/$t"; done
 
 # --- user daemon service ----------------------------------------------------
+# One unit template serves both modes; what differs is the session the daemon
+# hangs off and how it is told to capture.
+#   classic   — a real logged-in session:   graphical-session.target, --monitor
+#   backstage — our own headless shell:     dreamconnect-backstage.service, --virtual
+# graphical-session.target is never reached by a spawned headless shell, so the
+# backstage daemon must depend on the shell unit itself.
+if [ "$BACKSTAGE" -eq 1 ]; then
+  SESSION_UNIT="dreamconnect-backstage.service"
+  DAEMON_ARGS="--virtual $BACKSTAGE_RES"
+else
+  SESSION_UNIT="graphical-session.target"
+  DAEMON_ARGS="--monitor $MONITOR"
+fi
+
 echo ">> installing user service"
 install -d -o "$USER_NAME" "$USER_HOME/.config/systemd/user"
-sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@MONITOR@#$MONITOR#g" \
+sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+    -e "s#@SESSION_UNIT@#$SESSION_UNIT#g" \
+    -e "s#@DAEMON_ARGS@#$DAEMON_ARGS#g" \
     "$HERE/systemd/dreamconnect-daemon.service" \
     > "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
 chown "$USER_NAME:" "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
+
+if [ "$BACKSTAGE" -eq 1 ]; then
+  echo ">> installing backstage session unit (headless gnome-shell, ${BACKSTAGE_RES})"
+  sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+      -e "s#@WAYLAND_DISPLAY@#$BACKSTAGE_WAYLAND_DISPLAY#g" \
+      "$HERE/systemd/dreamconnect-backstage.service" \
+      > "$USER_HOME/.config/systemd/user/dreamconnect-backstage.service"
+  chown "$USER_NAME:" "$USER_HOME/.config/systemd/user/dreamconnect-backstage.service"
+fi
+
 loginctl enable-linger "$USER_NAME"
 # enable-linger starts user@$USER_UID.service in the background; the systemctl
 # --user calls below need its bus to exist first (issue #24).
 wait_for_user_bus "$USER_UID" \
   || die "the user bus for $USER_NAME (uid $USER_UID) never came up after 'loginctl enable-linger'; check 'systemctl status user@$USER_UID.service'"
 "${RUN_USER[@]}" systemctl --user daemon-reload
-"${RUN_USER[@]}" systemctl --user enable --now dreamconnect-daemon.service
+if [ "$BACKSTAGE" -eq 1 ]; then
+  # The daemon is WantedBy the backstage unit, so starting the shell pulls the
+  # daemon up with it — and does so again at every boot, with nobody logged in.
+  "${RUN_USER[@]}" systemctl --user enable dreamconnect-daemon.service
+  "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-backstage.service
+else
+  "${RUN_USER[@]}" systemctl --user enable --now dreamconnect-daemon.service
+fi
 
 # --- ScreenConnect drop-in --------------------------------------------------
 if [ -n "$SC_UNIT" ]; then
@@ -367,7 +452,21 @@ fi
 # would abort here — silently, after everything else has already installed, and
 # without ever reaching the "no GDM found" warnings below.
 GDM_CONF="$(gdm_conf || true)"
-if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
+if [ "$BACKSTAGE" -eq 1 ]; then
+  # Backstage is the whole point: the bridge comes up from the lingering user
+  # manager with nobody logged in, so there is nothing for autologin to solve and
+  # the box keeps its login prompt. Honour nothing here, and say so plainly if
+  # the operator asked for autologin anyway.
+  echo ">> backstage mode: reboot survival comes from the lingering user manager, not autologin"
+  echo "   the greeter stays up and no session is ever auto-unlocked."
+  if [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
+    echo "!! DREAMCONNECT_AUTOLOGIN=1 ignored — backstage does not need it. Re-run without"
+    echo "   DREAMCONNECT_BACKSTAGE=1 if you specifically want an auto-unlocked console session."
+  fi
+  echo
+  echo "   NOTE: the backstage desktop is a PRIVATE session, not the console user's."
+  echo "   To see what a logged-in user sees, install without DREAMCONNECT_BACKSTAGE=1."
+elif [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   echo ">> enabling GDM autologin for the display-host account $USER_NAME in $GDM_CONF"
   enable_autologin "$GDM_CONF" "$USER_NAME"
   echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."

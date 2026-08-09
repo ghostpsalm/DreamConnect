@@ -627,6 +627,50 @@ print(monitors[0][0][0])  # first monitor's connector name
 PY
 }
 
+# --- backstage (headless) session --------------------------------------------
+# Backstage runs the bridge against a gnome-shell started with --headless, so no
+# monitor, no dummy plug and no login are needed. The resolution is not a
+# preference there: a RecordVirtual stream has no intrinsic size, so whatever is
+# requested here IS the session's screen size, and an unvalidated value reaches
+# Mutter and the shm frame allocator directly. Echoes the normalised WxH.
+backstage_resolution() {  # [value] -> WxH on stdout, non-zero if unusable
+  local value lower w h
+  value="${1:-}"
+  [ -n "$value" ] || value="1920x1080"
+  lower="${value//X/x}"
+  case "$lower" in
+    *[!0-9x]*)
+      echo "error: DREAMCONNECT_BACKSTAGE_RES must be WxH (e.g. 1920x1080), got '$value'" >&2
+      return 1 ;;
+  esac
+  w="${lower%%x*}"; h="${lower##*x}"
+  # Round-tripping the split back to the input is what pins "exactly one 'x'":
+  # it rejects '1920' (no separator), '1920x1080x1', 'x1080' and '1920x' alike.
+  if [ -z "$w" ] || [ -z "$h" ] || [ "${w}x${h}" != "$lower" ]; then
+    echo "error: DREAMCONNECT_BACKSTAGE_RES must be WxH (e.g. 1920x1080), got '$value'" >&2
+    return 1
+  fi
+  # Strip leading zeros so 08 isn't read as octal by the arithmetic below.
+  w=$((10#$w)); h=$((10#$h))
+  if [ "$w" -lt 1 ] || [ "$h" -lt 1 ]; then
+    echo "error: backstage resolution must be positive, got '$value'" >&2
+    return 1
+  fi
+  # Same 16384 ceiling the daemon enforces (MAX_DIMENSION): every frame is
+  # copied into shm at w*h*4 bytes, so a typo must not be allocated.
+  if [ "$w" -gt 16384 ] || [ "$h" -gt 16384 ]; then
+    echo "error: backstage resolution exceeds 16384px per side: '$value'" >&2
+    return 1
+  fi
+  echo "${w}x${h}"
+}
+
+# Refuse backstage on a box with no gnome-shell: the unit would crash-loop
+# forever and the failure would only show up as "no capture" much later.
+backstage_supported() {  # -> 0 if a headless gnome-shell can be started
+  command -v gnome-shell >/dev/null 2>&1
+}
+
 # --- no idle lock for the display-host account -------------------------------
 # Locking a session makes Mutter close the active RemoteDesktop/ScreenCast
 # session and refuse to recreate one while locked, so an unattended account that

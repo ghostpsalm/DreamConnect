@@ -315,9 +315,26 @@ documented in [`docs/troubleshooting.md`](docs/troubleshooting.md). Only Fedora 
 tested end to end; other distros' names are best-effort.
 
 #### H6 — Reboot survival / autologin
-**Status:** ✅ DONE (autologin shipped v1.3; display-host account code-complete, needs on-device verification) · **Priority:** medium
+**Status:** ✅ DONE (backstage shipped and live-verified; autologin shipped v1.3; display-host account code-complete, needs on-device verification) · **Priority:** medium
 
-Two ways to survive an unattended reboot:
+**Backstage is now the recommended answer, and it removes the question.**
+`DREAMCONNECT_BACKSTAGE=1` installs a user unit that runs
+`gnome-shell --headless` under the lingering user manager, and points the daemon
+at a Mutter virtual monitor (`RecordVirtual`) instead of a connector. Nobody logs
+in, the greeter stays up, and no session is ever auto-unlocked — so neither
+autologin nor a dummy plug is needed. The daemon hangs off
+`dreamconnect-backstage.service` rather than `graphical-session.target`, which a
+spawned headless shell never reaches.
+
+Verified live on Fedora 44 / GNOME 50.2 with the box parked at the greeter: shell
+up in ~2s with no seat, `RecordVirtual` streaming 1920×1080 with `GetCurrentState`
+reporting **zero** monitors, input accepted, and ScreenConnect's root JVM
+attaching to the headless Xwayland (`isHeadless=false`, correct screen size) and
+reaching the relay. What backstage does **not** do is show the console user's
+desktop or the greeter — it is a private admin session. See
+[`docs/wayland-headless-capture.md`](docs/wayland-headless-capture.md).
+
+The two older ways to survive an unattended reboot, both still supported:
 
 - **Autologin the human's session** (`DREAMCONNECT_AUTOLOGIN=1`) — `install.sh`
   configures GDM autologin on explicit opt-in: a section-aware, idempotent edit

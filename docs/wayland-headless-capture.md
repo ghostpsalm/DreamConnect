@@ -1,8 +1,22 @@
 # Wayland headless capture — removing the dummy plug and autologin
 
-**Status: an external finding, verified elsewhere, not yet implemented here.** Nothing in this
-repository does what this document describes. It is written so the work can be picked up without
-re-deriving it.
+**Status: IMPLEMENTED and live-verified on this host (2026-08-09).** Shipped as backstage mode —
+`DREAMCONNECT_BACKSTAGE=1`. Both findings below were re-run here from a cold start, with the box
+parked at the GDM greeter and nobody logged in, before any code was written:
+
+| Check | Result on Fedora 44 / GNOME 50.2 / mutter 50.1 |
+|---|---|
+| `gnome-shell --headless` under linger, no seat | Mutter on the user bus in **2s** |
+| `RecordVirtual` with no monitor attached | stream up, `GetCurrentState` = **0 monitors / 0 logical** |
+| Frame | 1920×1080 BGRx, non-blank; `1280x720` and `1600x900` also honoured |
+| Input | `NotifyPointerMotionAbsolute` + `NotifyKeyboardKeysym` accepted |
+| That shell's Xwayland `:0` | reports a real **1920×1080** (0×0 before `RecordVirtual`) |
+| Java AWT **as root** against it | `isHeadless=false`, `screenSize=1920x1080`, `Robot` constructs, `mouseMove` works |
+| Deployed end to end | daemon streams backstage frames into shm; SC's root JVM loads the agent, holds the shm open, and reaches the relay |
+
+What shipped: `--virtual WxH` on the daemon, `systemd/dreamconnect-backstage.service`,
+`runtime/dreamconnect-backstage-env.sh`, and the installer wiring. What did **not** change: the
+greeter is still unreachable, and backstage is a private session, not the console user's desktop.
 
 **Provenance.** Proven on 2026-08-08 in the SpiritBox RMM project as its spike #96
 (`ghostpsalm/SpiritBox-RMM`, issue #96), while surveying Linux capture paths for a remote-control
@@ -33,8 +47,8 @@ reaches the *same* no-consent interface; it does not trade the dummy plug for a 
 
 ## Finding 1 — `RecordVirtual` replaces the dummy plug outright
 
-`runtime/dreamconnect_daemon.py:345` calls `RecordMonitor`, which takes a connector name and therefore
-requires a connector to exist. The same `ScreenCast.Session` object exposes:
+`runtime/dreamconnect_daemon.py` called only `RecordMonitor`, which takes a connector name and
+therefore requires a connector to exist. The same `ScreenCast.Session` object exposes:
 
 ```
 RecordVirtual(a{sv} properties) -> o stream_path
@@ -109,6 +123,23 @@ setsid gnome-shell --headless --wayland-display=sp96 >/tmp/sp96.log 2>&1 &
 python3 spike96-recordvirtual.py     # from ghostpsalm/SpiritBox-RMM, spikes/
 ```
 
+## What implementing it turned up
+
+Three things the spike could not have shown, all found while wiring it in:
+
+1. **`graphical-session.target` is never reached** by a spawned headless shell (checked live). The
+   daemon's `WantedBy=graphical-session.target` would therefore never fire, so in backstage mode it
+   hangs off `dreamconnect-backstage.service` instead.
+2. **SC needs to be told where the display is.** The shell's display number and mutter's xauth path
+   (`.mutter-Xwaylandauth.XXXXXX`) are both unpredictable, so neither can be hardcoded in a drop-in.
+   `runtime/dreamconnect-backstage-env.sh` snapshots them out of the systemd user environment into
+   an `EnvironmentFile` the SC drop-in reads.
+3. **The `:1` probe hang is not about `:1`.** Every gnome-shell publishes a `GNOME_SETUP_DISPLAY`
+   socket that Xwayland accepts and never serves. Backstage keeps the GDM greeter running
+   permanently, and the greeter's dead socket is **`:1025`** — so the old wrapper, which hardcoded
+   `:1`, missed it and SC hung offline exactly as before. The wrapper now bounds every probe with a
+   timeout and memoises non-answering displays; it keys on behaviour, never on a number.
+
 ## Still open
 
 - **KDE/KWin and wlroots have no equivalent verified path.** GNOME-only. `ext-image-copy-capture-v1` is
@@ -117,5 +148,21 @@ python3 spike96-recordvirtual.py     # from ghostpsalm/SpiritBox-RMM, spikes/
 - `gnome-remote-desktop-handover.service` and `-headless.service` ship as packaged system units, so the
   GDM handover mechanism is real. Whether a third party may drive it is unestablished — but this finding
   means it is **not needed** for ordinary unattended access.
-- Whether the existing area/coordinate maths in `dreamconnect_daemon.py` (the `RecordMonitor`
-  `area_x`/`area_y` handling around line 428) needs adjusting for a virtual output has not been checked.
+- ~~Whether the existing area/coordinate maths needs adjusting for a virtual output.~~ **Resolved:** a
+  `RecordVirtual` output is origin-anchored, so `area_x`/`area_y` stay 0 and the pointer shift is a
+  no-op, exactly as on the `RecordMonitor` path.
+- **Resolution cannot be changed on a live stream.** Renegotiating the consumer's caps mid-stream
+  stalls it (tested: no further frames). Changing the backstage resolution means tearing the
+  ScreenCast stream down and recreating it, which today means restarting the daemon. ScreenConnect
+  has no guest-resolution command to hook either — `SelectQuality`/`ZoomToScale` are operator-side
+  only — so this is install-time configuration (`DREAMCONNECT_BACKSTAGE_RES`) for now.
+- **Presenting backstage in SC's own session picker is not built.** `SelectLogonSession` already
+  reaches the guest and `Bridge.relabelLogonSessions` already rewrites its entries, so injecting a
+  "Backstage" entry is the natural seam — but where SC's Linux client *acts* on the selection is
+  undecompiled and unverified.
+- **Whether the headless shell idle-locks is untested.** If it does, it self-destructs the same way a
+  locked session does (Mutter closes the RemoteDesktop session and refuses to recreate it), so the
+  same `configure_no_idle_lock` treatment the display-host account gets is probably needed.
+- **Both modes at once is untested.** If a human logs in on a box running backstage, two shells export
+  `DISPLAY`/`XAUTHORITY` into the same user environment and the env-file snapshot could pick the
+  wrong one. A dedicated `DREAMCONNECT_HOST_ACCOUNT` avoids the overlap entirely.

@@ -1,0 +1,24 @@
+[Unit]
+Description=dreamconnect backstage session (headless GNOME shell for unattended access)
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# Deliberately depends on NO graphical target: this unit *is* the session. The
+# lingering user manager starts it at boot with nobody logged in, no seat and no
+# greeter involvement, which is what removes the autologin requirement.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# @WAYLAND_DISPLAY@ is substituted by install.sh. A named display keeps this
+# shell distinct from any real session the human may later log into.
+ExecStart=/usr/bin/gnome-shell --headless --wayland-display=@WAYLAND_DISPLAY@
+# Publish the X display + xauth this shell's Xwayland came up on, so the root
+# ScreenConnect JVM can attach to it. Runs after ExecStart forks and polls until
+# gnome-shell has exported them, so the unit only reaches "active" once the
+# display is actually usable — which is what the daemon's After= relies on.
+ExecStartPost=@INSTALL_DIR@/runtime/dreamconnect-backstage-env.sh
+ExecStopPost=-/usr/bin/rm -f %t/dreamconnect-display.env %t/dreamconnect.Xauthority
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

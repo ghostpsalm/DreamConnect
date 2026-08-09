@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for the daemon's control-protocol parser (ControlServer.handle).
+"""Unit tests for the daemon's control-protocol parser (ControlServer.handle)
+and for the backstage/virtual-monitor capture wiring.
 
-No live Wayland/D-Bus needed: a stub session records the calls handle() makes.
+No live Wayland/D-Bus needed: a stub session records the calls handle() makes,
+and the virtual-mode tests only exercise pure string/argument construction.
 Run: python3 -m unittest runtime.test_daemon   (or: python3 runtime/test_daemon.py)
 """
 import os
@@ -77,6 +79,78 @@ class TestHandle(unittest.TestCase):
         self.assertEqual(self.s.calls, [])              # nothing dispatched
         # the next control command still replies correctly
         self.assertEqual(self.cs.handle("PING"), "PONG")
+
+
+class TestParseResolution(unittest.TestCase):
+    """--virtual takes WxH and must refuse anything that would reach Mutter as
+    a nonsense virtual monitor size."""
+
+    def test_parses_a_plain_resolution(self):
+        self.assertEqual(d.parse_resolution("1920x1080"), (1920, 1080))
+
+    def test_accepts_uppercase_x(self):
+        self.assertEqual(d.parse_resolution("1280X720"), (1280, 720))
+
+    def test_tolerates_surrounding_whitespace(self):
+        self.assertEqual(d.parse_resolution("  1600x900 "), (1600, 900))
+
+    def test_rejects_missing_separator(self):
+        with self.assertRaises(ValueError):
+            d.parse_resolution("1920")
+
+    def test_rejects_non_numeric(self):
+        with self.assertRaises(ValueError):
+            d.parse_resolution("wide x tall")
+
+    def test_rejects_zero_and_negative(self):
+        for bad in ("0x1080", "1920x0", "-1920x1080"):
+            with self.assertRaises(ValueError, msg=bad):
+                d.parse_resolution(bad)
+
+    def test_rejects_absurdly_large(self):
+        # A typo like 192000x1080 would have the daemon allocate a ~800 MB shm
+        # frame per update; refuse it at the boundary instead.
+        with self.assertRaises(ValueError):
+            d.parse_resolution("192000x1080")
+
+    def test_accepts_the_documented_maximum(self):
+        self.assertEqual(d.parse_resolution("16384x16384"), (16384, 16384))
+
+
+class TestPipelineDescription(unittest.TestCase):
+    """RecordVirtual hands back a stream with no intrinsic size: the consumer
+    must request one or PipeWire negotiates 1x1 (verified against mutter 50.1).
+    The RecordMonitor/RecordArea paths must keep negotiating freely, because
+    there the size comes from the monitor."""
+
+    def _session(self, **kw):
+        return d.Session(None, "HDMI-2", None, **kw)
+
+    def test_virtual_mode_pins_the_requested_size(self):
+        s = self._session(virtual=(1600, 900))
+        s.node_id = 42
+        desc = s._pipeline_desc()
+        self.assertIn("width=1600", desc)
+        self.assertIn("height=900", desc)
+
+    def test_monitor_mode_requests_no_size(self):
+        s = self._session()
+        s.node_id = 42
+        desc = s._pipeline_desc()
+        self.assertNotIn("width=", desc)
+        self.assertNotIn("height=", desc)
+
+    def test_both_modes_keep_the_node_and_the_bgrx_format(self):
+        for kw in ({}, {"virtual": (1920, 1080)}):
+            s = self._session(**kw)
+            s.node_id = 77
+            desc = s._pipeline_desc()
+            self.assertIn("path=77", desc)
+            self.assertIn("format=BGRx", desc)
+            self.assertIn("appsink name=sink", desc)
+
+    def test_virtual_mode_is_off_by_default(self):
+        self.assertIsNone(self._session().virtual)
 
 
 if __name__ == "__main__":

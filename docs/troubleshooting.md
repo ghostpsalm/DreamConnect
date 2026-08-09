@@ -6,24 +6,33 @@
 **offline**; or, once connected, control freezes for ~20–30 s on a repeating
 cycle.
 
-**Cause:** a broken GNOME **Xwayland `:1`** display. On some hosts the Xwayland
-that serves `:0` also exposes a second display `:1` whose socket accepts X
-connections but never completes the handshake. ScreenConnect's own display
-detection (`ClientService` → `getDisplayInfos`) probes every display it finds
+**Cause:** an X display that accepts connections and never completes the
+handshake. Every `gnome-shell` publishes a second X socket for
+`GNOME_SETUP_DISPLAY` alongside the one it actually serves; Xwayland listens on
+both, but only the first answers. ScreenConnect's own display detection
+(`ClientService` → `getDisplayInfos`) probes every display it finds a cookie for
 with `xdpyinfo`/`xrandr`/`xwininfo`/`xrdb`, has no per-probe timeout, and so
-**hangs forever on `:1`** — blocking the relay connection at startup and freezing
-the session thread when detection re-runs.
+**hangs forever** on that socket — blocking the relay connection at startup and
+freezing the session thread when detection re-runs.
 
-This is a pre-existing Xwayland quirk, **not** the agent: `xrdb :1` hangs
+**The display number is not fixed.** A shell serving `:0` publishes the dead
+socket as `:1`; the GDM greeter serving `:1024` publishes `:1025`. Backstage mode
+keeps the greeter running permanently, so its dead socket is present the whole
+time — verified on Fedora 44 / GNOME 50.2, where `xdpyinfo :1024` answers and
+`xdpyinfo :1025` never returns.
+
+This is a pre-existing Xwayland quirk, **not** the agent: the probe hangs
 identically with the DreamConnect daemon stopped, and no Java is in that shell
 probe path. See ROADMAP item **B1** for the open question of whether this is
 inherent ScreenConnect behavior or specific to a given host.
 
 **Fix (applied by `install.sh`):** install the probe tools and a wrapper
 (`host-fixes/xprobe-skip-broken-display.sh`) into `/usr/local/bin` — ahead of
-`/usr/bin` in the service PATH — that makes `DISPLAY=:1` probes fail instantly
-while `:0` works normally. Detection then completes in milliseconds and never
-blocks.
+`/usr/bin` in the service PATH — that bounds every probe with `timeout` and
+remembers, for five minutes, any display that failed to answer. The wrapper keys
+on behaviour, never on a display number: an earlier version hardcoded `:1` and
+therefore missed the greeter's `:1025` entirely. Detection then completes in
+milliseconds and never blocks.
 
 **Emergency recovery** (if the client hangs offline before the wrapper is in
 place):
