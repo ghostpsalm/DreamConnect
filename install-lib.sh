@@ -38,88 +38,6 @@ detect_user() {
   die "could not detect a graphical session user; set DREAMCONNECT_USER="
 }
 
-# Type (wayland/x11) of the desktop user's active graphical session.
-user_session_type() {
-  local sid uid name type active
-  while read -r sid uid name _; do
-    [ "$name" = "$USER_NAME" ] || continue
-    type=$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)
-    active=$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)
-    if { [ "$type" = "wayland" ] || [ "$type" = "x11" ]; } && [ "$active" = "yes" ]; then
-      echo "$type"; return
-    fi
-  done < <(loginctl list-sessions --no-legend)
-}
-
-# --- GDM autologin (reboot survival) helpers --------------------------------
-gdm_conf() {  # path to the GDM config, or empty if GDM isn't present
-  local c
-  for c in /etc/gdm/custom.conf /etc/gdm3/custom.conf; do
-    [ -f "$c" ] && { echo "$c"; return; }
-  done
-}
-
-# Set AutomaticLoginEnable/AutomaticLogin under [daemon], preserving the rest of
-# the file (comments included). Idempotent: strips any prior autologin keys in
-# the section first. Backs up once to <conf>.dreamconnect.bak.
-enable_autologin() {
-  local conf="$1" user="$2" tmp
-
-  # Deliberately NOT the two rails the account-creating functions here use. In
-  # classic mode this name is the machine's existing desktop user, resolved out
-  # of the passwd source and never created by us: on an AD-joined box it is
-  # routinely `john.doe`, it can run past 32 characters, and `user`/`local` are
-  # dconf PROFILE reservations that mean nothing to a file classic mode never
-  # touches. Rejecting those would abort the install after everything else has
-  # already run. What is left is root — the one account this must never log in
-  # automatically — and the two ways a name pasted verbatim into the [daemon]
-  # section below can corrupt the file rather than merely name the wrong
-  # account: empty, or carrying a newline/CR that splits AutomaticLogin= into a
-  # second key. A backslash goes the same way one step later: `awk -v` processes
-  # C escapes in the value, so `DOMAIN\nick` — the winbind domain separator, two
-  # ordinary characters no newline rail can see — becomes a real newline inside
-  # awk. Refused before the backup, so a refusal leaves no .bak either.
-  case "$user" in
-    root)
-      echo "error: refusing to set GDM autologin for 'root'" >&2
-      return 1 ;;
-    "")
-      echo "error: refusing to set GDM autologin: empty account name" >&2
-      return 1 ;;
-    *$'\n'*|*$'\r'*)
-      echo "error: refusing to set GDM autologin: account name contains a newline" >&2
-      return 1 ;;
-    *\\*)
-      echo "error: refusing to set GDM autologin: account name contains a backslash" >&2
-      return 1 ;;
-  esac
-
-  [ -f "$conf.dreamconnect.bak" ] || cp -a "$conf" "$conf.dreamconnect.bak"
-  tmp="$(mktemp)"
-  awk -v user="$user" '
-    BEGIN { in_daemon = 0; done = 0 }
-    /^\[.*\]$/ {
-      in_daemon = ($0 == "[daemon]"); print
-      if (in_daemon) { print "AutomaticLoginEnable=true"; print "AutomaticLogin=" user; done = 1 }
-      next
-    }
-    { if (in_daemon && $0 ~ /^[[:space:]]*#?[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
-    END { if (!done) { print ""; print "[daemon]"; print "AutomaticLoginEnable=true"; print "AutomaticLogin=" user } }
-  ' "$conf" > "$tmp" && cat "$tmp" > "$conf"
-  rm -f "$tmp"
-}
-
-# Undo: drop the autologin keys we set under [daemon]. Leaves the rest intact.
-disable_autologin() {
-  local conf="$1" tmp
-  tmp="$(mktemp)"
-  awk '
-    /^\[.*\]$/ { in_daemon = ($0 == "[daemon]"); print; next }
-    { if (in_daemon && $0 ~ /^[[:space:]]*AutomaticLogin(Enable)?[[:space:]]*=/) next; print }
-  ' "$conf" > "$tmp" && cat "$tmp" > "$conf"
-  rm -f "$tmp"
-}
-
 # --- package manager --------------------------------------------------------
 detect_pm() {
   local pm
@@ -254,12 +172,12 @@ passwd_entry() {
 # the state file and the removal gate without writing to /etc.
 install_state_file() { echo "${DC_STATE_FILE:-/etc/dreamconnect/install.state}"; }
 
-# Record the host identity, whether we created the account, and whether we set
-# autologin. A full overwrite every time, never an append: two HOST_ACCOUNT
-# lines would leave the reader picking one of them arbitrarily.
-write_install_state() {  # name uid created_account autologin_set
+# Record the host identity and whether we created the account. A full overwrite
+# every time, never an append: two HOST_ACCOUNT lines would leave the reader
+# picking one of them arbitrarily.
+write_install_state() {  # name uid created_account
   local f dir tmp created="$3"
-  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
   # CREATED_ACCOUNT is sticky once true, per account name: a bare re-run finds
   # the account already there, recomputes 0, and would otherwise erase the fact
   # that we created it — permanently disarming host_account_removable's rail 5,
@@ -284,20 +202,21 @@ write_install_state() {  # name uid created_account autologin_set
     echo "HOST_ACCOUNT=$1"
     echo "HOST_UID=$2"
     echo "CREATED_ACCOUNT=$created"
-    echo "AUTOLOGIN_SET=$4"
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$f"
 }
 
-# Set HOST_ACCOUNT/HOST_UID/CREATED_ACCOUNT/AUTOLOGIN_SET in the caller's scope.
-# Parsed key by key and never sourced: this file decides whether userdel runs,
-# and `. install.state` on a tampered or half-written file would execute
-# whatever it contains. All four are reset on every call, so an absent or
-# partial file cannot leave a previous read's account name behind for the gate.
+# Set HOST_ACCOUNT/HOST_UID/CREATED_ACCOUNT in the caller's scope. Parsed key by
+# key and never sourced: this file decides whether userdel runs, and
+# `. install.state` on a tampered or half-written file would execute whatever it
+# contains. All three are reset on every call, so an absent or partial file
+# cannot leave a previous read's account name behind for the gate. Unknown keys
+# are ignored, which is what lets a state file written before autologin was
+# removed (it carried AUTOLOGIN_SET) still parse.
 read_install_state() {
   local f line key value
   f="$(install_state_file)"
-  HOST_ACCOUNT=""; HOST_UID=""; CREATED_ACCOUNT=0; AUTOLOGIN_SET=0
+  HOST_ACCOUNT=""; HOST_UID=""; CREATED_ACCOUNT=0
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     key="${line%%=*}"; value="${line#*=}"
@@ -305,7 +224,6 @@ read_install_state() {
       HOST_ACCOUNT)    HOST_ACCOUNT="$value" ;;
       HOST_UID)        HOST_UID="$value" ;;
       CREATED_ACCOUNT) CREATED_ACCOUNT="$value" ;;
-      AUTOLOGIN_SET)   AUTOLOGIN_SET="$value" ;;
     esac
   done < "$f"
 }
@@ -319,7 +237,7 @@ read_install_state() {
 host_account_removable() {  # name protected_user
   local name="${1:-}" protected="${2:-}" entry uid home gecos
   local marker="DreamConnect display host"
-  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
 
   [ -n "$name" ] || { echo "refusing account removal: no account name given" >&2; return 1; }
 
@@ -393,7 +311,7 @@ host_account_installable() {  # requested_or_empty
   # harness of its own and the fresh-box path below otherwise echoes the
   # REQUESTED name straight back unvalidated — so a reserved name survives the
   # whole resolution and reaches useradd, an AccountsService path, a dconf
-  # profile and GDM autologin. root is not a dconf name, it is the account every
+  # profile. root is not a dconf name, it is the account every
   # other rail in this file exists to protect.
   case "$requested" in
     root|user|local)
@@ -496,10 +414,9 @@ ensure_host_account() {  # name
   # An account that already existed may already have an AccountsService file —
   # a human's Session/XSession/Language/Icon. The overwrite below is unavoidable
   # (SystemAccount=true is what hides the account), destroying it is not. Backed
-  # up once, the same way and with the same suffix enable_autologin backs up the
-  # GDM config: the .bak must hold what the account looked like before
-  # dreamconnect ever touched it, so a re-run must never copy our own marker
-  # over it.
+  # up once, with the .dreamconnect.bak suffix the installer uses everywhere: the
+  # .bak must hold what the account looked like before dreamconnect ever touched
+  # it, so a re-run must never copy our own marker over it.
   conf="$dir/$name"
   if [ -f "$conf" ] && [ ! -f "$conf.dreamconnect.bak" ]; then
     run cp -a "$conf" "$conf.dreamconnect.bak"

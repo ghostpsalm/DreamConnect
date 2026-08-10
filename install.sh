@@ -13,9 +13,6 @@
 #   MONITOR=<connector>        capture source (default: auto-detected / HDMI-2)
 #   INSTALL_DIR=<path>         default /opt/dreamconnect
 #   DREAMCONNECT_SKIP_DEPS=1   don't touch the package manager (deps preinstalled)
-#   DREAMCONNECT_AUTOLOGIN=1   configure GDM autologin so the bridge survives a
-#                              reboot unattended (security trade-off — opt-in).
-#                              Ignored in backstage mode, which needs no login.
 #   DREAMCONNECT_HOST_ACCOUNT_SUDO=1
 #                              give the display-host account passwordless sudo,
 #                              so an operator can administer the box from the
@@ -38,14 +35,13 @@
 #                              run the bridge in a dedicated display-host account
 #                              instead of the human's session: creates the account
 #                              if absent, hides it from the greeter, disables
-#                              idle/lock for it, and always configures GDM
-#                              autologin for it (so DREAMCONNECT_AUTOLOGIN is not
-#                              consulted — host-account mode implies autologin,
-#                              and requires GDM). Opt-in; unset means the
-#                              detected desktop user, exactly as before. One host
-#                              account per box: once one is installed, a re-run
-#                              naming a DIFFERENT account is refused — run
-#                              --uninstall first to switch.
+#                              idle/lock for it, and runs the bridge there. The
+#                              account never logs in, so this implies (and turns
+#                              on) DREAMCONNECT_BACKSTAGE=1. Opt-in; unset means
+#                              the detected desktop user. One host account per
+#                              box: once one is installed, a re-run naming a
+#                              DIFFERENT account is refused — run --uninstall
+#                              first to switch.
 #
 # Dependencies are installed via the detected package manager (apt/dnf/zypper/
 # pacman); see docs/troubleshooting.md for the per-distro package list if your
@@ -133,19 +129,10 @@ uninstall() {
     systemctl daemon-reload
     systemctl restart "$SC_UNIT" || true
   fi
-  for t in xdpyinfo xrandr xwininfo xrdb; do
+  for t in xdpyinfo xrandr xwininfo xrdb xdotool; do
     [ -L "/usr/local/bin/$t" ] && rm -f "/usr/local/bin/$t"
   done
   rm -f /usr/local/bin/.dc-xprobe-wrapper
-  # Revert autologin only if we set it up (our backup marker exists).
-  # `|| true` because gdm_conf exits non-zero when there is no GDM, and set -e
-  # would abort the rest of the cleanup below over a display manager we never
-  # touched. The empty case is already handled on the next line.
-  local conf; conf="$(gdm_conf || true)"
-  if [ -n "$conf" ] && [ -f "$conf.dreamconnect.bak" ]; then
-    disable_autologin "$conf"
-    echo ">> disabled the autologin we configured in $conf (backup: $conf.dreamconnect.bak)"
-  fi
   # Undo the linger install always enables — previously never reverted here,
   # a pre-existing gap (see ROADMAP.md H6).
   loginctl disable-linger "$target_name" 2>/dev/null || true
@@ -171,9 +158,9 @@ uninstall() {
       || echo "!! could not revert the AccountsService marker for $HOST_ACCOUNT — continuing"
     local account_removed=1
     if [ "$CREATED_ACCOUNT" = "1" ]; then
-      # On an autologinned box the only active session IS the host account's, so
-      # detect_user returns it and rail 3 would refuse to remove the very account
-      # this feature exists to remove. Protecting an account from itself is
+      # If the host account ever does hold the active session, detect_user
+      # returns it and rail 3 would refuse to remove the very account this
+      # feature exists to remove. Protecting an account from itself is
       # meaningless; the other five rails (uid≠0, safe home, not $SUDO_USER,
       # state agreement, exact GECOS marker) still prove it's ours.
       local protect_arg="$PROTECTED_USER"
@@ -253,7 +240,7 @@ else
   MONITOR="$(detect_monitor)"
 fi
 
-# --- resolve the identity the daemon/autologin/socket will run under --------
+# --- resolve the identity the daemon and socket will run under --------------
 # "user" and "local" are dconf's own default profile and its shared system db;
 # configure_no_idle_lock refuses them, and it only runs long after the account
 # exists. "root" is not a dconf name at all — it is simply the account every
@@ -283,18 +270,21 @@ DREAMCONNECT_HOST_ACCOUNT="$(host_account_installable "${DREAMCONNECT_HOST_ACCOU
   || die "this box already has a display-host account installed; run $0 --uninstall first
    (if install.state itself records an invalid or reserved account name, --uninstall
    will refuse it too; delete $(install_state_file) by hand to recover)"
+# A display-host account never logs in, and autologin — the thing that used to
+# log it in — is gone. Backstage is now the only way it can run a session at all,
+# so the account implies it rather than requiring the operator to ask for both.
+# Resolved here, after host_account_installable, so a bare re-run on a box that
+# already records an account still gets backstage.
+if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ] && [ "$BACKSTAGE" -eq 0 ]; then
+  echo ">> DREAMCONNECT_HOST_ACCOUNT implies backstage — the account never logs in"
+  BACKSTAGE=1
+  BACKSTAGE_RES="$(backstage_resolution "${DREAMCONNECT_BACKSTAGE_RES:-}")" \
+    || die "fix DREAMCONNECT_BACKSTAGE_RES and re-run"
+  backstage_supported \
+    || die "a display-host account needs backstage, which runs 'gnome-shell --headless', but gnome-shell is not installed"
+  MONITOR=""
+fi
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
-  # Host-account mode needs GDM to ever autologin — fail before touching the
-  # system rather than leaving a created-but-useless account behind. `|| true`
-  # because gdm_conf exits non-zero when there is no GDM, and set -e would
-  # otherwise abort here without saying why.
-  #
-  # Backstage is exempt: it never logs the account in, so there is nothing for a
-  # display manager to do and no reason to require one.
-  if [ "$BACKSTAGE" -eq 0 ]; then
-    GDM_CONF="$(gdm_conf || true)"
-    [ -n "$GDM_CONF" ] || die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT set but no GDM found (/etc/gdm{,3}/custom.conf); DreamConnect's display-host account currently targets GNOME/GDM only. (DREAMCONNECT_BACKSTAGE=1 removes this requirement.)"
-  fi
   ensure_host_account "$DREAMCONNECT_HOST_ACCOUNT"
   HOST_WAS_CREATED="$ACCOUNT_WAS_CREATED"
 fi
@@ -313,11 +303,10 @@ RUN_USER=(sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus")
 
 # The account now exists, so record it before anything else can fail: every
-# later step (deps, build, deploy, linger, the daemon unit, autologin) is a
-# chance to abort, and --uninstall can only revert what this file names.
-# AUTOLOGIN_SET is 1 because host-account mode always configures it below.
+# later step (deps, build, deploy, linger, the daemon unit) is a chance to abort,
+# and --uninstall can only revert what this file names.
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
-  write_install_state "$USER_NAME" "$USER_UID" "$HOST_WAS_CREATED" 1
+  write_install_state "$USER_NAME" "$USER_UID" "$HOST_WAS_CREATED"
 fi
 
 echo ">> desktop user : $USER_NAME (uid $USER_UID)"
@@ -393,7 +382,7 @@ install -o root -g root -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.ja
 echo ">> installing broken-display skip wrapper"
 install -m 0755 "$HERE/host-fixes/xprobe-skip-broken-display.sh" \
   /usr/local/bin/.dc-xprobe-wrapper
-for t in xdpyinfo xrandr xwininfo xrdb; do ln -sf .dc-xprobe-wrapper "/usr/local/bin/$t"; done
+for t in xdpyinfo xrandr xwininfo xrdb xdotool; do ln -sf .dc-xprobe-wrapper "/usr/local/bin/$t"; done
 
 # --- user daemon service ----------------------------------------------------
 # One unit template serves both modes; what differs is the session the daemon
@@ -492,73 +481,25 @@ if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   fi
 fi
 
-# --- reboot survival: display-manager autologin -----------------------------
-# The daemon is WantedBy=graphical-session.target, which only fires once a
-# graphical session logs in; the bridge can't drive the GDM greeter. So an
-# unattended box must autologin at boot. That's a security trade-off (physical
-# access -> an already-unlocked session), so we only configure it on explicit
-# opt-in (DREAMCONNECT_AUTOLOGIN=1); otherwise we warn and point at the opt-in.
-# Host-account mode is unattended by construction, so it always configures
-# autologin (for the display-host account, never the human's) — DREAMCONNECT_AUTOLOGIN
-# isn't consulted, and the GDM check above already refused if there's no GDM.
-# `|| true` because gdm_conf exits non-zero when there is no GDM, and set -e
-# would abort here — silently, after everything else has already installed, and
-# without ever reaching the "no GDM found" warnings below.
-GDM_CONF="$(gdm_conf || true)"
+# --- reboot survival ---------------------------------------------------------
+# Backstage is how an unattended box survives a reboot: the lingering user
+# manager brings the headless session (and the daemon with it) up at boot, with
+# nobody logged in and the greeter untouched.
+#
+# GDM autologin used to be the answer here. It existed only to manufacture a
+# graphical session so the bridge had something to attach to — never to make the
+# login screen viewable, which Mutter forbids outright. Backstage creates that
+# session directly, so the workaround, its GDM edit and its unlocked console are
+# all gone. See git history if it ever needs resurrecting.
 if [ "$BACKSTAGE" -eq 1 ]; then
-  # Backstage is the whole point: the bridge comes up from the lingering user
-  # manager with nobody logged in, so there is nothing for autologin to solve and
-  # the box keeps its login prompt. Honour nothing here, and say so plainly if
-  # the operator asked for autologin anyway.
-  echo ">> backstage mode: reboot survival comes from the lingering user manager, not autologin"
+  echo ">> backstage: the bridge comes up at boot from the lingering user manager."
   echo "   the greeter stays up and no session is ever auto-unlocked."
-  if [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
-    echo "!! DREAMCONNECT_AUTOLOGIN=1 ignored — backstage does not need it. Re-run without"
-    echo "   DREAMCONNECT_BACKSTAGE=1 if you specifically want an auto-unlocked console session."
-  fi
   echo
   echo "   NOTE: the backstage desktop is a PRIVATE session, not the console user's."
-  echo "   To see what a logged-in user sees, install without DREAMCONNECT_BACKSTAGE=1."
-elif [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
-  echo ">> enabling GDM autologin for the display-host account $USER_NAME in $GDM_CONF"
-  enable_autologin "$GDM_CONF" "$USER_NAME"
-  echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
-elif [ "${DREAMCONNECT_AUTOLOGIN:-}" = "1" ]; then
-  if [ -n "$GDM_CONF" ]; then
-    echo ">> enabling GDM autologin for $USER_NAME in $GDM_CONF (DREAMCONNECT_AUTOLOGIN=1)"
-    # Non-fatal here, unlike the host-account call above: this is the very last
-    # step and the daemon is already installed, so a refused name (root, or one
-    # carrying a backslash) must not abort an otherwise-complete install.
-    if enable_autologin "$GDM_CONF" "$USER_NAME"; then
-      echo "   SECURITY: this box now boots straight into $USER_NAME's session, no login prompt."
-      echo "   backup: $GDM_CONF.dreamconnect.bak · reboot to verify unattended survival."
-    else
-      # Nothing was written, so neither the security warning nor the backup path
-      # below would be true — the refusal is the whole of the output.
-      echo "!! could not enable autologin for $USER_NAME — the daemon install itself succeeded; check the account name and re-run, or configure autologin manually"
-    fi
-    # WaylandEnable=false only matters if it's actually forcing Xorg. Modern GDM
-    # (50+) ignores it and the session is Wayland anyway, so only warn when this
-    # user's current session is NOT Wayland — otherwise it's demonstrably inert.
-    if grep -qiE '^[[:space:]]*WaylandEnable[[:space:]]*=[[:space:]]*false' "$GDM_CONF" \
-       && [ "$(user_session_type)" != "wayland" ]; then
-      echo "   NOTE: WaylandEnable=false is set and this session isn't Wayland —"
-      echo "   ensure $USER_NAME's autologin session is GNOME on Wayland, not Xorg,"
-      echo "   or the bridge won't work at boot."
-    fi
-  else
-    echo "!! DREAMCONNECT_AUTOLOGIN=1 but no GDM found (/etc/gdm{,3}/custom.conf)."
-    echo "   DreamConnect targets GNOME/GDM; enable autologin for $USER_NAME on your"
-    echo "   display manager by hand to survive reboots."
-  fi
-elif [ -n "$GDM_CONF" ] \
-     && grep -qiE '^[[:space:]]*AutomaticLoginEnable[[:space:]]*=[[:space:]]*true' "$GDM_CONF"; then
-  echo ">> autologin already enabled in $GDM_CONF — the bridge will survive a reboot."
+  echo "   To see what a logged-in user sees, install without DREAMCONNECT_BACKSTAGE=1"
+  echo "   and have the user log in."
 else
-  echo "!! WARNING: autologin is not enabled — the bridge will NOT survive a reboot."
-  echo "   It needs a graphical Wayland session at boot but can't drive the greeter."
-  echo "   Re-run with DREAMCONNECT_AUTOLOGIN=1 to configure GDM autologin for $USER_NAME"
-  echo "   (security trade-off: physical access -> an unlocked session), or set it up manually."
+  echo "!! attended install: the bridge follows $USER_NAME's graphical session, so it"
+  echo "   only runs while they are logged in and will NOT survive a reboot on its own."
+  echo "   Re-run with DREAMCONNECT_BACKSTAGE=1 for an unattended box."
 fi
-
-echo ">> done. Check:  ${RUN_USER[*]} systemctl --user status dreamconnect-daemon"

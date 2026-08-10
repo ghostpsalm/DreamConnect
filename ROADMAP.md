@@ -50,8 +50,8 @@ full per-command coverage.
 - **GNOME/Mutter only** — no KDE/wlroots yet → [V2-2](#v2-2--wayland-everywhere-other-compositors).
 - **Fedora-tested**; installer supports apt/dnf/zypper/pacman but only Fedora is
   verified end to end → [H5](#h5--distro-agnostic-install).
-- **Must be logged in**; the installer can enable autologin (opt-in) for reboot
-  survival → [H6](#h6--reboot-survival--autologin).
+- **Attended mode must be logged in**; backstage needs no login at all →
+  [H6](#h6--reboot-survival).
 - Keymap assumes a US-ish physical layout; non-US layouts, dead keys, and some
   keypad keys may be imperfect → [H1](#h1--keymap-fidelity).
 - Single monitor only; multi-monitor is untested → [H2](#h2--multi-monitor).
@@ -314,8 +314,8 @@ aborting; `DREAMCONNECT_SKIP_DEPS=1` opts out. Per-distro package names are
 documented in [`docs/troubleshooting.md`](docs/troubleshooting.md). Only Fedora is
 tested end to end; other distros' names are best-effort.
 
-#### H6 — Reboot survival / autologin
-**Status:** ✅ DONE (backstage shipped and live-verified; autologin shipped v1.3; display-host account code-complete, needs on-device verification) · **Priority:** medium
+#### H6 — Reboot survival
+**Status:** ✅ DONE (backstage shipped and live-verified; autologin removed) · **Priority:** medium
 
 **Backstage is now the recommended answer, and it removes the question.**
 `DREAMCONNECT_BACKSTAGE=1` installs a user unit that runs
@@ -334,7 +334,13 @@ reaching the relay. What backstage does **not** do is show the console user's
 desktop or the greeter — it is a private admin session. See
 [`docs/wayland-headless-capture.md`](docs/wayland-headless-capture.md).
 
-The two older ways to survive an unattended reboot, both still supported:
+**Autologin was removed** once backstage landed. It only ever existed to
+manufacture a graphical session for the bridge to attach to — it never made the
+login screen viewable, which Mutter forbids — and it cost an unlocked console at
+boot. `DREAMCONNECT_AUTOLOGIN`, the GDM edit, its backup file and the security
+warnings around it are all gone; git history has them if they're ever needed.
+
+The display-host account survives, and now implies backstage:
 
 - **Autologin the human's session** (`DREAMCONNECT_AUTOLOGIN=1`) — `install.sh`
   configures GDM autologin on explicit opt-in: a section-aware, idempotent edit

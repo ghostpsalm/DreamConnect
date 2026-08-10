@@ -70,8 +70,7 @@ test_sourcing_is_side_effect_free() {
 # after sourcing; these are the units slices 2-7 test against tmp fixtures.
 test_library_defines_the_installer_functions() {
   local fn
-  for fn in die detect_user user_session_type gdm_conf enable_autologin \
-            disable_autologin detect_pm pm_install detect_monitor run; do
+  for fn in die detect_user detect_pm pm_install detect_monitor run; do
     declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
   done
 }
@@ -216,11 +215,10 @@ test_resolve_host_identity_fails_when_the_account_is_absent() {
 #         HOST_ACCOUNT=<name>
 #         HOST_UID=<uid>
 #         CREATED_ACCOUNT=<0 or 1>
-#         AUTOLOGIN_SET=<0 or 1>
 #
 #   read_install_state
 #     No args. Sets FOUR variables in the CALLER's scope from "$DC_STATE_FILE":
-#     HOST_ACCOUNT, HOST_UID, CREATED_ACCOUNT, AUTOLOGIN_SET. When the file does
+#     HOST_ACCOUNT, HOST_UID, CREATED_ACCOUNT. When the file does
 #     not exist it must still set all four, to the safe defaults "", "", 0, 0 —
 #     never leave a previous call's values sitting in the caller's shell.
 #
@@ -268,13 +266,15 @@ EOF
 
 # State fixtures are written BY HAND in the documented format, not via
 # write_install_state, so a bug in the writer cannot mask a missing safety rail.
-write_state_fixture() {  # path account uid created autologin
+write_state_fixture() {  # path account uid created [ignored]
+  # Arg 5 is accepted and ignored: it was AUTOLOGIN_SET, retired with autologin.
+  # Call sites still pass it, and read_install_state ignores unknown keys, so a
+  # state file written by an older install still parses.
   mkdir -p "$(dirname "$1")"
   {
     echo "HOST_ACCOUNT=$2"
     echo "HOST_UID=$3"
     echo "CREATED_ACCOUNT=$4"
-    echo "AUTOLOGIN_SET=$5"
   } > "$1"
 }
 
@@ -309,7 +309,7 @@ test_library_defines_the_state_and_removal_functions() {
 }
 
 # Parent directories may not exist yet (/etc/dreamconnect on a fresh box).
-test_write_install_state_creates_parent_dirs_and_all_four_keys() {
+test_write_install_state_creates_parent_dirs_and_all_keys() {
   local body
   local DC_STATE_FILE="$TMP/state-fresh/dreamconnect/install.state"
   local state="$DC_STATE_FILE"
@@ -319,7 +319,6 @@ test_write_install_state_creates_parent_dirs_and_all_four_keys() {
   assert_contains "$body" "HOST_ACCOUNT=dreamconnect-host" "state file records HOST_ACCOUNT"
   assert_contains "$body" "HOST_UID=987"                   "state file records HOST_UID"
   assert_contains "$body" "CREATED_ACCOUNT=1"              "state file records CREATED_ACCOUNT"
-  assert_contains "$body" "AUTOLOGIN_SET=1"                "state file records AUTOLOGIN_SET"
 }
 
 # Idempotent = full overwrite. An appending writer leaves two HOST_ACCOUNT lines
@@ -331,7 +330,7 @@ test_write_install_state_overwrites_rather_than_appends() {
   write_install_state dreamconnect-host 987 1 1
   write_install_state dreamconnect-host2 986 0 0
   lines="$(wc -l < "$state" 2>/dev/null || echo 0)"
-  assert_eq "${lines// /}" "4" "rewritten state file still has exactly 4 lines"
+  assert_eq "${lines// /}" "3" "rewritten state file still has exactly 3 lines"
   accounts="$(grep -c '^HOST_ACCOUNT=' "$state" 2>/dev/null || echo 0)"
   assert_eq "$accounts" "1" "rewritten state file has exactly one HOST_ACCOUNT line"
   assert_contains "$(cat "$state" 2>/dev/null || true)" "HOST_ACCOUNT=dreamconnect-host2" \
@@ -368,7 +367,7 @@ test_write_install_state_overwrites_rather_than_appends() {
 test_write_install_state_never_downgrades_created_account_for_the_same_account() {
   local c prior_acct prior_created acct created expected label i=0
   local DC_STATE_FILE
-  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
   # prior_account prior_created  this_account this_created  expected_recorded
   local cases=(
     "dreamconnect-host  1  dreamconnect-host   0  1"
@@ -383,13 +382,12 @@ test_write_install_state_never_downgrades_created_account_for_the_same_account()
     label="recorded $prior_acct/CREATED_ACCOUNT=$prior_created, this run $acct/$created"
 
     write_state_fixture "$DC_STATE_FILE" "$prior_acct" 987 "$prior_created" 1
-    write_install_state "$acct" 986 "$created" 0
+    write_install_state "$acct" 986 "$created"
 
     read_install_state
     assert_eq "$CREATED_ACCOUNT" "$expected" "$label: CREATED_ACCOUNT"
     assert_eq "$HOST_ACCOUNT" "$acct"        "$label: HOST_ACCOUNT is this run's account"
     assert_eq "$HOST_UID" "986"              "$label: HOST_UID is this run's uid"
-    assert_eq "$AUTOLOGIN_SET" "0"           "$label: AUTOLOGIN_SET is this run's value, not sticky"
   done
 }
 
@@ -430,7 +428,7 @@ test_write_install_state_survives_a_write_killed_part_way_through() {
 
   # The consequence the finding names, asserted at the seam that suffers it:
   # a reader must still see the recorded account, not "nothing recorded".
-  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
   read_install_state
   assert_eq "$HOST_ACCOUNT"    "dreamconnect-host" "interrupted write: HOST_ACCOUNT still recorded"
   assert_eq "$CREATED_ACCOUNT" "1"                 "interrupted write: CREATED_ACCOUNT still recorded"
@@ -438,13 +436,12 @@ test_write_install_state_survives_a_write_killed_part_way_through() {
 
 test_install_state_round_trips_all_four_values() {
   local DC_STATE_FILE="$TMP/state-roundtrip/install.state"
-  local HOST_ACCOUNT="stale" HOST_UID="stale" CREATED_ACCOUNT="stale" AUTOLOGIN_SET="stale"
+  local HOST_ACCOUNT="stale" HOST_UID="stale" CREATED_ACCOUNT="stale"
   write_install_state dreamconnect-host 987 1 0
   read_install_state
   assert_eq "$HOST_ACCOUNT"    "dreamconnect-host" "round-trip HOST_ACCOUNT"
   assert_eq "$HOST_UID"        "987"               "round-trip HOST_UID"
   assert_eq "$CREATED_ACCOUNT" "1"                 "round-trip CREATED_ACCOUNT"
-  assert_eq "$AUTOLOGIN_SET"   "0"                 "round-trip AUTOLOGIN_SET"
 }
 
 # The stale-global bug class: a reader that only assigns when the file exists
@@ -452,7 +449,7 @@ test_install_state_round_trips_all_four_values() {
 # green-light deleting it.
 test_read_install_state_resets_to_safe_defaults_when_absent() {
   local DC_STATE_FILE="$TMP/state-stale/install.state"
-  local HOST_ACCOUNT="" HOST_UID="" CREATED_ACCOUNT="" AUTOLOGIN_SET=""
+  local HOST_ACCOUNT="" HOST_UID="" CREATED_ACCOUNT=""
   write_install_state dreamconnect-host 987 1 1
   read_install_state
   assert_eq "$HOST_ACCOUNT" "dreamconnect-host" "precondition: state was read"
@@ -461,7 +458,6 @@ test_read_install_state_resets_to_safe_defaults_when_absent() {
   assert_eq "$HOST_ACCOUNT"    "" "absent state file resets HOST_ACCOUNT to empty"
   assert_eq "$HOST_UID"        "" "absent state file resets HOST_UID to empty"
   assert_eq "$CREATED_ACCOUNT" "0" "absent state file resets CREATED_ACCOUNT to 0"
-  assert_eq "$AUTOLOGIN_SET"   "0" "absent state file resets AUTOLOGIN_SET to 0"
 }
 
 # All six rails satisfied: this is the only shape that may be deleted.
@@ -3450,9 +3446,9 @@ test_a_bare_rerun_keeps_the_account_created_by_the_installer_removable() {
   assert_eq "$ACCOUNT_WAS_CREATED" "0" \
     "precondition: the re-run did not create the account that already existed"
 
-  write_install_state "$resolved" 987 "$ACCOUNT_WAS_CREATED" 1
+  write_install_state "$resolved" 987 "$ACCOUNT_WAS_CREATED"
 
-  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT AUTOLOGIN_SET
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
   read_install_state
   assert_eq "$CREATED_ACCOUNT" "1" \
     "a bare re-run does not forget that the installer created the account"
@@ -3725,37 +3721,6 @@ test_remove_accountsservice_marker_refuses_reserved_account_names() {
   done
 }
 
-# A real /etc/gdm/custom.conf: the stock Fedora/Debian shape, with the [daemon]
-# section enable_autologin edits and a neighbouring section it must not touch.
-plant_gdm_conf() {  # path
-  mkdir -p "$(dirname "$1")"
-  cat > "$1" <<'EOF'
-# GDM configuration storage
-
-[daemon]
-# Uncomment the line below to force the login screen to use Xorg
-#WaylandEnable=false
-
-[security]
-
-[xdmcp]
-
-[chooser]
-
-[debug]
-# Uncomment the line below to turn on debugging
-#Enable=true
-EOF
-}
-
-RUN_AUTOLOGIN_OUT=""
-RUN_AUTOLOGIN_RC=0
-run_enable_autologin() {  # conf name
-  RUN_AUTOLOGIN_OUT="$(enable_autologin "$1" "$2" 2>&1)"
-  RUN_AUTOLOGIN_RC=$?
-  return 0
-}
-
 # Call site 5, the one the issue names outright: "would reach enable_autologin
 # "$GDM_CONF" root (GDM itself refuses root autologin, so this fails closed
 # today, but relying on GDM rather than our own guard is fragile)".
@@ -3778,54 +3743,11 @@ run_enable_autologin() {  # conf name
 # carrying a newline or carriage return, which is not a name-policy question at
 # all: it is pasted verbatim into the [daemon] section and would inject arbitrary
 # GDM config keys. Everything else is the caller's business, not this function's.
-test_enable_autologin_refuses_only_root_and_names_that_corrupt_the_conf() {
-  local conf name tag i=0 before
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — refusal not demonstrated"; return 0; }
-
-  for name in root "" $'dc\nAutomaticLoginEnable=true' $'dc\rx'; do
-    tag="gdm-refuse-$i"; i=$((i + 1))
-    conf="$TMP/$tag/custom.conf"
-    plant_gdm_conf "$conf"
-    before="$(cat "$conf")"
-
-    run_enable_autologin "$conf" "$name"
-    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127, not a refusal"; continue; }
-    assert_not_contains "$RUN_AUTOLOGIN_OUT" "command not found" \
-      "autologin '$name': the refusal came from the guard, not the shell"
-    [ "$RUN_AUTOLOGIN_RC" -ne 0 ] || \
-      fail "autologin '$name': expected non-zero exit, got $RUN_AUTOLOGIN_RC"
-    [ -n "$RUN_AUTOLOGIN_OUT" ] || \
-      fail "autologin '$name': expected a stderr line explaining the refusal"
-    assert_eq "$(cat "$conf")" "$before" \
-      "autologin '$name': the GDM config is left byte-for-byte alone"
-    assert_not_contains "$(cat "$conf")" "AutomaticLogin=" \
-      "autologin '$name': no autologin key is written for a refused name"
-    assert_file_absent "$conf.dreamconnect.bak" \
-      "autologin '$name': a refusal backs nothing up either"
-  done
-}
 
 # The other half of call site 5, so the guard above cannot be satisfied by
 # refusing everything: an ordinary account still gets autologin configured, and
 # the backup enable_autologin's own comment promises. This documents today's
 # behaviour (it passes before the guard exists) and pins it afterwards.
-test_enable_autologin_still_configures_an_ordinary_account() {
-  local conf
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined"; return 0; }
-  conf="$TMP/gdm-ordinary/custom.conf"
-  plant_gdm_conf "$conf"
-
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "a well-formed account is configured (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
-    "the autologin key names the display-host account"
-  assert_contains "$(cat "$conf")" "AutomaticLoginEnable=true" \
-    "autologin is enabled"
-  assert_file_exists "$conf.dreamconnect.bak" "the original GDM config is backed up"
-}
 
 # The other caller: install.sh:346-351, classic mode. `$USER_NAME` there is the
 # machine's EXISTING desktop user — detect_user/resolve_host_identity, resolved
@@ -3840,29 +3762,6 @@ test_enable_autologin_still_configures_an_ordinary_account() {
 # account name verbatim — and from the classic-mode contract at install.sh:346.
 # A refusal here aborts install.sh under `set -euo pipefail` at line 349, AFTER
 # deps, build, deploy, the daemon unit and enable-linger have all run.
-test_enable_autologin_accepts_an_existing_account_that_is_not_new_account_shaped() {
-  local conf name tag i=0 long
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined"; return 0; }
-
-  long="averylongdomainaccountname.for.a.joined.box"   # 43 chars, has dots
-  for name in john.doe user local "$long" _svc-desk; do
-    tag="gdm-classic-$i"; i=$((i + 1))
-    conf="$TMP/$tag/custom.conf"
-    plant_gdm_conf "$conf"
-
-    run_enable_autologin "$conf" "$name"
-    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127"; continue; }
-    assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-      "autologin '$name': a pre-existing desktop account is configured, not refused (stderr: $RUN_AUTOLOGIN_OUT)"
-    assert_contains "$(cat "$conf")" "AutomaticLogin=$name" \
-      "autologin '$name': the account name is written verbatim into [daemon]"
-    assert_contains "$(cat "$conf")" "AutomaticLoginEnable=true" \
-      "autologin '$name': autologin is enabled"
-    assert_file_exists "$conf.dreamconnect.bak" \
-      "autologin '$name': the original GDM config is backed up"
-  done
-}
 
 # The third way a name pasted into [daemon] corrupts the conf, and the one the
 # newline/CR rail above cannot see. enable_autologin hands the name to awk as
@@ -3891,40 +3790,6 @@ test_enable_autologin_accepts_an_existing_account_that_is_not_new_account_shaped
 # no .dreamconnect.bak. Not a name-policy question — the classic-mode acceptance
 # test above still stands, and no legitimate GDM AutomaticLogin value can carry
 # a backslash, because GDM would receive the escaped form, not the name.
-test_enable_autologin_refuses_a_name_whose_backslash_awk_would_expand() {
-  local conf name tag i=0 before
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined"; return 0; }
-
-  for name in 'DOMAIN\nick' 'dc\tx' 'dc\\x'; do
-    tag="gdm-backslash-$i"; i=$((i + 1))
-    conf="$TMP/$tag/custom.conf"
-    plant_gdm_conf "$conf"
-    before="$(cat "$conf")"
-
-    # The premise: these are ORDINARY shell strings. If one of them carried a
-    # real newline/CR the existing rail would already catch it and this test
-    # would prove nothing about the backslash.
-    case "$name" in
-      *$'\n'*|*$'\r'*) fail "autologin '$name': fixture carries a real newline/CR — tests the wrong rail"; continue ;;
-    esac
-
-    run_enable_autologin "$conf" "$name"
-    [ "$RUN_AUTOLOGIN_RC" -ne 127 ] || { fail "autologin '$name': exit 127, not a refusal"; continue; }
-    assert_not_contains "$RUN_AUTOLOGIN_OUT" "command not found" \
-      "autologin '$name': the refusal came from the guard, not the shell"
-    [ "$RUN_AUTOLOGIN_RC" -ne 0 ] || \
-      fail "autologin '$name': expected non-zero exit, got $RUN_AUTOLOGIN_RC"
-    [ -n "$RUN_AUTOLOGIN_OUT" ] || \
-      fail "autologin '$name': expected a stderr line explaining the refusal"
-    assert_eq "$(cat "$conf")" "$before" \
-      "autologin '$name': the GDM config is left byte-for-byte alone"
-    assert_not_contains "$(cat "$conf")" "AutomaticLogin=" \
-      "autologin '$name': no autologin key is written for a refused name"
-    assert_file_absent "$conf.dreamconnect.bak" \
-      "autologin '$name': a refusal backs nothing up either"
-  done
-}
 
 # Call site 6. Two halves, because a passwd source is DATA, not a fact about the
 # box: the real root entry is refused by the uid-0 and /root-home rails that are
@@ -5311,7 +5176,7 @@ XPROBE="$HERE/host-fixes/xprobe-skip-broken-display.sh"
 # so no production path hook has to exist for the sake of the tests.
 stage_xprobe() {  # dir
   mkdir -p "$1/bin" "$1/real" "$1/run"
-  sed "s#/usr/bin/#$1/real/#g" "$XPROBE" > "$1/bin/xdpyinfo"
+  sed "s#^real_dirs=.*#real_dirs=\"$1/real\"#" "$XPROBE" > "$1/bin/xdpyinfo"
   chmod +x "$1/bin/xdpyinfo"
 }
 
@@ -5324,6 +5189,32 @@ run_xprobe() {  # dir display -> sets XP_OUT / XP_RC
   XP_OUT="$(DISPLAY="$2" XDG_RUNTIME_DIR="$1/run" DREAMCONNECT_XPROBE_TIMEOUT=1 \
             "$1/bin/xdpyinfo" 2>/dev/null)"
   XP_RC=$?
+}
+
+# SC's probe chain is `xdpyinfo || xwininfo || xdotool || xrandr || xrdb`. Any
+# tool NOT shadowed runs unbounded, and the hang simply moves down the chain —
+# which is exactly what happened once the first two were memoised as dead.
+test_every_tool_in_the_probe_chain_is_shadowed() {
+  local sh t
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  for t in xdpyinfo xwininfo xdotool xrandr xrdb; do
+    grep -qE "^[[:space:]]*for t in .*\\b$t\\b" "$sh" || \
+      fail "install.sh does not shadow $t — SC's probe chain falls through to it unbounded and hangs there instead"
+  done
+}
+
+# The wrapper must find the real tool wherever the distro puts it: xdotool is in
+# /usr/sbin on Fedora, so a hardcoded /usr/bin makes the wrapper exec nothing.
+test_xprobe_wrapper_searches_more_than_usr_bin() {
+  local dirs
+  [ -f "$XPROBE" ] || return 0
+  dirs="$(grep -m1 '^real_dirs=' "$XPROBE")"
+  [ -n "$dirs" ] || { fail "the wrapper does not declare a real_dirs search list"; return 0; }
+  assert_contains "$dirs" "/usr/sbin" \
+    "the wrapper must look in /usr/sbin — xdotool lives there on Fedora"
+  assert_not_contains "$dirs" "PATH" \
+    "the search list must not come from PATH: this runs as root in SC's environment"
 }
 
 test_xprobe_wrapper_passes_a_healthy_display_through() {
@@ -5674,6 +5565,67 @@ test_install_sh_scopes_the_shm_path_by_uid() {
     "the shm path must be scoped by uid, or two accounts collide on one sticky /dev/shm file (#27)"
 }
 
+# --- slice 13: autologin is gone ----------------------------------------------
+# Autologin existed only to manufacture a graphical session so the bridge had
+# something to attach to — never to make the login screen viewable, which Mutter
+# forbids outright. Backstage creates that session directly, so the workaround
+# and its GDM edit were removed. These pin the removal: a reintroduced GDM edit
+# is a security regression (a box booting to an unlocked desktop), not a feature.
+
+test_the_autologin_helpers_are_gone() {
+  local fn
+  for fn in enable_autologin disable_autologin gdm_conf; do
+    declare -F "$fn" >/dev/null && \
+      fail "install-lib.sh still defines $fn(): autologin was removed, and a GDM edit must not come back without a decision"
+  done
+  return 0
+}
+
+test_the_installer_never_edits_the_display_manager_config() {
+  local sh lib
+  sh="$HERE/install.sh"; lib="$HERE/install-lib.sh"
+  [ -f "$sh" ] && [ -f "$lib" ] || { fail "installer sources missing"; return 0; }
+  # Comments may still explain the history; code must not touch the file.
+  local code
+  code="$(grep -vE '^[[:space:]]*#' "$sh" "$lib")"
+  assert_not_contains "$code" "custom.conf" \
+    "the installer must not read or write the GDM config any more"
+  assert_not_contains "$code" "AutomaticLogin" \
+    "the installer must not set AutomaticLogin* — that boots the box to an unlocked desktop"
+}
+
+test_no_autologin_environment_variable_is_honoured() {
+  local sh code
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  code="$(grep -vE '^[[:space:]]*#' "$sh")"
+  assert_not_contains "$code" "DREAMCONNECT_AUTOLOGIN" \
+    "DREAMCONNECT_AUTOLOGIN was removed; honouring it again would silently reintroduce the GDM edit"
+}
+
+# With autologin gone, a display-host account has no way to reach a session
+# except backstage — it never logs in. Installing one in classic mode would
+# create the account, wire the daemon to graphical-session.target, and produce a
+# box where nothing ever starts.
+test_a_host_account_implies_backstage() {
+  local sh body
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  body="$(grep -vE '^[[:space:]]*#' "$sh")"
+  assert_contains "$body" "DREAMCONNECT_HOST_ACCOUNT" "install.sh still reads the host-account variable"
+  # The implication must be applied AFTER host_account_installable resolves, or a
+  # bare re-run on a box that already records an account misses it.
+  local resolved implied
+  resolved="$(first_code_line "$sh" 'host_account_installable')"
+  implied="$(first_code_line "$sh" 'BACKSTAGE=1' "$resolved")"
+  [ -n "$resolved" ] || { fail "install.sh no longer calls host_account_installable"; return 0; }
+  [ -n "$implied" ] || {
+    fail "install.sh never turns backstage on after resolving the host account — a recorded account would install in classic mode and never start"
+    return 0; }
+  [ "$resolved" -lt "$implied" ] || \
+    fail "the backstage implication (line $implied) must come after host_account_installable (line $resolved)"
+}
+
 # --- slice 12: detect_user must never pick the display manager ----------------
 # The GDM greeter runs a real, active, Wayland logind session (uid 60578,
 # gnome-shell --mode=gdm), so a filter of "active AND graphical" matches it. On a
@@ -5748,6 +5700,10 @@ for CURRENT in \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
   test_install_sh_removes_the_shm_frame_on_uninstall \
   test_install_sh_scopes_the_shm_path_by_uid \
+  test_the_autologin_helpers_are_gone \
+  test_the_installer_never_edits_the_display_manager_config \
+  test_no_autologin_environment_variable_is_honoured \
+  test_a_host_account_implies_backstage \
   test_detect_user_skips_the_greeter_and_picks_the_human \
   test_detect_user_refuses_a_box_with_only_a_greeter \
   test_detect_user_still_finds_an_ordinary_session \
@@ -5765,6 +5721,8 @@ for CURRENT in \
   test_publisher_publishes_a_stable_xauthority_path \
   test_publisher_keeps_the_published_xauthority_owner_only \
   test_publisher_fails_when_no_display_ever_appears \
+  test_every_tool_in_the_probe_chain_is_shadowed \
+  test_xprobe_wrapper_searches_more_than_usr_bin \
   test_xprobe_wrapper_passes_a_healthy_display_through \
   test_xprobe_wrapper_preserves_a_real_nonzero_exit \
   test_xprobe_wrapper_gives_up_on_a_hanging_display_whatever_its_number \
@@ -5794,7 +5752,7 @@ for CURRENT in \
   test_resolve_host_identity_socket_is_run_user_uid_dreamconnect_sock \
   test_resolve_host_identity_fails_when_the_account_is_absent \
   test_library_defines_the_state_and_removal_functions \
-  test_write_install_state_creates_parent_dirs_and_all_four_keys \
+  test_write_install_state_creates_parent_dirs_and_all_keys \
   test_write_install_state_overwrites_rather_than_appends \
   test_write_install_state_never_downgrades_created_account_for_the_same_account \
   test_write_install_state_survives_a_write_killed_part_way_through \
@@ -5890,10 +5848,6 @@ for CURRENT in \
   test_remove_no_idle_lock_refuses_root_as_a_dconf_name \
   test_ensure_host_account_refuses_reserved_account_names \
   test_remove_accountsservice_marker_refuses_reserved_account_names \
-  test_enable_autologin_refuses_only_root_and_names_that_corrupt_the_conf \
-  test_enable_autologin_refuses_a_name_whose_backslash_awk_would_expand \
-  test_enable_autologin_accepts_an_existing_account_that_is_not_new_account_shaped \
-  test_enable_autologin_still_configures_an_ordinary_account \
   test_host_account_removable_refuses_root_however_the_passwd_source_spells_it \
   test_library_defines_valid_home_dir \
   test_valid_home_dir_accepts_real_home_directories \

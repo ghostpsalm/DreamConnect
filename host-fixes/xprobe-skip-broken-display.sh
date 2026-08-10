@@ -27,8 +27,20 @@
 # Remove the /usr/local/bin symlinks to revert.
 
 tool=$(basename "$0")
-real="/usr/bin/$tool"
 timeout_s="${DREAMCONNECT_XPROBE_TIMEOUT:-3}"
+
+# A fixed search list, deliberately not $PATH: this runs as root inside
+# ScreenConnect's service environment, and resolving through PATH would let a
+# writable directory earlier in it decide what root executes. /usr/sbin is in the
+# list because that is where xdotool lives on Fedora — assuming /usr/bin made the
+# wrapper exec a path that does not exist.
+real_dirs="/usr/bin /usr/sbin /bin /sbin"
+real=""
+for d in $real_dirs; do
+  if [ -x "$d/$tool" ]; then real="$d/$tool"; break; fi
+done
+# Tool genuinely absent: report "nothing found" so SC's chain moves on.
+[ -n "$real" ] || exit 1
 
 # No `timeout` binary: nothing useful to add, so stay out of the way entirely.
 command -v timeout >/dev/null 2>&1 || exec "$real" "$@"

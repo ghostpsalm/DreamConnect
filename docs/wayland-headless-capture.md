@@ -30,7 +30,8 @@ Two documented requirements of the current design, both of which this repository
 
 1. **A capture source: "a real monitor or an **HDMI dummy plug**"** (`README.md`).
 2. **Autologin for unattended/reboot survival** (`README.md`), opt-in via `DREAMCONNECT_AUTOLOGIN=1`
-   and correctly described there as a security trade-off.
+   and correctly described there as a security trade-off. **Removed outright on 2026-08-10** once
+   backstage shipped — it only ever existed to manufacture a session for the bridge to attach to.
 
 Neither is necessary. Shipping dummy plugs to a fleet is not a product, and a fleet of machines booting
 to unlocked desktops is a security position that is hard to defend to a customer.
@@ -85,7 +86,10 @@ security trade-off to explain.
 behaviour, and the uninstall path reverses it at `install-lib.sh:865`. The prerequisite is therefore
 already installed, already reversible, and already tested — which makes this a substantially cheaper
 change than it first appears. The autologin machinery (`DREAMCONNECT_AUTOLOGIN`, the GDM configuration,
-and the warnings around it) becomes removable rather than something new having to be added.
+and the warnings around it) becomes removable rather than something new having to be added — and it
+was duly removed, along with `enable_autologin`/`disable_autologin`/`gdm_conf` and the state file's
+`AUTOLOGIN_SET` field. `DREAMCONNECT_HOST_ACCOUNT` now implies backstage, because with autologin gone
+an account that never logs in has no other way to reach a session.
 
 ## The honest caveat — these are two modes, not one
 

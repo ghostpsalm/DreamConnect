@@ -30,14 +30,13 @@ box. Today it targets exactly that:
   `org.gnome.Mutter.*` D-Bus API. **KDE/KWin and wlroots (Sway, etc.) are not
   supported yet.**
 - **Fedora-tested.** The installer installs dependencies via the detected package
-  manager (`apt`/`dnf`/`zypper`/`pacman`) and assumes GDM for the autologin
-  guidance. The agent + daemon aren't distro-specific, but only Fedora is verified
+  manager (`apt`/`dnf`/`zypper`/`pacman`). The agent + daemon aren't distro-specific, but only Fedora is verified
   end to end — other distros are best-effort (package names may need tweaks; see
   [per-distro packages](docs/troubleshooting.md)).
 - **Two modes, and they see different things.** *Attended* attaches to an
   existing graphical session — what the user sees — and therefore needs someone
   logged in. *Backstage* (`DREAMCONNECT_BACKSTAGE=1`) runs its own headless
-  GNOME session and needs **no login, no monitor and no autologin**, but gives
+  GNOME session and needs **no login and no monitor**, but gives
   you a private admin desktop rather than the console user's.
 - **Neither mode can drive the GDM login greeter** — Mutter inhibits capture and
   input there by design. Backstage sidesteps that by not needing a login at all;
@@ -61,12 +60,12 @@ headless/unattended. Full details in [`docs/design.md`](docs/design.md).
 - **GNOME on Wayland** (uses GNOME's Mutter D-Bus interfaces — see
   [Scope](#scope--maturity--read-this-first)).
 - **A session to capture**, which is one of:
-  - *attended* — a real logged-in session that stays logged in (**autologin** for
-    unattended/reboot survival), plus a capture source: a real monitor or an
-    **HDMI dummy plug**;
+  - *attended* — a real logged-in session, plus a capture source: a real monitor
+    or an **HDMI dummy plug**. Runs only while that user is logged in;
   - *backstage* (`DREAMCONNECT_BACKSTAGE=1`) — none of the above. DreamConnect
     starts its own headless GNOME session and captures a Mutter virtual monitor,
-    so no monitor, no dummy plug, no login and no autologin are needed.
+    so no monitor, no dummy plug and no login are needed. This is the mode for
+    an unattended box.
 - The **ScreenConnect Linux client** already installed and enrolled
   (`connectwisecontrol-*.service`).
 - `systemd`, a **JDK** (built/tested on JDK 25), and `python3` with GObject +
@@ -115,12 +114,12 @@ pick attended mode if "see what the user sees" is the point. Screen size is
 `DREAMCONNECT_BACKSTAGE_RES=<WxH>` (default `1920x1080`); a virtual monitor has
 no intrinsic size, so this is genuinely the resolution the operator gets.
 
-The older route is autologin — a security trade-off, since the box then boots
-straight into the desktop with no login prompt:
-
-```sh
-curl -fsSL https://github.com/ghostpsalm/DreamConnect/releases/latest/download/dreamconnect-install.sh | sudo DREAMCONNECT_AUTOLOGIN=1 bash
-```
+DreamConnect used to offer GDM autologin for this instead. It existed only to
+manufacture a graphical session for the bridge to attach to — never to make the
+login screen viewable, which Mutter forbids outright — and it cost you a box
+booting to an unlocked desktop. Backstage creates that session directly, so
+autologin was removed rather than kept as an option. It is in the git history if
+you ever need it back.
 
 > **This runs code as root.** Piping to `sudo bash` trusts GitHub + TLS with no
 > further integrity check. If you'd rather read it first:
@@ -141,9 +140,9 @@ sudo ./install.sh
 Overrides: `DREAMCONNECT_USER=<name>`, `MONITOR=<connector>`, `INSTALL_DIR=<path>`,
 `DREAMCONNECT_BACKSTAGE=1` + `DREAMCONNECT_BACKSTAGE_RES=<WxH>` (headless session,
 no login), `DREAMCONNECT_HOST_ACCOUNT=<name>` (a dedicated hidden account to run
-it under — combine with backstage and it needs no autologin either),
+it under — implies backstage, since the account never logs in),
 `DREAMCONNECT_HOST_ACCOUNT_SUDO=1` (passwordless sudo for that account); see
-[ROADMAP.md](ROADMAP.md#h6--reboot-survival--autologin).
+[ROADMAP.md](ROADMAP.md#h6--reboot-survival).
 </details>
 
 ## Use
@@ -178,8 +177,8 @@ Environment (see [Scope](#scope--maturity--read-this-first)):
   need the generic `xdg-desktop-portal` path, where avoiding the per-session
   "Allow" consent prompt is a separate problem. *(Roadmap.)*
 - **Fedora-tested; the installer is Fedora-shaped** (`dnf`, GDM). The core is
-  distro-agnostic; other distros need manual dependency install + autologin
-  setup for now. *(Roadmap.)*
+  distro-agnostic; other distros need manual dependency install for now.
+  *(Roadmap.)*
 - **Can't drive the GDM login greeter** — Mutter inhibits capture and input at
   the greeter by design. Backstage (`DREAMCONNECT_BACKSTAGE=1`) removes the need
   to log in at all, but it shows a private headless desktop, not the greeter and
