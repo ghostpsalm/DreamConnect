@@ -77,6 +77,8 @@ public final class Bridge {
                 case "mininterval" -> capMinIntervalMs = parseIntOr(v, capMinIntervalMs);
                 case "maxinterval" -> capMaxIntervalMs = parseIntOr(v, capMaxIntervalMs);
                 case "framemultiple" -> capFrameMultiple = parseIntOr(v, capFrameMultiple);
+                // seconds between real display re-probes; 0 = probe every heartbeat.
+                case "logonttl" -> logonTtlMs = Math.max(0, parseIntOr(v, 30)) * 1000;
                 default -> {}
             }
         }
@@ -268,6 +270,46 @@ public final class Bridge {
      */
     public static Object curateLogonSessions(Object ret) {
         return curateLogonSessions(ret, System.getenv("DISPLAY"), logonLabel());
+    }
+
+    // --- logon-probe rate limiting -----------------------------------------
+    // ScreenConnect re-runs getAvailableLogonSessionInfosAsClientService on every
+    // server heartbeat (~6 s). On Linux that fires getDisplayInfos, a shell script
+    // that wraps xauth/xdpyinfo in runuser (full PAM setup) per display — ~1-2 s
+    // of work on the message thread that also carries input, so clicks stall
+    // periodically. A backstage display never changes, so we cache the curated
+    // result and skip the probe until the cache expires. logonTtlMs = 0 disables.
+    private static volatile Object cachedLogon;      // last curated Object[]
+    private static volatile long cachedLogonAtMs;
+    private static volatile int logonTtlMs = 30000;
+
+    /** OnMethodEnter skip signal: true => skip the expensive probe, use the cache. */
+    public static boolean logonProbeSkip() {
+        return logonTtlMs > 0 && cachedLogon != null
+                && (System.currentTimeMillis() - cachedLogonAtMs) < logonTtlMs;
+    }
+
+    /**
+     * OnMethodExit for the array probe. `ret` is the fresh probe result when the
+     * body ran, or null when it was skipped. Curate + cache a real result;
+     * otherwise serve the cache. Only non-empty results are cached, so a
+     * transient empty probe never poisons a good cache.
+     */
+    public static Object curateLogonSessionsCached(Object ret) {
+        try {
+            if (ret != null) {                       // probe ran
+                Object curated = curateLogonSessions(ret);
+                if (curated instanceof Object[] && ((Object[]) curated).length > 0) {
+                    cachedLogon = curated;
+                    cachedLogonAtMs = System.currentTimeMillis();
+                }
+                return curated;
+            }
+            return cachedLogon;                      // probe skipped
+        } catch (Throwable t) {
+            log("curateLogonSessionsCached failed: " + t);
+            return ret != null ? ret : cachedLogon;
+        }
     }
 
     /**

@@ -470,7 +470,10 @@ fi
 # agent then hides every other display, so it is the only, first entry); a
 # classic install keeps SC's own labelling.
 if [ "$BACKSTAGE" -eq 1 ]; then
-  AGENT_EXTRA=",label=[Backstage]"
+  # label: name the picker entry. logonttl: a backstage display never changes, so
+  # cache SC's periodic display probe for 5 min instead of re-running its slow
+  # runuser/xauth shell every ~6 s (which stalls input each time).
+  AGENT_EXTRA=",label=[Backstage],logonttl=300"
 else
   AGENT_EXTRA=""
 fi

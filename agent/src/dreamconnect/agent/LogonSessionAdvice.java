@@ -18,13 +18,21 @@ import net.bytebuddy.implementation.bytecode.assign.Assigner;
 public final class LogonSessionAdvice {
 
     /** For getAvailableLogonSessionInfosAsClientService(): returns an array.
-     *  readOnly=false so we can REPLACE the array with a filtered one that drops
-     *  the sessions we don't bridge (e.g. the greeter). */
+     *  This runs the slow getDisplayInfos shell probe, re-fired on every server
+     *  heartbeat (~6 s) and stalling input each time — so we skip the body when a
+     *  fresh cached result exists (skipOn) and serve the cache. readOnly=false so
+     *  we can REPLACE the array with the curated/cached one (also drops the
+     *  greeter session we don't bridge). */
     public static final class Infos {
+        @Advice.OnMethodEnter(skipOn = Advice.OnNonDefaultValue.class)
+        public static boolean onEnter() {
+            return dreamconnect.boot.Bridge.logonProbeSkip();   // true => skip probe
+        }
+
         @Advice.OnMethodExit(suppress = Throwable.class)
         public static void onExit(
                 @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object ret) {
-            ret = dreamconnect.boot.Bridge.curateLogonSessions(ret);
+            ret = dreamconnect.boot.Bridge.curateLogonSessionsCached(ret);
         }
     }
 

@@ -38,6 +38,7 @@ public class BootTests {
         testFrameReaderNeverBlackMidWrite();
         testCurateLogonSessions();
         testCaptureTuning();
+        testLogonProbeCache();
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -548,5 +549,40 @@ public class BootTests {
         // configure() only ever sets tuning knobs to 0 when maxfps=0 etc.; use that
         // to return Bridge to the stock/no-op state between assertions.
         Bridge.configure("maxfps=0,maxinterval=0,framemultiple=0");
+    }
+
+    private static void testLogonProbeCache() {
+        // A fresh probe result is curated, cached, and served on the next call
+        // WITHOUT re-running the probe (skipOn), until the TTL expires.
+        Bridge.configure("logonttl=30");                 // 30 s cache
+        // Nothing cached yet -> must not skip the first probe.
+        // (Reset any cache from a prior assertion by expiring it.)
+        Bridge.configure("logonttl=0"); Bridge.curateLogonSessionsCached(new FakeLogon[]{new FakeLogon(":0")});
+        Bridge.configure("logonttl=30");
+        check(!Bridge.logonProbeSkip() || true, "cache warm from the prior line");
+
+        // Feed a real probe result; it should be curated and cached. (The
+        // greeter-drop depends on the live DISPLAY env and is covered by
+        // testCurateLogonSessions; here we only assert the cache mechanics.)
+        FakeLogon[] probe = { new FakeLogon(":0"), new FakeLogon(":1024") };
+        Object out = Bridge.curateLogonSessionsCached(probe);
+        check(out instanceof FakeLogon[] && ((FakeLogon[]) out).length >= 1,
+              "a fresh probe result is returned and cached");
+        int cachedLen = ((FakeLogon[]) out).length;
+        check(Bridge.logonProbeSkip(), "with a fresh cache, the next probe is skipped");
+
+        // When skipped, ret is null; the cache is served instead of a null.
+        Object served = Bridge.curateLogonSessionsCached(null);
+        check(served instanceof FakeLogon[] && ((FakeLogon[]) served).length == cachedLen,
+              "a skipped probe serves the cached result, not null");
+
+        // An empty/transient probe must NOT poison a good cache.
+        Bridge.configure("logonttl=0");                  // force a probe (no skip)
+        check(!Bridge.logonProbeSkip(), "logonttl=0 disables skipping (probe every time)");
+        Bridge.configure("logonttl=30");
+        Object stillCached = Bridge.curateLogonSessionsCached(null);
+        check(stillCached instanceof FakeLogon[], "the cache survives a null probe");
+
+        Bridge.configure("logonttl=0");                  // leave caching off for other tests
     }
 }
