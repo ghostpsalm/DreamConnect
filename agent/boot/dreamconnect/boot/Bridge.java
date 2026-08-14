@@ -171,21 +171,61 @@ public final class Bridge {
      * Reflection, because the boot module can't compile against SC's classes.
      * Best-effort; never throws into SC.
      */
-    public static void relabelLogonSessions(Object ret) {
+    public static Object curateLogonSessions(Object ret) {
+        return curateLogonSessions(ret, System.getenv("DISPLAY"), logonLabel());
+    }
+
+    /**
+     * Pure core, for testing. The bridge only ever presents ONE display — the
+     * one the daemon captures — so any other session in the picker (most often
+     * the GDM greeter's ":1024", present whenever nobody is logged in) is
+     * misleading: selecting it still shows our frame. So keep only the entries
+     * whose display matches ours, relabel them (to "[Backstage]" via the label=
+     * arg, or the user's name), and return an array of just those — which also
+     * puts our session first because it is then the only one.
+     *
+     * Falls back to relabelling everything in place, and returning the original
+     * array, when nothing matches our display: an unexpected DISPLAY must never
+     * empty the picker and leave the operator unable to connect.
+     */
+    static Object curateLogonSessions(Object ret, String display, String label) {
         try {
-            if (ret == null) return;
-            String label = logonLabel();
-            if (label == null || label.isEmpty()) return;
-            if (ret instanceof Object[]) {
-                Object[] arr = (Object[]) ret;
-                boolean many = arr.length > 1;
-                for (Object e : arr) relabelOne(e, label, many);
-            } else {
-                relabelOne(ret, label, false);
+            if (ret == null) return ret;
+            if (!ret.getClass().isArray()) {   // single-session variant: just relabel
+                if (label != null && !label.isEmpty()) relabelOne(ret, label, false);
+                return ret;
             }
+            Object[] arr = (Object[]) ret;
+            java.util.List<Object> keep = new java.util.ArrayList<>();
+            for (Object e : arr) {
+                if (e != null && display != null && display.equals(sessionDisplay(e))) {
+                    keep.add(e);
+                }
+            }
+            if (keep.isEmpty()) {              // no confident match — change nothing structural
+                if (label != null && !label.isEmpty()) {
+                    for (Object e : arr) relabelOne(e, label, arr.length > 1);
+                }
+                return arr;
+            }
+            if (label != null && !label.isEmpty()) {
+                for (Object e : keep) relabelOne(e, label, false);
+            }
+            Object out = java.lang.reflect.Array.newInstance(
+                    arr.getClass().getComponentType(), keep.size());
+            for (int i = 0; i < keep.size(); i++) {
+                java.lang.reflect.Array.set(out, i, keep.get(i));
+            }
+            return out;
         } catch (Throwable t) {
-            log("relabelLogonSessions failed: " + t);
+            log("curateLogonSessions failed: " + t);
+            return ret;
         }
+    }
+
+    private static String sessionDisplay(Object e) throws Exception {
+        Object v = e.getClass().getField("logonSessionName").get(e);
+        return v == null ? null : v.toString();
     }
 
     private static void relabelOne(Object e, String label, boolean disambiguate) throws Exception {

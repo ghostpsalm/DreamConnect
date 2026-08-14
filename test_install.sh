@@ -1157,6 +1157,30 @@ test_configure_no_idle_lock_writes_all_seven_dconf_keys() {
   assert_line "$body" "sleep-inactive-battery-type='nothing'" "power sleep-inactive-battery-type='nothing'"
 }
 
+# The desktop half of the same keyfile: a permanent taskbar and the pre-pinned
+# admin toolset that make the headless session usable for an arriving operator.
+test_configure_no_idle_lock_configures_the_backstage_desktop() {
+  local d home shims f body
+  require_no_idle_lock "backstage desktop" || return 0
+  read -r d home <<<"$(idle_fixture backstage-desktop)"
+  shims="$TMP/shims-backstage-desktop"; make_dconf_shim "$shims" >/dev/null
+  run_configure "$d" dreamconnect-host "$home" "$shims"
+  f="$d/db/dreamconnect-host.d/00-display-host"
+  body="$(cat "$f" 2>/dev/null || true)"
+
+  assert_line "$body" "[org/gnome/shell]" "shell section header"
+  # A permanent window list is the taskbar; without it GNOME hides every running
+  # window behind the overview, which is disorienting on a remote session.
+  assert_contains "$body" "window-list@gnome-shell-extensions.gcampax.github.com" \
+    "the window-list taskbar extension is enabled"
+  assert_contains "$body" "enabled-extensions=" "extensions are enabled by default"
+  # The Windows-Backstage-style toolset: terminal, process monitor, log viewer.
+  assert_contains "$body" "favorite-apps=" "the dash is pre-pinned"
+  assert_contains "$body" "org.gnome.Ptyxis.desktop"        "a terminal is pinned"
+  assert_contains "$body" "org.gnome.SystemMonitor.desktop" "the process monitor is pinned"
+  assert_contains "$body" "org.gnome.Logs.desktop"          "the log/event viewer is pinned"
+}
+
 # Without DCONF_PROFILE in the account's environment the session loads dconf's
 # default profile and everything above is dead weight.
 test_configure_no_idle_lock_points_the_session_at_the_profile() {
@@ -5008,14 +5032,14 @@ test_library_defines_the_backstage_helpers() {
   done
 }
 
-test_backstage_resolution_defaults_to_1920x1080() {
+test_backstage_resolution_defaults_to_960x540() {
   local out rc
   out="$(backstage_resolution 2>&1)"; rc=$?
   assert_eq "$rc" "0" "unset resolution is accepted"
-  assert_eq "$out" "1920x1080" "unset resolution defaults"
+  assert_eq "$out" "960x540" "unset resolution defaults to the low-bandwidth size"
   out="$(backstage_resolution "" 2>&1)"; rc=$?
   assert_eq "$rc" "0" "empty resolution is accepted"
-  assert_eq "$out" "1920x1080" "empty resolution defaults"
+  assert_eq "$out" "960x540" "empty resolution defaults"
 }
 
 test_backstage_resolution_passes_through_a_valid_value() {
@@ -5729,7 +5753,7 @@ for CURRENT in \
   test_xprobe_wrapper_short_circuits_a_display_already_known_dead \
   test_xprobe_wrapper_does_not_blacklist_other_displays \
   test_library_defines_the_backstage_helpers \
-  test_backstage_resolution_defaults_to_1920x1080 \
+  test_backstage_resolution_defaults_to_960x540 \
   test_backstage_resolution_passes_through_a_valid_value \
   test_backstage_resolution_accepts_an_uppercase_separator \
   test_backstage_resolution_normalises_leading_zeros \
@@ -5781,6 +5805,7 @@ for CURRENT in \
   test_library_defines_the_idle_lock_functions \
   test_configure_no_idle_lock_writes_the_dconf_profile \
   test_configure_no_idle_lock_writes_all_seven_dconf_keys \
+  test_configure_no_idle_lock_configures_the_backstage_desktop \
   test_configure_no_idle_lock_points_the_session_at_the_profile \
   test_configure_no_idle_lock_skips_gnome_initial_setup \
   test_configure_no_idle_lock_refuses_reserved_dconf_names \

@@ -27,7 +27,7 @@
 #                              the greeter still up. The operator gets a private
 #                              admin desktop, NOT the console user's session.
 #   DREAMCONNECT_BACKSTAGE_RES=<WxH>
-#                              backstage screen size (default 1920x1080). This is
+#                              backstage screen size (default 960x540). This is
 #                              the real resolution: a virtual monitor has no
 #                              intrinsic size, so whatever is asked for is what
 #                              the operator sees.
@@ -448,11 +448,19 @@ else
 fi
 
 # --- ScreenConnect drop-in --------------------------------------------------
+# Backstage sessions are named "[Backstage]" in the operator's picker (and the
+# agent then hides every other display, so it is the only, first entry); a
+# classic install keeps SC's own labelling.
+if [ "$BACKSTAGE" -eq 1 ]; then
+  AGENT_EXTRA=",label=[Backstage]"
+else
+  AGENT_EXTRA=""
+fi
 if [ -n "$SC_UNIT" ]; then
   echo ">> installing agent drop-in on $SC_UNIT"
   install -d "/etc/systemd/system/$SC_UNIT.d"
   sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@UID@#$USER_UID#g" \
-      -e "s#@SHM_PATH@#$SHM_PATH#g" \
+      -e "s#@SHM_PATH@#$SHM_PATH#g" -e "s#@AGENT_EXTRA@#$AGENT_EXTRA#g" \
       "$HERE/systemd/dreamconnect-agent.conf" \
       > "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
   systemctl daemon-reload

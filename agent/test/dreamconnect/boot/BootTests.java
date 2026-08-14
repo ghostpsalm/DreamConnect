@@ -36,6 +36,7 @@ public class BootTests {
         testRobotPeerUnmappedKeyDropped();
         testFrameReader();
         testFrameReaderNeverBlackMidWrite();
+        testCurateLogonSessions();
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -448,4 +449,43 @@ public class BootTests {
         int[] px = fr.pixels(0, 0, w, h);
         check(px[1] == 0xFF332211, "mid-write pixels() returns real pixels, not black (got 0x" + Integer.toHexString(px[1]) + ")");
     }
+
+    /** A stand-in for ScreenConnect's Messages$LogonSessionInfo2: the curate
+     *  code reads/writes the public logonSessionName field by reflection. */
+    public static class FakeLogon {
+        public String logonSessionName;
+        public FakeLogon(String n) { this.logonSessionName = n; }
+    }
+
+    private static void testCurateLogonSessions() {
+        // Backstage: our display is :0; the greeter's :1024 is also enumerated.
+        // Only :0 survives, relabelled, and it is first because it is the only one.
+        FakeLogon[] in = { new FakeLogon(":1024"), new FakeLogon(":0") };
+        Object out = Bridge.curateLogonSessions(in, ":0", "[Backstage]");
+        check(out instanceof FakeLogon[], "curate returns an array of the same type");
+        FakeLogon[] arr = (FakeLogon[]) out;
+        check(arr.length == 1, "curate drops the non-matching (greeter) session (got " + arr.length + ")");
+        check(":0".equals(sessionNameOf(arr[0])) == false && "[Backstage]".equals(arr[0].logonSessionName),
+              "the surviving session is relabelled to [Backstage] (got " + arr[0].logonSessionName + ")");
+
+        // No entry matches our display: keep everything, just relabel — never
+        // empty the picker (the operator must still be able to connect).
+        FakeLogon[] in2 = { new FakeLogon(":1024"), new FakeLogon(":1025") };
+        FakeLogon[] out2 = (FakeLogon[]) Bridge.curateLogonSessions(in2, ":7", "[Backstage]");
+        check(out2.length == 2, "no match: nothing is dropped (got " + out2.length + ")");
+
+        // A human-readable name is left alone; a machine-y one is rewritten.
+        FakeLogon[] in3 = { new FakeLogon(":0") };
+        FakeLogon[] out3 = (FakeLogon[]) Bridge.curateLogonSessions(in3, ":0", "operator");
+        check("operator".equals(out3[0].logonSessionName), "machine-y :0 relabelled to the given label");
+
+        // Null and single-object inputs must not throw.
+        check(Bridge.curateLogonSessions(null, ":0", "[Backstage]") == null, "null in, null out");
+        FakeLogon single = new FakeLogon(":0");
+        Object s = Bridge.curateLogonSessions(single, ":0", "[Backstage]");
+        check(s == single && "[Backstage]".equals(single.logonSessionName),
+              "single session is relabelled in place");
+    }
+
+    private static String sessionNameOf(FakeLogon f) { return f.logonSessionName; }
 }

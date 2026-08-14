@@ -17,12 +17,14 @@ import net.bytebuddy.implementation.bytecode.assign.Assigner;
  */
 public final class LogonSessionAdvice {
 
-    /** For getAvailableLogonSessionInfosAsClientService(): returns an array. */
+    /** For getAvailableLogonSessionInfosAsClientService(): returns an array.
+     *  readOnly=false so we can REPLACE the array with a filtered one that drops
+     *  the sessions we don't bridge (e.g. the greeter). */
     public static final class Infos {
         @Advice.OnMethodExit(suppress = Throwable.class)
         public static void onExit(
-                @Advice.Return(typing = Assigner.Typing.DYNAMIC) Object ret) {
-            dreamconnect.boot.Bridge.relabelLogonSessions(ret);
+                @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object ret) {
+            ret = dreamconnect.boot.Bridge.curateLogonSessions(ret);
         }
     }
 
@@ -30,8 +32,8 @@ public final class LogonSessionAdvice {
     public static final class One {
         @Advice.OnMethodExit(suppress = Throwable.class)
         public static void onExit(
-                @Advice.Return(typing = Assigner.Typing.DYNAMIC) Object ret) {
-            dreamconnect.boot.Bridge.relabelLogonSessions(ret);
+                @Advice.Return(readOnly = false, typing = Assigner.Typing.DYNAMIC) Object ret) {
+            ret = dreamconnect.boot.Bridge.curateLogonSessions(ret);
         }
     }
 

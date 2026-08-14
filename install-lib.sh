@@ -563,7 +563,13 @@ PY
 backstage_resolution() {  # [value] -> WxH on stdout, non-zero if unusable
   local value lower w h
   value="${1:-}"
-  [ -n "$value" ] || value="1920x1080"
+  # 960x540 by default: a virtual monitor has no native size, so the resolution
+  # is purely a bandwidth/latency knob, and a headless admin desktop does not
+  # need 1080p. Half-height means ~4x fewer pixels than 1080p for ScreenConnect
+  # to encode and ship each frame, which is the difference between a responsive
+  # session and a sticky one over a typical link. Override with
+  # DREAMCONNECT_BACKSTAGE_RES for a larger workspace.
+  [ -n "$value" ] || value="960x540"
   lower="${value//X/x}"
   case "$lower" in
     *[!0-9x]*)
@@ -731,6 +737,16 @@ configure_no_idle_lock() {  # name home
   # lock-delay and idle-delay are "type u" in the installed GNOME schemas, hence
   # uint32; the sleep-inactive-*-type enums are strings. Suspending would be the
   # same unreachability the lock keys are here to prevent.
+  # The desktop half of the keyfile turns the bare headless GNOME shell into a
+  # usable admin console for an operator arriving over ScreenConnect:
+  #   * window-list — a permanent taskbar along the bottom (GNOME otherwise hides
+  #     all running windows behind the overview, which is disorienting on a
+  #     remote session); the extension ships with gnome-shell-extensions.
+  #   * favorite-apps — the dash is pre-pinned with the Windows-Backstage-style
+  #     toolset: a terminal, the process monitor, the log/event viewer, the file
+  #     manager and disks. Missing apps are silently skipped by the shell, so
+  #     pinning one a minimal box lacks is harmless.
+  # These are defaults, not locks: the account can still change them.
   cat > "$dir/db/$name.d/00-display-host" <<'EOF'
 [org/gnome/desktop/screensaver]
 lock-enabled=false
@@ -743,6 +759,10 @@ idle-delay=uint32 0
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
+
+[org/gnome/shell]
+enabled-extensions=['window-list@gnome-shell-extensions.gcampax.github.com']
+favorite-apps=['org.gnome.Ptyxis.desktop', 'org.gnome.SystemMonitor.desktop', 'org.gnome.Logs.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.DiskUtility.desktop']
 EOF
 
   # Without DCONF_PROFILE in the session's environment dconf loads its default
