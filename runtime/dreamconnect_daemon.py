@@ -74,6 +74,10 @@ def log(*a):
     print("[dreamconnect]", *a, file=sys.stderr, flush=True)
 
 
+def _now_ms():
+    return int(time.monotonic() * 1000)
+
+
 def parse_resolution(text):
     """'1920x1080' -> (1920, 1080). Raises ValueError on anything else."""
     parts = str(text).strip().lower().split("x")
@@ -166,9 +170,18 @@ class FrameBuffer:
 class Session:
     """Persistent Mutter RemoteDesktop + linked ScreenCast session."""
 
-    def __init__(self, bus, monitor, frame, all_monitors=False, virtual=None):
+    def __init__(self, bus, monitor, frame, all_monitors=False, virtual=None,
+                 stall_timeout_ms=4000):
         self.bus = bus
         self.monitor = monitor
+        # Frames can stop arriving while the RemoteDesktop session stays alive
+        # (Mutter pausing the screencast, a PipeWire node vanishing with no
+        # GStreamer error) — input keeps working but the desktop is frozen. The
+        # pipeline uses keepalive-time=1000, so a healthy stream emits >=1 fps
+        # even on a static screen; this many ms with no frame while a client is
+        # attached therefore means stalled, not idle, and triggers a rebuild.
+        self.stall_timeout_ms = stall_timeout_ms
+        self._last_frame_ms = 0  # 0 = pipeline not started yet; seeded on start
         self.all_monitors = all_monitors  # capture the whole logical desktop
         # (w, h) to capture a Mutter-conjured virtual monitor via RecordVirtual
         # instead of a physical connector — the backstage/headless mode, which
@@ -191,6 +204,20 @@ class Session:
         self._inhibit_cookie = None  # GNOME SessionManager wake-lock cookie
         self._blank_lock = threading.Lock()
         self._saved_gamma = None  # {crtc_id: (r,g,b)} while the monitor is blanked
+
+    # ---- stall detection ---------------------------------------------------
+    def note_frame(self, now_ms):
+        """Record that a frame (or a keepalive repeat) reached the appsink."""
+        self._last_frame_ms = now_ms
+
+    def is_stalled(self, now_ms):
+        """True when a client is attached but no frame has arrived within the
+        timeout. Pure and side-effect-free so it can be unit-tested; the live
+        watchdog supplies a monotonic clock. Never fires before the first frame
+        is seeded (last_frame_ms 0), so a starting pipeline gets its grace."""
+        if self.active_clients <= 0 or self._last_frame_ms == 0:
+            return False
+        return (now_ms - self._last_frame_ms) > self.stall_timeout_ms
 
     # ---- client accounting + wake lock -------------------------------------
     def client_connected(self):
@@ -358,13 +385,20 @@ class Session:
             return None
 
     def start(self):
-        # Drop any signal subscriptions from a previous session — start() is
-        # re-entered on Mutter-close recovery, and the old rd_path/stream_path
-        # are gone, so leaving them subscribed would leak and (worse) let a
-        # future Closed fire _on_closed multiple times, cascading restarts.
+        # Drop any subscriptions from a previous session — start() is re-entered
+        # on recovery, and the old rd_path/stream_path are gone, so leaving them
+        # subscribed would leak and (worse) let a future Closed/message fire the
+        # handlers multiple times, cascading restarts. Two kinds live here: plain
+        # D-Bus subscription ids, and ("gst", bus, handler_id) tuples for the
+        # GStreamer bus watch, which is torn down differently.
         for sid in self._sub_ids:
             try:
-                self.bus.signal_unsubscribe(sid)
+                if isinstance(sid, tuple) and sid[0] == "gst":
+                    _, gbus, hid = sid
+                    gbus.disconnect(hid)
+                    gbus.remove_signal_watch()
+                else:
+                    self.bus.signal_unsubscribe(sid)
             except Exception:  # noqa: BLE001
                 pass
         self._sub_ids = []
@@ -437,16 +471,8 @@ class Session:
         log("session started (awaiting PipeWireStreamAdded)")
 
     def _on_closed(self, *_):
-        # Re-entrancy guard: one Closed should schedule exactly one restart, even
-        # if duplicate/late signals arrive before the new session is up.
-        if self._restarting:
-            return
-        self._restarting = True
         log("!! Mutter session closed; restarting in 1s")
-        if self.pipeline:
-            self.pipeline.set_state(Gst.State.NULL)
-            self.pipeline = None
-        GLib.timeout_add_seconds(1, self._restart)
+        self._recover()
 
     def _restart(self):
         try:
@@ -483,12 +509,61 @@ class Session:
         self.pipeline = Gst.parse_launch(self._pipeline_desc())
         sink = self.pipeline.get_by_name("sink")
         sink.connect("new-sample", self._on_sample)
+        # Seed the stall clock: the watchdog must give a just-started pipeline
+        # the full timeout to produce its first frame rather than firing at once.
+        self.note_frame(_now_ms())
+        # Watch the GStreamer bus: a pipewiresrc that errors or EOSes (the node
+        # went away) would otherwise leave the pipeline dead and unnoticed. The
+        # silent-stall case — frames simply stop with no message — is caught by
+        # the frame watchdog instead.
+        gbus = self.pipeline.get_bus()
+        gbus.add_signal_watch()
+        self._sub_ids.append(("gst", gbus, gbus.connect("message", self._on_gst_message)))
         self.pipeline.set_state(Gst.State.PLAYING)
+
+    def _on_gst_message(self, _bus, msg):
+        t = msg.type
+        if t == Gst.MessageType.ERROR:
+            err, _dbg = msg.parse_error()
+            log(f"!! GStreamer pipeline error: {err.message}; recovering")
+            self._recover()
+        elif t == Gst.MessageType.EOS:
+            log("!! GStreamer pipeline EOS (capture node gone); recovering")
+            self._recover()
+
+    def _watchdog(self):
+        """Periodic: rebuild the session if a client is attached but frames have
+        stopped. Returns True to stay scheduled."""
+        try:
+            if self.is_stalled(_now_ms()) and not self._restarting:
+                stalled_ms = _now_ms() - self._last_frame_ms
+                log(f"!! capture stalled ({stalled_ms} ms, no frame with a client "
+                    f"attached); recovering")
+                self._recover()
+        except Exception as e:  # noqa: BLE001
+            log(f"watchdog error: {e}")
+        return True
+
+    def _recover(self):
+        """Shared restart path for a Mutter session close, a GStreamer
+        error/EOS, or a detected stall. Guarded so overlapping triggers schedule
+        exactly one restart."""
+        if self._restarting:
+            return
+        self._restarting = True
+        if self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+        GLib.timeout_add_seconds(1, self._restart)
 
     def _on_sample(self, sink):
         sample = sink.emit("pull-sample")
         if not sample:
             return Gst.FlowReturn.OK
+        # A frame reached us (real damage, or a keepalive repeat). Record it for
+        # the watchdog before the client gate, so liveness reflects the actual
+        # PipeWire stream, not whether anyone is currently reading.
+        self.note_frame(_now_ms())
         # No agent attached: drain the sample (drop=true handles the queue) but
         # skip the ~8 MB map+copy into shm — nothing is reading it.
         if self.active_clients == 0:
@@ -677,6 +752,11 @@ def main():
                          "physical connector. Needs no monitor, no dummy plug and "
                          "no login; overrides --monitor/--all-monitors.")
     ap.add_argument("--shm", default="/dev/shm/dreamconnect.frame")
+    ap.add_argument("--stall-timeout-ms", type=int, default=4000,
+                    help="rebuild the capture session if a client is attached but "
+                         "no frame arrives within this many ms (0 disables the "
+                         "watchdog). keepalive-time keeps a healthy stream >=1 fps, "
+                         "so this only fires on a real stall, not an idle screen.")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
     ap.add_argument("--socket", default=os.path.join(runtime_dir, "dreamconnect.sock"))
     args = ap.parse_args()
@@ -692,9 +772,15 @@ def main():
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     frame = FrameBuffer(args.shm)
     session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
-                      virtual=virtual)
+                      virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
     session.start()
     ControlServer(args.socket, session).start()
+
+    # Poll for a stalled capture pipeline a few times per timeout window. Disabled
+    # when the timeout is 0.
+    if args.stall_timeout_ms > 0:
+        interval = max(1, args.stall_timeout_ms // 2000)
+        GLib.timeout_add_seconds(interval, session._watchdog)
 
     loop = GLib.MainLoop()
 

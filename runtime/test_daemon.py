@@ -136,6 +136,65 @@ class TestFrameBufferReclaim(unittest.TestCase):
             os.chmod(self.dir, 0o700)
 
 
+class TestStallWatchdog(unittest.TestCase):
+    """The capture pipeline can stop delivering frames while the RemoteDesktop
+    session stays alive (input still works) — Mutter pausing the screencast, a
+    PipeWire node going away with no GStreamer error, etc. Nothing recovered it,
+    so the operator saw a frozen desktop with a live cursor: 'sticky, can't do
+    anything'. The watchdog restarts the session when a client is attached but
+    frames have stopped. `keepalive-time` guarantees a healthy pipeline emits
+    >=1 fps even on a static screen, so 'no frame for N seconds while attached'
+    reliably means stalled, not merely idle."""
+
+    def _session(self, **kw):
+        s = d.Session(None, "HDMI-2", None, virtual=(1920, 1080), **kw)
+        return s
+
+    def test_fresh_session_is_not_stalled(self):
+        s = self._session()
+        s.active_clients = 1
+        # No frame yet, but the session just started: the grace is that a zero
+        # last-frame time is seeded to "now" when the pipeline starts, so it is
+        # never reported stalled before it has had a chance to produce a frame.
+        s.note_frame(1000)          # pipeline start seeds the clock
+        self.assertFalse(s.is_stalled(1000))
+        self.assertFalse(s.is_stalled(1000 + s.stall_timeout_ms - 1))
+
+    def test_stalled_when_attached_and_no_frames_past_timeout(self):
+        s = self._session()
+        s.active_clients = 1
+        s.note_frame(1000)
+        self.assertTrue(s.is_stalled(1000 + s.stall_timeout_ms + 1))
+
+    def test_not_stalled_when_no_client_attached(self):
+        # With nobody reading, the daemon intentionally does not care that frames
+        # stopped — restarting the whole session for an empty stream is churn.
+        s = self._session()
+        s.active_clients = 0
+        s.note_frame(1000)
+        self.assertFalse(s.is_stalled(1000 + s.stall_timeout_ms * 10))
+
+    def test_a_frame_clears_the_stall(self):
+        s = self._session()
+        s.active_clients = 1
+        s.note_frame(1000)
+        self.assertTrue(s.is_stalled(1000 + s.stall_timeout_ms + 1))
+        s.note_frame(1000 + s.stall_timeout_ms + 1)   # a frame arrives
+        self.assertFalse(s.is_stalled(1000 + s.stall_timeout_ms + 2))
+
+    def test_timeout_is_configurable_and_has_a_sane_default(self):
+        self.assertEqual(self._session().stall_timeout_ms, 4000)
+        self.assertEqual(self._session(stall_timeout_ms=1500).stall_timeout_ms, 1500)
+
+    def test_never_stalled_before_the_first_frame_is_seeded(self):
+        # If the pipeline never produced even one frame (last_frame_ms still 0),
+        # is_stalled must not fire on a huge clock — the seed happens at pipeline
+        # start, and until then there is nothing to compare against.
+        s = self._session()
+        s.active_clients = 1
+        self.assertFalse(s.is_stalled(10_000_000))
+
+
 class TestParseResolution(unittest.TestCase):
     """--virtual takes WxH and must refuse anything that would reach Mutter as
     a nonsense virtual monitor size."""
