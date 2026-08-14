@@ -49,10 +49,17 @@ the coarse switch is proven.
 ## What a "user session" is here
 
 Headless and **fresh** — a new desktop for that account, not a mirror of a
-physical screen (Wayland forbids attaching to someone's on-console session; that
-is the greeter/lock-screen inhibition). On a headless box or VM, where nobody is
-at a physical display, this spawned session simply **is** "the user logged in".
-Tearing it down is "logging out". No greeter, no autologin, no unlocked console.
+physical screen. Note the precise limit: Wayland forbids attaching to a session
+**from outside it** (and anything at the greeter/lock screen). Mirroring a
+physically-attended session is fine when the daemon runs *inside* it — that is
+the classic install mode (`graphical-session.target` + `--monitor <connector>`),
+where the user's login starts their own daemon against the physical connector.
+The MVP spawns fresh sessions only because that is the headless/VM use case; on
+a box where somebody is at the console, the switcher's job is not to spawn but
+to **repoint** SC at that user's already-running classic daemon (see Non-goals).
+On a headless box or VM, where nobody is at a physical display, this spawned
+session simply **is** "the user logged in". Tearing it down is "logging out".
+No greeter, no autologin, no unlocked console.
 
 ## Security
 
@@ -74,7 +81,11 @@ remote-admin tool, and narrower than autologin (no console is ever unlocked).
 
 ## Non-goals (MVP)
 
-- Mirroring a physically-attended session (impossible on Wayland).
+- Switching *to* a physically-attended console session (possible — the classic
+  attended daemon already captures it from inside; the switcher just has to
+  detect it and repoint instead of spawning — but not built in the MVP). Note a
+  given account runs one daemon: its shm/socket are uid-scoped, so it is either
+  attended-captured or headless-captured, never both.
 - Seamless no-reconnect switching (v2, pointer-follow).
 - Multiple concurrent *visible* sessions (one active at a time; others can stay
   warm but only the active one is shown).
