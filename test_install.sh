@@ -5604,6 +5604,25 @@ test_install_sh_scopes_the_shm_path_by_uid() {
     "the shm path must be scoped by uid, or two accounts collide on one sticky /dev/shm file (#27)"
 }
 
+# Backstage lifts SC's 20 fps ceiling by default (measured 20->62 fps for ~2%
+# CPU on dedicated hardware); a classic install into a human's session stays
+# stock so their machine is never pushed harder without asking. The append must
+# be gated on >0 so DREAMCONNECT_FPS=0 disables it cleanly.
+test_install_sh_defaults_backstage_fps_and_leaves_classic_stock() {
+  local sh line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  line="$(grep -m1 'DREAMCONNECT_FPS:=' "$sh")"
+  [ -n "$line" ] || { fail "install.sh does not default DREAMCONNECT_FPS"; return 0; }
+  assert_contains "$line" "BACKSTAGE" \
+    "the fps default must depend on backstage mode"
+  assert_contains "$line" "60" "backstage defaults to 60 fps"
+  assert_contains "$line" "0" "classic mode defaults to 0 (SC's stock ceiling)"
+  # The maxfps arg must only be appended when the value is > 0.
+  grep -q 'DREAMCONNECT_FPS.*-gt 0' "$sh" || grep -q '\[ "\$DREAMCONNECT_FPS" -gt 0 \]' "$sh" || \
+    fail "install.sh must only append maxfps when DREAMCONNECT_FPS > 0 (so 0 = stock)"
+}
+
 # --- slice 13: autologin is gone ----------------------------------------------
 # Autologin existed only to manufacture a graphical session so the bridge had
 # something to attach to — never to make the login screen viewable, which Mutter
@@ -5739,6 +5758,7 @@ for CURRENT in \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
   test_install_sh_removes_the_shm_frame_on_uninstall \
   test_install_sh_scopes_the_shm_path_by_uid \
+  test_install_sh_defaults_backstage_fps_and_leaves_classic_stock \
   test_the_autologin_helpers_are_gone \
   test_the_installer_never_edits_the_display_manager_config \
   test_no_autologin_environment_variable_is_honoured \

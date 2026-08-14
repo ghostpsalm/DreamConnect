@@ -19,9 +19,9 @@
 #                              backstage desktop. NOPASSWD is not a choice: the
 #                              account has no password. Opt-in and reversible;
 #                              only meaningful with DREAMCONNECT_HOST_ACCOUNT.
-#   DREAMCONNECT_FPS=<n>        lift ScreenConnect's stock 50ms/20fps frame-interval
-#                              ceiling (e.g. 60). Unset = stock. The agent always
-#                              logs the achieved fps either way.
+#   DREAMCONNECT_FPS=<n>        session fps ceiling (backstage default 60; 0 = SC's
+#                              stock 20). Lifts SC's fixed 50ms frame interval. The agent
+#                              always logs the achieved fps either way.
 #   DREAMCONNECT_BACKSTAGE=1   backstage mode: run the bridge against a headless
 #                              `gnome-shell --headless` started by the lingering
 #                              user manager, capturing a Mutter virtual monitor.
@@ -474,14 +474,17 @@ if [ "$BACKSTAGE" -eq 1 ]; then
 else
   AGENT_EXTRA=""
 fi
-# Optional capture-loop tuning: DREAMCONNECT_FPS=<n> lifts ScreenConnect's fixed
-# 50 ms/20 fps frame-interval ceiling (see spikes/SPIKE_ENCODER_KNOBS.md). Unset
-# = stock behaviour, so a plain install is a clean baseline. The agent always
-# logs the achieved rate regardless, so the effect is measurable either way.
-if [ -n "${DREAMCONNECT_FPS:-}" ]; then
-  case "$DREAMCONNECT_FPS" in
-    ''|*[!0-9]*) die "DREAMCONNECT_FPS must be a positive integer, got '$DREAMCONNECT_FPS'" ;;
-  esac
+# Capture-loop tuning: lift ScreenConnect's fixed 50 ms / 20 fps frame-interval
+# ceiling (see spikes/SPIKE_ENCODER_KNOBS.md). Measured on a 6-core box at 720p:
+# 20.0 fps stock -> 62 fps at maxfps=60, for ~2% guest CPU. Backstage runs on
+# dedicated hardware, so it defaults to 60 (a 60 Hz display shows no more anyway);
+# a classic install stays stock so a human's machine is never pushed harder
+# without asking. DREAMCONNECT_FPS overrides either way; 0 = stock (disable).
+: "${DREAMCONNECT_FPS:=$([ "$BACKSTAGE" -eq 1 ] && echo 60 || echo 0)}"
+case "$DREAMCONNECT_FPS" in
+  ''|*[!0-9]*) die "DREAMCONNECT_FPS must be a non-negative integer, got '$DREAMCONNECT_FPS'" ;;
+esac
+if [ "$DREAMCONNECT_FPS" -gt 0 ]; then
   AGENT_EXTRA="$AGENT_EXTRA,maxfps=$DREAMCONNECT_FPS"
   echo ">> capture tuning: maxfps=$DREAMCONNECT_FPS (lifts SC's stock 20 fps ceiling)"
 fi
