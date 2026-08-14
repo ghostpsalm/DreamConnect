@@ -737,15 +737,12 @@ configure_no_idle_lock() {  # name home
   # lock-delay and idle-delay are "type u" in the installed GNOME schemas, hence
   # uint32; the sleep-inactive-*-type enums are strings. Suspending would be the
   # same unreachability the lock keys are here to prevent.
-  # The desktop half of the keyfile turns the bare headless GNOME shell into a
-  # usable admin console for an operator arriving over ScreenConnect:
-  #   * window-list — a permanent taskbar along the bottom (GNOME otherwise hides
-  #     all running windows behind the overview, which is disorienting on a
-  #     remote session); the extension ships with gnome-shell-extensions.
-  #   * favorite-apps — the dash is pre-pinned with the Windows-Backstage-style
-  #     toolset: a terminal, the process monitor, the log/event viewer, the file
-  #     manager and disks. Missing apps are silently skipped by the shell, so
-  #     pinning one a minimal box lacks is harmless.
+  # The desktop half of the keyfile pre-pins the dash with a Windows-style admin
+  # toolset for an operator arriving over ScreenConnect, in a fixed order (see
+  # the launcher list below for the Windows-tool -> Linux-app mapping). This is
+  # stock GNOME otherwise — no window-list/taskbar extension — so the dash shows
+  # in the Activities overview exactly as vanilla GNOME does. Missing apps are
+  # silently skipped by the shell, so pinning one a minimal box lacks is harmless.
   # These are defaults, not locks: the account can still change them.
   cat > "$dir/db/$name.d/00-display-host" <<'EOF'
 [org/gnome/desktop/screensaver]
@@ -761,8 +758,7 @@ sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
 
 [org/gnome/shell]
-enabled-extensions=['window-list@gnome-shell-extensions.gcampax.github.com']
-favorite-apps=['org.gnome.Ptyxis.desktop', 'org.gnome.SystemMonitor.desktop', 'org.gnome.Logs.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.DiskUtility.desktop']
+favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.DiskUtility.desktop', 'ca.desrt.dconf-editor.desktop', 'org.gnome.Logs.desktop', 'dreamconnect-services.desktop', 'org.gnome.SystemMonitor.desktop', 'dreamconnect-sysinfo.desktop', 'firewall-config.desktop', 'org.gnome.TextEditor.desktop']
 EOF
 
   # Without DCONF_PROFILE in the session's environment dconf loads its default
@@ -785,6 +781,33 @@ EOF
   printf 'DCONF_PROFILE=%s\n' "$name" > "$home/.config/environment.d/dconf-profile.conf"
   printf 'yes\n' > "$home/.config/gnome-initial-setup-done"
 
+  # Two admin tools the dash pins that GNOME ships no GUI for: a services list
+  # and a system-information dump. They open in the session's terminal
+  # (Terminal=true, so no terminal binary is hardcoded) and drop to a shell so
+  # the operator can act on what they see. Written into the account's own
+  # applications dir, so they are removed with the home directory on uninstall.
+  mkdir -p "$home/.local/share/applications"
+  cat > "$home/.local/share/applications/dreamconnect-services.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=System Services
+Comment=systemd service units (Windows "Services" equivalent)
+Icon=applications-system
+Exec=sh -c 'systemctl list-units --type=service --all --no-pager; echo; exec ${SHELL:-bash}'
+Terminal=true
+Categories=System;
+EOF
+  cat > "$home/.local/share/applications/dreamconnect-sysinfo.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=System Information
+Comment=Host, CPU, memory and disk summary (Windows "System Information" equivalent)
+Icon=computer
+Exec=sh -c 'hostnamectl; echo; lscpu | head -n 25; echo; free -h; echo; df -h -x tmpfs -x devtmpfs; echo; exec ${SHELL:-bash}'
+Terminal=true
+Categories=System;
+EOF
+
   # Same `chown "<name>:" <path>` form install.sh already uses after installing
   # the user unit into a home directory as root. Best effort: nothing here
   # enforces that ensure_host_account ran first, and losing the configuration
@@ -792,7 +815,10 @@ EOF
   # cosmetic detail. The /etc/dconf files are left root-owned.
   for p in "$home/.config" "$home/.config/environment.d" \
            "$home/.config/environment.d/dconf-profile.conf" \
-           "$home/.config/gnome-initial-setup-done"; do
+           "$home/.config/gnome-initial-setup-done" \
+           "$home/.local" "$home/.local/share" "$home/.local/share/applications" \
+           "$home/.local/share/applications/dreamconnect-services.desktop" \
+           "$home/.local/share/applications/dreamconnect-sysinfo.desktop"; do
     chown "$name:" "$p" || echo "warning: could not chown $p to $name" >&2
   done
 
@@ -875,6 +901,11 @@ remove_no_idle_lock() {  # name home
         rm -f "$p"
       fi
     done
+    # Our own dash launchers — never a pre-existing file, so always just removed.
+    # Matters for an adopted account (userdel -r never runs on it); for an account
+    # we created they go with the home anyway.
+    rm -f "$home/.local/share/applications/dreamconnect-services.desktop" \
+          "$home/.local/share/applications/dreamconnect-sysinfo.desktop"
   else
     echo "warning: skipping the home half of the idle-lock revert for '$name': unusable home directory '$home'" >&2
   fi

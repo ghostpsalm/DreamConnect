@@ -339,12 +339,27 @@ case "$PM" in
   *)       DEPS=(); JDK_PKG="" ;;
 esac
 
+# Backstage pre-pins an admin toolset in the dash; install what the box lacks so
+# those launchers work. Best-effort and Fedora-named (dnf) — on another distro
+# the missing ones simply stay unpinned. Only the GUIs GNOME does not ship by
+# default; the two custom terminal launchers need nothing extra.
+BACKSTAGE_TOOLS=()
+if [ "$BACKSTAGE" -eq 1 ] && [ "$PM" = "dnf" ]; then
+  BACKSTAGE_TOOLS=(nautilus ptyxis gnome-disk-utility dconf-editor gnome-logs
+                   gnome-system-monitor firewall-config gnome-text-editor)
+fi
+
 if [ "${DREAMCONNECT_SKIP_DEPS:-}" = "1" ]; then
   echo ">> skipping dependency install (DREAMCONNECT_SKIP_DEPS=1)"
 elif [ -n "$PM" ]; then
   echo ">> installing dependencies via $PM"
   pm_install "${DEPS[@]}" >/dev/null 2>&1 \
     || echo "!! some dependencies failed via $PM; install manually: ${DEPS[*]}"
+  if [ "${#BACKSTAGE_TOOLS[@]}" -gt 0 ]; then
+    echo ">> installing the backstage admin toolset via $PM"
+    pm_install "${BACKSTAGE_TOOLS[@]}" >/dev/null 2>&1 \
+      || echo "!! some backstage tools failed via $PM; the dash will just skip the missing ones"
+  fi
 else
   echo "!! no supported package manager (apt/dnf/zypper/pacman) found."
   echo "   Ensure these are installed: xdpyinfo xrandr xwininfo, python3 + GObject"

@@ -1157,10 +1157,10 @@ test_configure_no_idle_lock_writes_all_seven_dconf_keys() {
   assert_line "$body" "sleep-inactive-battery-type='nothing'" "power sleep-inactive-battery-type='nothing'"
 }
 
-# The desktop half of the same keyfile: a permanent taskbar and the pre-pinned
-# admin toolset that make the headless session usable for an arriving operator.
+# The desktop half of the same keyfile: stock GNOME (no taskbar extension) with
+# the admin toolset pinned to the dash in a fixed order.
 test_configure_no_idle_lock_configures_the_backstage_desktop() {
-  local d home shims f body
+  local d home shims f body fav
   require_no_idle_lock "backstage desktop" || return 0
   read -r d home <<<"$(idle_fixture backstage-desktop)"
   shims="$TMP/shims-backstage-desktop"; make_dconf_shim "$shims" >/dev/null
@@ -1169,16 +1169,31 @@ test_configure_no_idle_lock_configures_the_backstage_desktop() {
   body="$(cat "$f" 2>/dev/null || true)"
 
   assert_line "$body" "[org/gnome/shell]" "shell section header"
-  # A permanent window list is the taskbar; without it GNOME hides every running
-  # window behind the overview, which is disorienting on a remote session.
-  assert_contains "$body" "window-list@gnome-shell-extensions.gcampax.github.com" \
-    "the window-list taskbar extension is enabled"
-  assert_contains "$body" "enabled-extensions=" "extensions are enabled by default"
-  # The Windows-Backstage-style toolset: terminal, process monitor, log viewer.
+  # Vanilla layout: NO window-list / taskbar extension, and the operator asked
+  # specifically for stock GNOME back. Pinning an extension here would resurrect
+  # the bottom bar whose window labels overlapped the dash.
+  assert_not_contains "$body" "enabled-extensions" \
+    "no shell extensions are forced — this is vanilla GNOME, not the window-list layout"
+  assert_not_contains "$body" "window-list" "the window-list taskbar is gone"
+
   assert_contains "$body" "favorite-apps=" "the dash is pre-pinned"
-  assert_contains "$body" "org.gnome.Ptyxis.desktop"        "a terminal is pinned"
-  assert_contains "$body" "org.gnome.SystemMonitor.desktop" "the process monitor is pinned"
-  assert_contains "$body" "org.gnome.Logs.desktop"          "the log/event viewer is pinned"
+  fav="$(printf '%s\n' "$body" | sed -n 's/^favorite-apps=//p')"
+  # The exact order the operator specified: Files, Terminal, Disks, dconf-editor
+  # (registry), Logs (event viewer), Services, System Monitor (resources),
+  # System Information, Firewall, Text Editor (notepad).
+  local want="['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.DiskUtility.desktop', 'ca.desrt.dconf-editor.desktop', 'org.gnome.Logs.desktop', 'dreamconnect-services.desktop', 'org.gnome.SystemMonitor.desktop', 'dreamconnect-sysinfo.desktop', 'firewall-config.desktop', 'org.gnome.TextEditor.desktop']"
+  assert_eq "$fav" "$want" "the dash is pinned in the requested order"
+
+  # The two tools GNOME ships no GUI for get custom launchers in the account's
+  # own applications dir (disposable with the home on uninstall).
+  assert_file_exists "$home/.local/share/applications/dreamconnect-services.desktop" \
+    "a System Services launcher is created"
+  assert_file_exists "$home/.local/share/applications/dreamconnect-sysinfo.desktop" \
+    "a System Information launcher is created"
+  assert_contains "$(cat "$home/.local/share/applications/dreamconnect-services.desktop" 2>/dev/null)" \
+    "systemctl" "the services launcher runs systemctl"
+  assert_contains "$(cat "$home/.local/share/applications/dreamconnect-services.desktop" 2>/dev/null)" \
+    "Terminal=true" "the services launcher opens in a terminal, not hardcoding one"
 }
 
 # Without DCONF_PROFILE in the account's environment the session loads dconf's
