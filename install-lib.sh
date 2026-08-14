@@ -745,6 +745,13 @@ configure_no_idle_lock() {  # name home
   # in the Activities overview exactly as vanilla GNOME does. Missing apps are
   # silently skipped by the shell, so pinning one a minimal box lacks is harmless.
   # These are defaults, not locks: the account can still change them.
+  #
+  # Animations are OFF: over a remote session every animated frame (an overview
+  # transition is ~0.3 s of full-screen change at the session frame rate) is
+  # captured, encoded and shipped for zero information, and it is exactly what
+  # makes the app switcher "chug" on a CPU-contended box. Measured: disabling
+  # them roughly halves the shell + capture CPU during an app switch and makes
+  # the transition instant. Eye-candy is a poor trade on a headless admin desktop.
   cat > "$dir/db/$name.d/00-display-host" <<'EOF'
 [org/gnome/desktop/screensaver]
 lock-enabled=false
@@ -757,6 +764,9 @@ idle-delay=uint32 0
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
+
+[org/gnome/desktop/interface]
+enable-animations=false
 
 [org/gnome/shell]
 favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.DiskUtility.desktop', 'ca.desrt.dconf-editor.desktop', 'org.gnome.Logs.desktop', 'dreamconnect-services.desktop', 'org.gnome.SystemMonitor.desktop', 'dreamconnect-sysinfo.desktop', 'firewall-config.desktop', 'org.gnome.TextEditor.desktop']

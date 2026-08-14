@@ -1168,6 +1168,12 @@ test_configure_no_idle_lock_configures_the_backstage_desktop() {
   f="$d/db/dreamconnect-host.d/00-display-host"
   body="$(cat "$f" 2>/dev/null || true)"
 
+  # Animations off: an overview transition is ~0.3s of full-screen change that
+  # gets captured/encoded/shipped for nothing, and is the app-switcher "chug" on
+  # a CPU-contended box. Disabling them halves the interaction CPU.
+  assert_line "$body" "[org/gnome/desktop/interface]" "interface section header"
+  assert_line "$body" "enable-animations=false" "GNOME animations are disabled for the remote desktop"
+
   assert_line "$body" "[org/gnome/shell]" "shell section header"
   # Vanilla layout: NO window-list / taskbar extension, and the operator asked
   # specifically for stock GNOME back. Pinning an extension here would resurrect
