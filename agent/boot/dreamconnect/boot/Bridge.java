@@ -20,6 +20,21 @@ public final class Bridge {
     private static volatile String labelOverride;    // label= arg, wins over WHO
     private static volatile String logonLabel;        // cached daemon WHO reply
 
+    // Capture-loop tuning. ScreenConnect's ClientScreenCapturer is built with a
+    // fixed 50 ms min frame interval — a 20 fps ceiling on any >=4-core box, no
+    // matter how fast capture is (see spikes/SPIKE_ENCODER_KNOBS.md). These
+    // override the private frame-interval fields on the IncrementalScreenCapturer
+    // superclass at construction. 0 = leave the stock value untouched.
+    private static volatile int capMinIntervalMs = 0;
+    private static volatile int capMaxIntervalMs = 0;
+    private static volatile int capFrameMultiple = 0;   // matters on <4-core boxes
+
+    // Achieved-fps meter: SC captures each frame through our peer, so counting
+    // getRGBPixels calls is the real session frame rate. Logged ~every 2s.
+    private static final java.util.concurrent.atomic.AtomicLong captureCount =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static volatile long captureWindowStartMs = 0;
+
     private static volatile DaemonClient daemon;
     private static volatile FrameReader frame;
 
@@ -55,6 +70,13 @@ public final class Bridge {
                 case "socket" -> { socketPath = v; socketExplicit = true; }
                 case "debug" -> debug = Boolean.parseBoolean(v);
                 case "label" -> labelOverride = v;
+                // maxfps=N is the friendly form of mininterval=1000/N (the frame
+                // rate ceiling); mininterval/maxinterval/framemultiple are the raw
+                // knobs for fine control. All best-effort: a bad number is ignored.
+                case "maxfps" -> capMinIntervalMs = perFrameMs(v);
+                case "mininterval" -> capMinIntervalMs = parseIntOr(v, capMinIntervalMs);
+                case "maxinterval" -> capMaxIntervalMs = parseIntOr(v, capMaxIntervalMs);
+                case "framemultiple" -> capFrameMultiple = parseIntOr(v, capFrameMultiple);
                 default -> {}
             }
         }
@@ -63,9 +85,82 @@ public final class Bridge {
 
     private static void logConfig() {
         log("configured shm=" + shmPath + " socket=" + socketPath);
+        if (capMinIntervalMs > 0 || capMaxIntervalMs > 0 || capFrameMultiple > 0) {
+            log("capture tuning: minInterval=" + capMinIntervalMs + "ms maxInterval="
+                    + capMaxIntervalMs + "ms frameMultiple=" + capFrameMultiple
+                    + " (0 = stock)");
+        }
         if (!socketExplicit) {
             log("WARN: socket unconfigured; guessing " + FALLBACK_SOCKET
                     + " — pass socket= if the desktop user isn't uid 1000");
+        }
+    }
+
+    static int parseIntOr(String v, int fallback) {
+        try { return Integer.parseInt(v.trim()); } catch (Exception e) { return fallback; }
+    }
+
+    /** maxfps -> milliseconds per frame (the min frame interval). 0/invalid -> 0. */
+    static int perFrameMs(String fps) {
+        int n = parseIntOr(fps, 0);
+        return n > 0 ? Math.max(1, 1000 / n) : 0;
+    }
+
+    /**
+     * Override ScreenConnect's fixed frame-interval fields on a freshly built
+     * capturer, so the 50 ms/20 fps ceiling doesn't cap a session whose capture
+     * is now cheap. Called from the ClientScreenCapturer constructor hook with
+     * the instance; the fields live on the IncrementalScreenCapturer superclass,
+     * so setIntField walks the hierarchy. Best-effort and never throws into SC.
+     */
+    public static void tuneCapturer(Object capturer) {
+        try {
+            if (capturer == null) return;
+            boolean any = false;
+            if (capMinIntervalMs > 0) any |= setIntField(capturer, "minFrameIntervalMilliseconds", capMinIntervalMs);
+            if (capMaxIntervalMs > 0) any |= setIntField(capturer, "maxFrameIntervalMilliseconds", capMaxIntervalMs);
+            if (capFrameMultiple > 0) any |= setIntField(capturer, "frameDelayMultiple", capFrameMultiple);
+            if (any) {
+                log("tuned capturer " + capturer.getClass().getSimpleName()
+                        + ": minInterval=" + capMinIntervalMs + " maxInterval=" + capMaxIntervalMs
+                        + " frameMultiple=" + capFrameMultiple + " (0 = left stock)");
+            }
+        } catch (Throwable t) {
+            log("tuneCapturer failed: " + t);
+        }
+    }
+
+    /** Set an int field by name, searching the class and its superclasses. */
+    static boolean setIntField(Object o, String name, int value) {
+        for (Class<?> c = o.getClass(); c != null; c = c.getSuperclass()) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                f.setInt(o, value);
+                return true;
+            } catch (NoSuchFieldException ignored) {
+                // keep walking up
+            } catch (Exception e) {
+                log("setIntField " + name + " failed: " + e);
+                return false;
+            }
+        }
+        return false;
+    }
+
+    /** Called per captured frame from the Robot peer; logs achieved fps ~every 2s. */
+    public static void noteCapture() {
+        long now = System.currentTimeMillis();
+        long start = captureWindowStartMs;
+        if (start == 0) { captureWindowStartMs = now; captureCount.set(0); return; }
+        long n = captureCount.incrementAndGet();
+        long elapsed = now - start;
+        if (elapsed >= 2000) {
+            // Reset first so a slow log line doesn't skew the next window.
+            captureWindowStartMs = now;
+            captureCount.set(0);
+            log(String.format("session capture rate: %.1f fps (%d frames / %d ms)",
+                    n * 1000.0 / elapsed, n, elapsed));
         }
     }
 

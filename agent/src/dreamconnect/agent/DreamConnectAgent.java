@@ -106,6 +106,13 @@ public final class DreamConnectAgent {
                                     .on(named("blankMonitorsOrWallpapers")))
                             .visit(Advice.to(BlankMonitorAdvice.Unblank.class)
                                     .on(named("unblankMonitorsOrWallpapers"))))
+                    // Capture-loop tuning: override the fixed 50 ms/20 fps frame
+                    // interval on construction so fast capture translates into
+                    // frame rate. No-op unless maxfps=/mininterval= is configured.
+                    .type(named("com.screenconnect.client.ClientScreenCapturer"))
+                    .transform((builder, type, cl, module, pd) -> builder
+                            .visit(Advice.to(CaptureTuneAdvice.class)
+                                    .on(ElementMatchers.isConstructor())))
                     .installOn(inst);
 
             System.err.println("[dreamconnect-agent] installed; Robot peer + command hooks armed "

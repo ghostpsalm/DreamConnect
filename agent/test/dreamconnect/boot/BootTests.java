@@ -37,6 +37,7 @@ public class BootTests {
         testFrameReader();
         testFrameReaderNeverBlackMidWrite();
         testCurateLogonSessions();
+        testCaptureTuning();
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -488,4 +489,64 @@ public class BootTests {
     }
 
     private static String sessionNameOf(FakeLogon f) { return f.logonSessionName; }
+
+    /** Superclass carrying the private frame-interval fields, like
+     *  IncrementalScreenCapturer; the setter must walk up to reach them. */
+    public static class FakeCapturerBase {
+        private int minFrameIntervalMilliseconds = 50;
+        private int maxFrameIntervalMilliseconds = 250;
+        private int frameDelayMultiple = 3;
+    }
+    public static class FakeCapturer extends FakeCapturerBase {}
+
+    private static void testCaptureTuning() {
+        // maxfps -> min frame interval in ms.
+        check(Bridge.perFrameMs("60") == 16, "maxfps=60 -> 16 ms min interval (got " + Bridge.perFrameMs("60") + ")");
+        check(Bridge.perFrameMs("20") == 50, "maxfps=20 -> 50 ms (SC's stock ceiling)");
+        check(Bridge.perFrameMs("0") == 0, "maxfps=0 -> 0 (leave stock)");
+        check(Bridge.perFrameMs("junk") == 0, "maxfps=junk -> 0 (ignored)");
+        check(Bridge.parseIntOr("7", -1) == 7 && Bridge.parseIntOr("x", -1) == -1, "parseIntOr");
+
+        // setIntField reaches a private field on the SUPERCLASS.
+        FakeCapturer c = new FakeCapturer();
+        check(Bridge.setIntField(c, "minFrameIntervalMilliseconds", 16), "setIntField finds the superclass field");
+        check(fieldInt(c, "minFrameIntervalMilliseconds") == 16, "the superclass field was actually set to 16");
+        check(!Bridge.setIntField(c, "noSuchField", 1), "setIntField returns false for an unknown field");
+
+        // configure(...) wires the args, and tuneCapturer applies them.
+        Bridge.configure("maxfps=30,maxinterval=120,framemultiple=1");
+        FakeCapturer c2 = new FakeCapturer();
+        Bridge.tuneCapturer(c2);
+        check(fieldInt(c2, "minFrameIntervalMilliseconds") == 33, "tuneCapturer set min interval from maxfps=30 (got " + fieldInt(c2, "minFrameIntervalMilliseconds") + ")");
+        check(fieldInt(c2, "maxFrameIntervalMilliseconds") == 120, "tuneCapturer set max interval");
+        check(fieldInt(c2, "frameDelayMultiple") == 1, "tuneCapturer set frame multiple");
+
+        // With nothing configured, stock values are left untouched.
+        Bridge.configure("");   // clears? no — resets via re-parse below
+        resetTuning();
+        FakeCapturer c3 = new FakeCapturer();
+        Bridge.tuneCapturer(c3);
+        check(fieldInt(c3, "minFrameIntervalMilliseconds") == 50, "no tuning configured -> stock 50 ms left as-is");
+
+        // tuneCapturer must never throw on a null or a wrong-shaped object.
+        Bridge.tuneCapturer(null);
+        Bridge.tuneCapturer("not a capturer");
+        check(true, "tuneCapturer tolerates null and unexpected objects");
+    }
+
+    private static int fieldInt(Object o, String name) {
+        try {
+            for (Class<?> k = o.getClass(); k != null; k = k.getSuperclass()) {
+                try { java.lang.reflect.Field f = k.getDeclaredField(name); f.setAccessible(true); return f.getInt(o); }
+                catch (NoSuchFieldException ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return -1;
+    }
+
+    private static void resetTuning() {
+        // configure() only ever sets tuning knobs to 0 when maxfps=0 etc.; use that
+        // to return Bridge to the stock/no-op state between assertions.
+        Bridge.configure("maxfps=0,maxinterval=0,framemultiple=0");
+    }
 }

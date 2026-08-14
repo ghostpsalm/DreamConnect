@@ -66,6 +66,7 @@ public final class DreamConnectRobotPeer implements RobotPeer {
     }
 
     @Override public int[] getRGBPixels(Rectangle bounds) {
+        Bridge.noteCapture();   // achieved-fps meter (this is SC's real frame loop)
         return frame.pixels(bounds.x, bounds.y, bounds.width, bounds.height);
     }
 
