@@ -107,6 +107,11 @@ uninstall() {
   # session itself. Unconditional and quiet, exactly like the daemon line above —
   # a classic install simply has no such unit.
   "${target_run_user[@]}" systemctl --user disable --now dreamconnect-backstage.service 2>/dev/null || true
+  # The session-switch CLI and its active-session pointer. On-demand user sessions
+  # are transient systemd-run units that die with the user manager; the pointer
+  # and the PATH symlink are ours to remove.
+  rm -f /usr/local/bin/dreamconnect-session
+  rm -rf /run/dreamconnect
   # Drop the shm frame with the daemon that owned it. Leaving it behind is not
   # just an 8 MB leak: /dev/shm is sticky, so a later install under a different
   # account cannot unlink it and every write fails with EACCES (#27). Both the
@@ -390,6 +395,13 @@ echo ">> deploying to $INSTALL_DIR"
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/runtime"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-backstage-env.sh" "$INSTALL_DIR/runtime/"
+# The session-switch CLI (backstage <-> on-demand user sessions). Only useful in
+# backstage mode — it repoints SC between the backstage account and a user's
+# session — so it is deployed and put on PATH only there.
+install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-session" "$INSTALL_DIR/runtime/"
+if [ "$BACKSTAGE" -eq 1 ]; then
+  ln -sf "$INSTALL_DIR/runtime/dreamconnect-session" /usr/local/bin/dreamconnect-session
+fi
 install -o root -g root -m 0644 "$AGENT_JAR" "$INSTALL_DIR/dreamconnect-agent.jar"
 
 # --- host fix: broken-:1 display skip wrapper -------------------------------

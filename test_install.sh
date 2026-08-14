@@ -5600,6 +5600,45 @@ test_install_sh_removes_the_shm_frame_on_uninstall() {
     "uninstall must remove the shm frame — a survivor blocks the next install under a different account (#27)"
 }
 
+# The session-switch CLI repoints the SC drop-in between accounts. Its renderer
+# must produce the same wiring shape install.sh writes (uid-scoped socket + shm,
+# the perf args, the optional display env file), or a switch would misconfigure
+# the client. DC_RENDER_ONLY=1 exercises the pure renderer with no root/systemd.
+test_session_cli_renders_a_valid_dropin() {
+  local cli out
+  cli="$HERE/runtime/dreamconnect-session"
+  assert_file_exists "$cli" "the session-switch CLI is present"
+  [ -f "$cli" ] || return 0
+  assert_contains "$(bash -n "$cli" 2>&1 || echo SYNTAXERR)" "" "the CLI parses"
+
+  out="$(DC_RENDER_ONLY=1 DREAMCONNECT_FPS=60 DREAMCONNECT_LOGONTTL=300 INSTALL_DIR=/opt/dreamconnect \
+         bash "$cli" 1000 kogies 2>&1)"
+  assert_contains "$out" "socket=/run/user/1000/dreamconnect.sock" "socket is uid-scoped"
+  assert_contains "$out" "shm=/dev/shm/dreamconnect.frame.1000"    "shm is uid-scoped"
+  assert_contains "$out" "label=kogies"                            "the label names the account"
+  assert_contains "$out" "maxfps=60"                               "the fps knob is carried onto the session"
+  assert_contains "$out" "logonttl=300"                            "the probe-cache knob is carried"
+  assert_contains "$out" "EnvironmentFile=-/run/user/1000/dreamconnect-display.env" \
+    "the display env file is optional (leading -) and uid-scoped"
+
+  # FPS=0 must drop maxfps entirely (stock), never emit maxfps=0.
+  out="$(DC_RENDER_ONLY=1 DREAMCONNECT_FPS=0 DREAMCONNECT_LOGONTTL=300 bash "$cli" 1000 kogies 2>&1)"
+  assert_not_contains "$out" "maxfps" "FPS=0 renders no maxfps arg (stock ceiling)"
+}
+
+# Uninstall must remove the CLI symlink and its runtime state, or a stale
+# /usr/local/bin/dreamconnect-session and /run/dreamconnect linger after removal.
+test_uninstall_removes_the_session_cli() {
+  local sh body
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || return 0
+  body="$(awk '/^uninstall\(\) \{/,/^\}/' "$sh")"
+  assert_contains "$body" "/usr/local/bin/dreamconnect-session" \
+    "uninstall removes the session-switch CLI symlink"
+  assert_contains "$body" "/run/dreamconnect" \
+    "uninstall removes the active-session state dir"
+}
+
 test_install_sh_scopes_the_shm_path_by_uid() {
   local sh line
   sh="$HERE/install.sh"
@@ -5763,6 +5802,8 @@ for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
   test_install_sh_removes_the_shm_frame_on_uninstall \
+  test_session_cli_renders_a_valid_dropin \
+  test_uninstall_removes_the_session_cli \
   test_install_sh_scopes_the_shm_path_by_uid \
   test_install_sh_defaults_backstage_fps_and_leaves_classic_stock \
   test_the_autologin_helpers_are_gone \

@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+#
+# dreamconnect-session — switch which account's session ScreenConnect shows.
+#
+# A "session" is (account) + (headless gnome-shell) + (daemon capturing it),
+# exactly the backstage machinery pointed at a different account. This brings a
+# chosen account's session up on demand and repoints the SC client at it, with
+# backstage as the always-available fallback. See docs/session-switching.md.
+#
+#   dreamconnect-session to <user>    bring up <user>'s session and show it
+#   dreamconnect-session backstage    show the backstage session
+#   dreamconnect-session stop <user>  tear down <user>'s session (-> backstage)
+#   dreamconnect-session status       what is active, what is available
+#
+# Root only: it starts sessions as arbitrary accounts. Drive it over SC's root
+# Commands channel or SSH.
+set -euo pipefail
+
+INSTALL_DIR="${INSTALL_DIR:-/opt/dreamconnect}"
+STATE_DIR="/run/dreamconnect"
+ACTIVE_FILE="$STATE_DIR/active"          # holds the active account name
+RES="${DREAMCONNECT_BACKSTAGE_RES:-1280x720}"
+# Perf knobs carried onto whatever session is shown (see the encoder spike).
+FPS="${DREAMCONNECT_FPS:-60}"
+LOGONTTL="${DREAMCONNECT_LOGONTTL:-300}"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# --- pure, testable: render the SC agent drop-in for a uid + label -----------
+# Kept identical in shape to what install.sh writes, so switching produces the
+# same wiring a fresh install would. DC_RENDER_ONLY=1 makes the script print one
+# rendering and exit, for unit tests.
+render_dropin() {  # uid label
+  local uid="$1" label="$2" extra=""
+  [ -n "$label" ] && extra=",label=$label"
+  [ "$FPS" -gt 0 ] 2>/dev/null && extra="$extra,maxfps=$FPS"
+  [ -n "$LOGONTTL" ] && extra="$extra,logonttl=$LOGONTTL"
+  cat <<EOF
+# Rendered by dreamconnect-session. Repointed at uid $uid.
+[Service]
+Environment=JAVA_TOOL_OPTIONS=-javaagent:$INSTALL_DIR/dreamconnect-agent.jar=socket=/run/user/$uid/dreamconnect.sock,shm=/dev/shm/dreamconnect.frame.$uid$extra
+EnvironmentFile=-/run/user/$uid/dreamconnect-display.env
+EOF
+}
+
+if [ "${DC_RENDER_ONLY:-}" = "1" ]; then
+  render_dropin "${1:?uid}" "${2:-}"
+  exit 0
+fi
+
+[ "$(id -u)" -eq 0 ] || die "run as root"
+
+# --- environment ------------------------------------------------------------
+SC_UNIT="$(systemctl list-unit-files --no-legend 'connectwisecontrol-*.service' 2>/dev/null \
+           | awk '{print $1}' | head -1 || true)"
+[ -n "$SC_UNIT" ] || die "no connectwisecontrol-*.service found"
+
+state_file="/etc/dreamconnect/install.state"
+BACKSTAGE_ACCOUNT=""
+[ -f "$state_file" ] && BACKSTAGE_ACCOUNT="$(sed -n 's/^HOST_ACCOUNT=//p' "$state_file")"
+[ -n "$BACKSTAGE_ACCOUNT" ] || die "no backstage account recorded in $state_file; install with DREAMCONNECT_HOST_ACCOUNT first"
+
+uid_of()   { id -u "$1" 2>/dev/null || die "no such account: $1"; }
+home_of()  { getent passwd "$1" | cut -d: -f6; }
+run_user() { local u="$1"; shift; sudo -u "$u" env "XDG_RUNTIME_DIR=/run/user/$(uid_of "$u")" \
+             "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(uid_of "$u")/bus" "$@"; }
+
+wait_bus() {  # uid — wait for the user manager's bus
+  local uid="$1" i
+  for i in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && return 0; sleep 1; done
+  return 1
+}
+
+# --- bring a user session up (transient units; backstage uses its own) -------
+bring_up_user() {  # user
+  local user="$1" uid home
+  uid="$(uid_of "$user")"; home="$(home_of "$user")"
+  [ -n "$home" ] && [ -d "$home" ] || die "account $user has no usable home"
+
+  echo ">> lingering $user so its session persists"
+  loginctl enable-linger "$user"
+  wait_bus "$uid" || die "user bus for $user never came up"
+
+  if ! run_user "$user" systemctl --user is-active dreamconnect-session-shell.service >/dev/null 2>&1; then
+    echo ">> starting headless GNOME session for $user"
+    run_user "$user" systemd-run --user --unit=dreamconnect-session-shell \
+      --description="dreamconnect on-demand session for $user" \
+      /usr/bin/gnome-shell --headless --wayland-display=dreamconnect >/dev/null
+  fi
+
+  echo ">> publishing $user's display env"
+  # Oneshot: waits for the shell's Xwayland, writes /run/user/$uid/dreamconnect-display.env.
+  run_user "$user" "$INSTALL_DIR/runtime/dreamconnect-backstage-env.sh" || \
+    echo "!! display env publish failed for $user (SC may init headless)"
+
+  if ! run_user "$user" systemctl --user is-active dreamconnect-session-daemon.service >/dev/null 2>&1; then
+    echo ">> starting capture daemon for $user"
+    run_user "$user" systemd-run --user --unit=dreamconnect-session-daemon \
+      --description="dreamconnect capture daemon for $user" \
+      /usr/bin/python3 "$INSTALL_DIR/runtime/dreamconnect_daemon.py" \
+        --shm "/dev/shm/dreamconnect.frame.$uid" --virtual "$RES" >/dev/null
+  fi
+}
+
+tear_down_user() {  # user
+  local user="$1" uid; uid="$(uid_of "$user")"
+  echo ">> tearing down $user's session"
+  run_user "$user" systemctl --user stop dreamconnect-session-daemon.service 2>/dev/null || true
+  run_user "$user" systemctl --user stop dreamconnect-session-shell.service 2>/dev/null || true
+  run_user "$user" systemctl --user reset-failed dreamconnect-session-daemon.service dreamconnect-session-shell.service 2>/dev/null || true
+  rm -f "/run/user/$uid/dreamconnect-display.env" "/run/user/$uid/dreamconnect.Xauthority" \
+        "/dev/shm/dreamconnect.frame.$uid" 2>/dev/null || true
+}
+
+# --- point SC at an account and restart it ----------------------------------
+show_session() {  # user label
+  local user="$1" label="$2" uid; uid="$(uid_of "$user")"
+  echo ">> pointing ScreenConnect at $user (uid $uid)"
+  install -d "/etc/systemd/system/$SC_UNIT.d"
+  render_dropin "$uid" "$label" > "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
+  systemctl daemon-reload
+  systemctl restart "$SC_UNIT"
+  install -d -m 0755 "$STATE_DIR"
+  printf '%s\n' "$user" > "$ACTIVE_FILE"
+  echo ">> now showing: $user"
+}
+
+active_account() { [ -f "$ACTIVE_FILE" ] && cat "$ACTIVE_FILE" || echo "$BACKSTAGE_ACCOUNT"; }
+
+# --- commands ---------------------------------------------------------------
+cmd="${1:-status}"; shift || true
+case "$cmd" in
+  backstage)
+    show_session "$BACKSTAGE_ACCOUNT" "[Backstage]"
+    ;;
+  to)
+    user="${1:?usage: dreamconnect-session to <user>}"
+    if [ "$user" = "$BACKSTAGE_ACCOUNT" ]; then
+      show_session "$BACKSTAGE_ACCOUNT" "[Backstage]"
+    else
+      bring_up_user "$user"
+      # wait for the first frame so the switch doesn't show a blank
+      for i in $(seq 1 15); do [ -e "/dev/shm/dreamconnect.frame.$(uid_of "$user")" ] && break; sleep 1; done
+      show_session "$user" "$user"
+    fi
+    ;;
+  stop)
+    user="${1:?usage: dreamconnect-session stop <user>}"
+    [ "$user" = "$BACKSTAGE_ACCOUNT" ] && die "refusing to stop the backstage account; it is the fallback"
+    if [ "$(active_account)" = "$user" ]; then
+      echo ">> $user is active; switching back to backstage first"
+      show_session "$BACKSTAGE_ACCOUNT" "[Backstage]"
+    fi
+    tear_down_user "$user"
+    ;;
+  status)
+    echo "SC unit         : $SC_UNIT"
+    echo "backstage account: $BACKSTAGE_ACCOUNT"
+    echo "active session  : $(active_account)"
+    echo "live daemons    :"
+    pgrep -af "dreamconnect_daemon.py --shm" | sed 's/^/  /' || echo "  (none)"
+    ;;
+  *)
+    die "usage: dreamconnect-session {to <user>|backstage|stop <user>|status}"
+    ;;
+esac
