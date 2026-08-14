@@ -19,6 +19,11 @@ public final class Bridge {
     private static volatile boolean debug = false;
     private static volatile String labelOverride;    // label= arg, wins over WHO
     private static volatile String logonLabel;        // cached daemon WHO reply
+    // curate=off: spike/observation mode — keep every logon session in the
+    // picker (relabel only ours) and log each entry, so we can watch what the
+    // SC client does when the operator selects a foreign session. Not for
+    // production: foreign entries still show OUR frame when selected.
+    private static volatile boolean curateEnabled = true;
 
     // Capture-loop tuning. ScreenConnect's ClientScreenCapturer is built with a
     // fixed 50 ms min frame interval — a 20 fps ceiling on any >=4-core box, no
@@ -69,6 +74,7 @@ public final class Bridge {
                 case "shm" -> shmPath = v;
                 case "socket" -> { socketPath = v; socketExplicit = true; }
                 case "debug" -> debug = Boolean.parseBoolean(v);
+                case "curate" -> curateEnabled = !"off".equalsIgnoreCase(v);
                 case "label" -> labelOverride = v;
                 // maxfps=N is the friendly form of mininterval=1000/N (the frame
                 // rate ceiling); mininterval/maxinterval/framemultiple are the raw
@@ -333,6 +339,19 @@ public final class Bridge {
                 return ret;
             }
             Object[] arr = (Object[]) ret;
+            if (!curateEnabled) {          // spike: show everything, observe
+                for (Object e : arr) {
+                    if (e == null) continue;
+                    String d = sessionDisplay(e);
+                    boolean ours = display != null && display.equals(d);
+                    log("SPIKE logon entry display=" + d + " id=" + sessionId(e)
+                            + (ours ? " (ours)" : ""));
+                    if (ours && label != null && !label.isEmpty()) {
+                        relabelOne(e, label, true);
+                    }
+                }
+                return arr;
+            }
             java.util.List<Object> keep = new java.util.ArrayList<>();
             for (Object e : arr) {
                 if (e != null && display != null && display.equals(sessionDisplay(e))) {
@@ -365,6 +384,17 @@ public final class Bridge {
         return v == null ? null : v.toString();
     }
 
+    /** Best-effort read of the selection key, for spike logging only. */
+    private static String sessionId(Object e) {
+        for (String name : new String[]{"logonSessionID", "logonSessionId", "sessionID"}) {
+            try {
+                Object v = e.getClass().getField(name).get(e);
+                if (v != null) return name + "=" + v;
+            } catch (Throwable ignored) { }
+        }
+        return "?";
+    }
+
     private static void relabelOne(Object e, String label, boolean disambiguate) throws Exception {
         if (e == null) return;
         java.lang.reflect.Field f = e.getClass().getField("logonSessionName");
@@ -387,6 +417,9 @@ public final class Bridge {
      */
     public static RobotPeer wrapPeer(GraphicsDevice screen, RobotPeer original) {
         try {
+            log("wrapPeer: Robot built for device="
+                    + (screen == null ? "null" : screen.getIDstring())
+                    + " DISPLAY=" + System.getenv("DISPLAY"));
             init();
             String pong = daemon.send("PING");
             if (!"PONG".equals(pong)) {
