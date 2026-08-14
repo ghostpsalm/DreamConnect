@@ -563,13 +563,14 @@ PY
 backstage_resolution() {  # [value] -> WxH on stdout, non-zero if unusable
   local value lower w h
   value="${1:-}"
-  # 960x540 by default: a virtual monitor has no native size, so the resolution
+  # 1280x720 by default: a virtual monitor has no native size, so the resolution
   # is purely a bandwidth/latency knob, and a headless admin desktop does not
-  # need 1080p. Half-height means ~4x fewer pixels than 1080p for ScreenConnect
-  # to encode and ship each frame, which is the difference between a responsive
-  # session and a sticky one over a typical link. Override with
-  # DREAMCONNECT_BACKSTAGE_RES for a larger workspace.
-  [ -n "$value" ] || value="960x540"
+  # need 1080p — 720p is ~2.6x fewer pixels for ScreenConnect to encode and ship
+  # each frame, the difference between a responsive session and a sticky one.
+  # Not lower: below 720p GNOME's overview stops scaling the dash and window
+  # thumbnails down cleanly, so they overlap and the dash becomes hard to click.
+  # Override with DREAMCONNECT_BACKSTAGE_RES for a larger workspace.
+  [ -n "$value" ] || value="1280x720"
   lower="${value//X/x}"
   case "$lower" in
     *[!0-9x]*)

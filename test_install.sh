@@ -5047,14 +5047,14 @@ test_library_defines_the_backstage_helpers() {
   done
 }
 
-test_backstage_resolution_defaults_to_960x540() {
+test_backstage_resolution_defaults_to_1280x720() {
   local out rc
   out="$(backstage_resolution 2>&1)"; rc=$?
   assert_eq "$rc" "0" "unset resolution is accepted"
-  assert_eq "$out" "960x540" "unset resolution defaults to the low-bandwidth size"
+  assert_eq "$out" "1280x720" "unset resolution defaults to the low-bandwidth size"
   out="$(backstage_resolution "" 2>&1)"; rc=$?
   assert_eq "$rc" "0" "empty resolution is accepted"
-  assert_eq "$out" "960x540" "empty resolution defaults"
+  assert_eq "$out" "1280x720" "empty resolution defaults"
 }
 
 test_backstage_resolution_passes_through_a_valid_value() {
@@ -5768,7 +5768,7 @@ for CURRENT in \
   test_xprobe_wrapper_short_circuits_a_display_already_known_dead \
   test_xprobe_wrapper_does_not_blacklist_other_displays \
   test_library_defines_the_backstage_helpers \
-  test_backstage_resolution_defaults_to_960x540 \
+  test_backstage_resolution_defaults_to_1280x720 \
   test_backstage_resolution_passes_through_a_valid_value \
   test_backstage_resolution_accepts_an_uppercase_separator \
   test_backstage_resolution_normalises_leading_zeros \

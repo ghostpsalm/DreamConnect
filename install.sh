@@ -27,7 +27,7 @@
 #                              the greeter still up. The operator gets a private
 #                              admin desktop, NOT the console user's session.
 #   DREAMCONNECT_BACKSTAGE_RES=<WxH>
-#                              backstage screen size (default 960x540). This is
+#                              backstage screen size (default 1280x720). This is
 #                              the real resolution: a virtual monitor has no
 #                              intrinsic size, so whatever is asked for is what
 #                              the operator sees.
