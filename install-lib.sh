@@ -964,3 +964,79 @@ uninstall_host_account() {  # name protected_user
   # reported to the caller as a completed one. No `return 0` after it.
   run userdel -r "$name"
 }
+
+# --- session registry writers -------------------------------------------------
+#
+# The agent reads /run/dreamconnect/sessions/<uid> to learn which sessions exist
+# and how to reach each one (docs/specs/multi-session-picker.md, Solution 1).
+# It is deliberately strict about what it will trust, and these writers exist to
+# satisfy that exactly:
+#
+#   * the filename must be the bare uid — anything else (a .tmp or .bak left
+#     beside it) is not an entry, and two entries for one display refuse it;
+#   * neither the directory nor the file may be group- or other-writable, since
+#     whoever can rewrite an entry can name any session;
+#   * `key=value` per line with no escape syntax — so a value carrying a newline
+#     could smuggle a second key, and is refused rather than escaped.
+#
+# Root ownership is inherited rather than asserted: only root runs these, and
+# the test suite never does. That half is verified by review and a live run.
+
+# A uid is digits and nothing else. This is also what stops
+# `remove_registry_entry` being handed `../victim` and deleting, as root,
+# outside the registry.
+is_uid() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
+
+# render_registry_entry uid user display shm socket [label] -> entry text
+# Refuses — non-zero, nothing on stdout — rather than emit an entry the reader
+# would reject, or one carrying a value nobody meant to write.
+render_registry_entry() {
+  local uid="$1" user="$2" display="$3" shm="$4" socket="$5" label="${6:-}" v
+  is_uid "$uid" || return 1
+  for v in "$user" "$display" "$shm" "$socket"; do
+    [ -n "$v" ] || return 1
+    case "$v" in *$'\n'*) return 1 ;; esac
+  done
+  case "$label" in *$'\n'*) return 1 ;; esac
+  printf 'uid=%s\nuser=%s\ndisplay=%s\nshm=%s\nsocket=%s\n' \
+    "$uid" "$user" "$display" "$shm" "$socket"
+  # Omitted entirely rather than written blank: the reader reads a blank value
+  # as missing, and an unnamed session is fine where a rejected one is not.
+  [ -n "$label" ] && printf 'label=%s\n' "$label"
+  return 0
+}
+
+# write_registry_entry dir uid user display shm socket [label]
+# Stage then rename, so a reader never sees a half-written entry. Modes are set
+# explicitly because the reader refuses anything group- or other-writable and an
+# inherited umask must not get a say in that.
+write_registry_entry() {
+  local dir="$1"; shift
+  local uid="$1" body tmp
+  is_uid "$uid" || return 1
+  body="$(render_registry_entry "$@")" || return 1
+  install -d -m 0755 "$dir" || return 1
+  tmp="$dir/.$uid.tmp.$$"
+  printf '%s\n' "$body" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dir/$uid" || { rm -f "$tmp"; return 1; }
+}
+
+# remove_registry_entry dir uid — idempotent: a session already gone is the
+# state we wanted. Leaves the directory and every other entry untouched.
+remove_registry_entry() {
+  local dir="$1" uid="$2"
+  is_uid "$uid" || return 1
+  rm -f "$dir/$uid"
+}
+
+# session_display envfile -> the X display that session published
+# Reads what dreamconnect-backstage-env.sh writes for a session (`DISPLAY=…`
+# then `XAUTHORITY=…`). Anchored, so an `XDISPLAY=` line is not a DISPLAY.
+session_display() {
+  local f="$1" v
+  [ -f "$f" ] || return 1
+  v="$(sed -n 's/^DISPLAY=//p' "$f" | head -n 1)"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}

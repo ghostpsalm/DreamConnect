@@ -5798,6 +5798,310 @@ test_detect_user_ignores_inactive_and_non_graphical_sessions() {
 }
 
 # --- runner ------------------------------------------------------------------
+# --- issue #53 slice 1: the session registry writers -------------------------
+#
+# #51 made the agent READ /run/dreamconnect/sessions/<uid>. These functions are
+# what write it, from install.sh (backstage) and runtime/dreamconnect-session
+# (a session coming up or going down). If a written entry does not satisfy the
+# reader exactly, the agent ignores it in silence and the whole feature is inert
+# — so these tests are written against the committed reader, not against a
+# summary of it: agent/boot/dreamconnect/boot/Bridge.java, parseRegistryEntry()
+# and readRegistry():
+#
+#   * filename must be ALL DIGITS  (readRegistry: `if (!allDigits(n)) continue`)
+#   * `key=value` per line, first `=` splits, unknown keys ignored
+#   * required: uid user display shm socket   (a missing one -> entry dropped)
+#   * blank value == missing                  (`if (v.isEmpty()) continue`)
+#   * uid must parse as a number              (`Long.parseLong` -> null on fail)
+#   * label optional; blank or `ERR ...` is dropped by sanitizeLabel()
+#
+# SHAPES CHOSEN (the builder implements to these; say so if you would rather
+# name them differently):
+#   render_registry_entry <uid> <user> <display> <shm> <socket> [label] -> stdout
+#   write_registry_entry  <dir> <uid> <user> <display> <shm> <socket> [label]
+#   remove_registry_entry <dir> <uid>
+#   session_display       <envfile> -> stdout
+#
+# WHAT THESE TESTS CANNOT PROVE, stated plainly rather than faked: this suite
+# refuses to run as root (see the header), so nothing here demonstrates the
+# ownership half of the reader's trust rule — that the directory and entries are
+# owned by uid 0. Only modes, content, atomicity, refusals and idempotence are
+# testable as an ordinary user. A parameterised owner (as Bridge.trustedFile
+# took) would buy nothing here: these functions do not CHECK ownership, they
+# inherit it from running as root, so there is no predicate to parameterise.
+# Root ownership stays a review item and a live-install check.
+#
+# DECISION, since the coordinator asked which: a value containing a newline is
+# REJECTED, not escaped. The format has no escape syntax — the reader splits on
+# \n and unescapes nothing — so any "escaping" would either arrive corrupted or
+# smuggle a second key. None of these fields can legitimately contain a newline
+# (a uid, a login name, an X display, two paths). Rejecting is the only choice
+# that cannot produce a valid-looking entry that means something else.
+
+require_registry_writers() {  # label
+  local fn
+  for fn in render_registry_entry write_registry_entry remove_registry_entry; do
+    declare -F "$fn" >/dev/null && continue
+    fail "$1: $fn() is not defined — the assertions below would pass vacuously"
+    return 1
+  done
+  return 0
+}
+
+test_library_defines_the_registry_writers() {
+  local fn
+  for fn in render_registry_entry write_registry_entry remove_registry_entry session_display; do
+    declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
+  done
+}
+
+# Every key the reader requires, spelled exactly as it parses them. Asserted as
+# whole lines: `uid=1000 ` or ` uid=1000` would still parse (the reader trims),
+# but a writer that emits `uid = 1000` writes the key " uid" — which trims to
+# "uid" too — while `uid:1000` silently drops the entry. Exact lines pin the
+# format the reader documents rather than the subset it tolerates.
+test_render_registry_entry_emits_every_key_the_reader_requires() {
+  local out rc
+  out="$(render_registry_entry 1000 kogies :1 /dev/shm/dreamconnect.frame.1000 \
+         /run/user/1000/dreamconnect.sock '[Backstage]' 2>/dev/null)"; rc=$?
+  assert_eq "$rc" "0" "render_registry_entry succeeds on a complete session"
+  assert_line "$out" "uid=1000"                                "entry carries uid"
+  assert_line "$out" "user=kogies"                             "entry carries user"
+  assert_line "$out" "display=:1"                              "entry carries display"
+  assert_line "$out" "shm=/dev/shm/dreamconnect.frame.1000"    "entry carries shm"
+  assert_line "$out" "socket=/run/user/1000/dreamconnect.sock" "entry carries socket"
+  assert_line "$out" "label=[Backstage]"                       "entry carries label"
+}
+
+# A blank value is a MISSING value to the reader, so a `label=` line with
+# nothing after it is not a neutral default — it is a line that exists only to
+# be discarded. Omit it.
+test_render_registry_entry_omits_label_when_absent() {
+  local out rc
+  out="$(render_registry_entry 992 backstage :0 /dev/shm/f /run/user/992/s 2>/dev/null)"; rc=$?
+  assert_eq "$rc" "0" "render_registry_entry succeeds without a label"
+  assert_not_contains "$out" "label=" "no label given -> no label line at all, not a blank one"
+  assert_line "$out" "uid=992" "the rest of the entry is still complete"
+}
+
+# A required field that is empty produces an entry the reader drops on the
+# floor. Refuse loudly at the writer instead, where the operator can see it.
+test_render_registry_entry_refuses_a_missing_required_field() {
+  local out rc i label
+  local -a args
+  local names=(uid user display shm socket)
+  require_registry_writers "render refuses missing fields" || return 0
+  for i in 0 1 2 3 4; do
+    args=(1000 kogies :1 /dev/shm/f /run/user/1000/s)
+    args[$i]=""
+    label="render refuses an empty ${names[$i]}"
+    out="$(render_registry_entry "${args[@]}" 2>/dev/null)"; rc=$?
+    [ "$rc" -ne 0 ] || fail "$label: expected non-zero exit, got 0"
+    assert_eq "$out" "" "$label: writes nothing to stdout"
+  done
+  # Too few arguments at all is the same refusal, not an entry with holes.
+  out="$(render_registry_entry 1000 kogies 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "render refuses a short argument list: expected non-zero exit"
+  assert_eq "$out" "" "render refuses a short argument list: writes nothing"
+}
+
+# The reader parses uid with Long.parseLong and returns null on failure, so a
+# non-numeric uid is not a degraded entry — it is an invisible one. It is also
+# what would name the file, and readRegistry ignores any filename that is not
+# all digits.
+test_render_registry_entry_refuses_a_non_numeric_uid() {
+  local out rc bad
+  require_registry_writers "render refuses a non-numeric uid" || return 0
+  for bad in root 1000x 10.0 -1 " " "1 000"; do
+    out="$(render_registry_entry "$bad" kogies :1 /dev/shm/f /run/user/1000/s 2>/dev/null)"; rc=$?
+    [ "$rc" -ne 0 ] || fail "render refuses uid [$bad]: expected non-zero exit, got 0"
+    assert_eq "$out" "" "render refuses uid [$bad]: writes nothing to stdout"
+  done
+}
+
+# The security-relevant one. `label` reaches the operator's session picker and
+# every field is interpolated into a line-oriented file, so a value carrying a
+# newline could append `uid=0` — or a socket= line pointing anywhere — to an
+# entry root itself wrote. Rejected, not escaped (see the decision at the top of
+# this section).
+test_render_registry_entry_refuses_a_value_containing_a_newline() {
+  local out rc label
+  require_registry_writers "render refuses embedded newlines" || return 0
+  out="$(render_registry_entry 1000 kogies :1 /dev/shm/f /run/user/1000/s "$(printf 'x\nuid=0')" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "render refuses a label with a newline: expected non-zero exit, got 0"
+  assert_eq "$out" "" "render refuses a label with a newline: writes nothing"
+  assert_not_contains "$out" "uid=0" "a smuggled uid=0 never reaches stdout"
+
+  out="$(render_registry_entry 1000 "$(printf 'kogies\nsocket=/tmp/evil.sock')" :1 \
+         /dev/shm/f /run/user/1000/s 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "render refuses a user with a newline: expected non-zero exit, got 0"
+  assert_not_contains "$out" "/tmp/evil.sock" "a smuggled socket= never reaches stdout"
+
+  out="$(render_registry_entry 1000 kogies "$(printf ':1\nshm=/tmp/evil.frame')" \
+         /dev/shm/f /run/user/1000/s 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "render refuses a display with a newline: expected non-zero exit, got 0"
+  assert_not_contains "$out" "/tmp/evil.frame" "a smuggled shm= never reaches stdout"
+}
+
+# The file is named for the uid and nothing else: readRegistry ignores every
+# name that is not all digits, so `1000.tmp` or `session-1000` is not an entry.
+# Mode is asserted under a deliberately hostile umask, because 0644 has to be
+# set, not inherited: a 0002 umask would otherwise leave the entry
+# group-writable and the reader refuses the whole registry for that.
+test_write_registry_entry_writes_the_entry_at_the_uid_filename() {
+  local dir body rendered mode dirmode
+  dir="$TMP/registry-write"
+  require_registry_writers "write_registry_entry" || return 0
+  ( umask 000; write_registry_entry "$dir" 1000 kogies :1 /dev/shm/dreamconnect.frame.1000 \
+      /run/user/1000/dreamconnect.sock kogies >/dev/null 2>&1 )
+  assert_file_exists "$dir/1000" "write_registry_entry writes <dir>/<uid>"
+  body="$(cat "$dir/1000" 2>/dev/null || true)"
+  rendered="$(render_registry_entry 1000 kogies :1 /dev/shm/dreamconnect.frame.1000 \
+              /run/user/1000/dreamconnect.sock kogies 2>/dev/null)"
+  assert_eq "$body" "$rendered" "the file content is exactly what render_registry_entry emits"
+  mode="$(stat -c '%a' "$dir/1000" 2>/dev/null)"
+  assert_eq "$mode" "644" "entry mode is 0644 even under umask 000 (the reader refuses group/other-writable)"
+  dirmode="$(stat -c '%a' "$dir" 2>/dev/null)"
+  assert_eq "$dirmode" "755" "registry directory is created 0755, whatever the umask"
+}
+
+# Atomic means renamed into place, never truncated and refilled: a reader that
+# opens the entry mid-write must see the old one or the new one. The inode is
+# the observable — rename(2) puts a NEW inode at the name, an in-place
+# `> "$f"` keeps the old one. Also: no staging file may be left behind, because
+# a leftover `1000.tmp` that happens to parse is a second entry for one display,
+# which the agent refuses as ambiguous (#51 round 6).
+test_write_registry_entry_replaces_an_existing_entry_atomically() {
+  local dir before after body names
+  dir="$TMP/registry-atomic"
+  require_registry_writers "write_registry_entry is atomic" || return 0
+  write_registry_entry "$dir" 1000 kogies :1 /dev/shm/f1 /run/user/1000/s1 first >/dev/null 2>&1
+  before="$(stat -c '%i' "$dir/1000" 2>/dev/null)"
+  write_registry_entry "$dir" 1000 kogies :2 /dev/shm/f2 /run/user/1000/s2 second >/dev/null 2>&1
+  after="$(stat -c '%i' "$dir/1000" 2>/dev/null)"
+  body="$(cat "$dir/1000" 2>/dev/null || true)"
+
+  assert_line "$body" "display=:2" "the rewrite wins"
+  assert_not_contains "$body" "display=:1" "and leaves nothing of the previous entry behind"
+  assert_not_contains "$body" "label=first" "a rewrite replaces, it does not append"
+  [ -n "$before" ] && [ -n "$after" ] && [ "$before" != "$after" ] \
+    || fail "atomic rewrite: expected a new inode at <dir>/1000 (rename), got [$before] then [$after]"
+  names="$(ls -A "$dir" 2>/dev/null | tr '\n' ' ')"
+  assert_eq "$names" "1000 " "no staging file survives the write (dir holds only the entry)"
+}
+
+# A refusal must leave the registry exactly as it found it: no half-entry, no
+# staging file, and — the case that matters on a re-registration — no damage to
+# the entry that was already there and is still true.
+test_write_registry_entry_leaves_nothing_behind_when_it_refuses() {
+  local dir rc names body
+  dir="$TMP/registry-refuse"
+  require_registry_writers "write_registry_entry refusals" || return 0
+  write_registry_entry "$dir" 1000 kogies :1 /dev/shm/f1 /run/user/1000/s1 good >/dev/null 2>&1
+  body="$(cat "$dir/1000" 2>/dev/null || true)"
+
+  write_registry_entry "$dir" 1000 "" :1 /dev/shm/f1 /run/user/1000/s1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "write refuses an empty user: expected non-zero exit, got 0"
+  assert_eq "$(cat "$dir/1000" 2>/dev/null || true)" "$body" \
+    "a refused rewrite leaves the existing entry byte-identical"
+
+  write_registry_entry "$dir" 1001 kogies :1 /dev/shm/f1 /run/user/1001/s1 "$(printf 'x\nuid=0')" \
+    >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "write refuses a newline in a value: expected non-zero exit, got 0"
+  assert_file_absent "$dir/1001" "a refused write creates no entry"
+
+  write_registry_entry "$dir" not-a-uid kogies :1 /dev/shm/f1 /run/user/1000/s1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "write refuses a non-numeric uid: expected non-zero exit, got 0"
+
+  names="$(ls -A "$dir" 2>/dev/null | tr '\n' ' ')"
+  assert_eq "$names" "1000 " "no staging or partial file survives a refusal"
+}
+
+# Teardown must actually remove the entry: a stale entry pointing at a dead
+# daemon is the one case where a planted frame could still be met (issue #53's
+# own criteria). Idempotent because teardown runs on paths that may already have
+# run — and because a session that never registered must not fail its own
+# cleanup.
+test_remove_registry_entry_is_idempotent_and_leaves_others_alone() {
+  local dir rc
+  dir="$TMP/registry-remove"
+  require_registry_writers "remove_registry_entry" || return 0
+  write_registry_entry "$dir" 1000 kogies :1 /dev/shm/f1 /run/user/1000/s1 one >/dev/null 2>&1
+  write_registry_entry "$dir" 992 backstage :0 /dev/shm/f2 /run/user/992/s2 two >/dev/null 2>&1
+
+  remove_registry_entry "$dir" 1000 >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "remove_registry_entry succeeds on an entry that exists"
+  assert_file_absent "$dir/1000" "the entry is gone"
+  assert_file_exists "$dir/992" "the other session's entry is untouched"
+
+  remove_registry_entry "$dir" 1000 >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "removing an already-absent entry succeeds (teardown is idempotent)"
+  assert_file_exists "$dir" "the registry directory itself is never removed"
+}
+
+# remove_registry_entry runs as root and takes a uid from its caller. If that
+# uid is pasted into a path unchecked, `../../etc/passwd` is a root `rm` outside
+# the registry. The reader already says only all-digit names are entries; the
+# writer must agree, and refuse.
+test_remove_registry_entry_refuses_a_uid_that_is_not_a_number() {
+  local dir rc bad
+  dir="$TMP/registry-traversal"
+  require_registry_writers "remove_registry_entry refuses traversal" || return 0
+  mkdir -p "$dir/sessions"
+  : > "$dir/victim"
+  write_registry_entry "$dir/sessions" 1000 kogies :1 /dev/shm/f1 /run/user/1000/s1 one >/dev/null 2>&1
+  for bad in "../victim" "1000/../../victim" "" "*" "."; do
+    remove_registry_entry "$dir/sessions" "$bad" >/dev/null 2>&1; rc=$?
+    [ "$rc" -ne 0 ] || fail "remove refuses uid [$bad]: expected non-zero exit, got 0"
+  done
+  assert_file_exists "$dir/victim" "nothing outside the registry directory was removed"
+  assert_file_exists "$dir/sessions/1000" "and the real entry survived every refusal"
+}
+
+# Where a session's display comes from at registration time: the env file
+# runtime/dreamconnect-backstage-env.sh publishes, whose exact bytes are
+# `printf 'DISPLAY=%s\nXAUTHORITY=%s\n'` — unquoted, one per line.
+test_session_display_reads_the_published_display() {
+  local f out rc
+  f="$TMP/display-env-ok"
+  printf 'DISPLAY=:3\nXAUTHORITY=/run/user/992/dreamconnect.Xauthority\n' > "$f"
+  out="$(session_display "$f" 2>/dev/null)"; rc=$?
+  assert_eq "$rc" "0" "session_display succeeds on a published env file"
+  assert_eq "$out" ":3" "session_display prints the DISPLAY value and nothing else"
+}
+
+# No display is not an empty display: registering `display=` writes an entry the
+# reader drops, so the caller has to be told to stop instead.
+test_session_display_fails_when_there_is_no_usable_display() {
+  local f out rc
+  declare -F session_display >/dev/null || {
+    fail "session_display(): not defined — the assertions below would pass vacuously"; return 0; }
+
+  out="$(session_display "$TMP/display-env-absent" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "session_display on a missing file: expected non-zero exit, got 0"
+  assert_eq "$out" "" "session_display on a missing file prints nothing"
+
+  f="$TMP/display-env-blank"
+  printf 'DISPLAY=\nXAUTHORITY=/run/user/992/x\n' > "$f"
+  out="$(session_display "$f" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "session_display on a blank DISPLAY: expected non-zero exit, got 0"
+  assert_eq "$out" "" "session_display on a blank DISPLAY prints nothing"
+
+  f="$TMP/display-env-none"
+  printf 'XAUTHORITY=/run/user/992/x\n' > "$f"
+  out="$(session_display "$f" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "session_display with no DISPLAY line: expected non-zero exit, got 0"
+
+  # A key that merely ENDS in DISPLAY is not DISPLAY. An unanchored match would
+  # register the wrong display for the session, which is the whole family of
+  # bug #51 exists to prevent.
+  f="$TMP/display-env-decoy"
+  printf 'XDISPLAY=:9\nGDM_DISPLAY=:8\n' > "$f"
+  out="$(session_display "$f" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "session_display with only decoy keys: expected non-zero exit, got 0"
+  assert_eq "$out" "" "session_display never returns a value from XDISPLAY=/GDM_DISPLAY="
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -5983,7 +6287,20 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
-  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up
+  test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
+  test_library_defines_the_registry_writers \
+  test_render_registry_entry_emits_every_key_the_reader_requires \
+  test_render_registry_entry_omits_label_when_absent \
+  test_render_registry_entry_refuses_a_missing_required_field \
+  test_render_registry_entry_refuses_a_non_numeric_uid \
+  test_render_registry_entry_refuses_a_value_containing_a_newline \
+  test_write_registry_entry_writes_the_entry_at_the_uid_filename \
+  test_write_registry_entry_replaces_an_existing_entry_atomically \
+  test_write_registry_entry_leaves_nothing_behind_when_it_refuses \
+  test_remove_registry_entry_is_idempotent_and_leaves_others_alone \
+  test_remove_registry_entry_refuses_a_uid_that_is_not_a_number \
+  test_session_display_reads_the_published_display \
+  test_session_display_fails_when_there_is_no_usable_display
 do
   before=$FAILURES
   "$CURRENT"
