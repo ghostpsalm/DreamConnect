@@ -18,6 +18,7 @@ public final class Bridge {
     private static volatile String socketPath = defaultSocket();
     private static volatile boolean debug = false;
     private static volatile String labelOverride;    // label= arg, wins over WHO
+    private static volatile String sessionLabel;     // label of the attached registry session
     private static volatile String logonLabel;        // cached daemon WHO reply
     // curate=off: spike/observation mode — keep every logon session in the
     // picker (relabel only ours) and log each entry, so we can watch what the
@@ -178,9 +179,268 @@ public final class Bridge {
 
     static boolean debug() { return debug; }
 
-    private static synchronized void init() {
-        if (daemon == null) daemon = new DaemonClient(socketPath);
+    /**
+     * Resolve which daemon this JVM belongs to and build the client/reader for
+     * it. False means resolution refused to name one, and every caller must
+     * then do nothing at all: no frames read, no input forwarded. Fail closed.
+     */
+    private static synchronized boolean attach() {
+        resolveForThisChild();          // attaches a resolved session itself
+        if (attachRefused) return false;
+        if (daemon == null) {
+            daemon = clientFor(new SessionEndpoint(
+                    -1, null, null, shmPath, socketPath, labelOverride));
+        }
         if (frame == null) frame = new FrameReader(shmPath);
+        return true;
+    }
+
+    /**
+     * Root's statement of which sessions exist. One file per session, named for
+     * its uid, written by root (dreamconnect-session, and the installer for
+     * backstage — issue #53). Nothing here is inferred from a directory any
+     * account can write to: an account cannot register itself, cannot claim a
+     * display, and cannot make itself discoverable.
+     */
+    static final String REGISTRY_DIR = "/run/dreamconnect/sessions";
+    /** Registry entries must belong to root; anything else is not a registry. */
+    private static final long ROOT_UID = 0;
+
+    private static volatile boolean resolvedForChild;
+    // Set when resolution refused: this JVM then talks to no daemon at all —
+    // no frames, no input — rather than route either to a session that is not
+    // the one the operator selected.
+    private static volatile boolean attachRefused;
+
+    /**
+     * One registry entry's text as a session, or null if it does not describe
+     * one. `key=value` per line; the first `=` splits, so a value may contain
+     * one. Unknown keys are ignored rather than fatal, so a later field added by
+     * the writer does not break an older agent. uid/user/display/shm/socket are
+     * required and a blank value is a missing value; label is cosmetic and
+     * optional.
+     */
+    static SessionEndpoint parseRegistryEntry(String text) {
+        if (text == null) return null;
+        String user = null, display = null, shm = null, socket = null, label = null;
+        long uid = -1;
+        for (String line : text.split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq < 0) continue;
+            String k = line.substring(0, eq).trim();
+            String v = line.substring(eq + 1).trim();
+            if (v.isEmpty()) continue;              // blank is unset, as in #50
+            switch (k) {
+                case "uid" -> {
+                    try {
+                        uid = Long.parseLong(v);
+                    } catch (NumberFormatException notAUid) {
+                        return null;                // uid is a value everywhere downstream
+                    }
+                }
+                case "user" -> user = v;
+                case "display" -> display = v;
+                case "shm" -> shm = v;
+                case "socket" -> socket = v;
+                case "label" -> label = sanitizeLabel(v);
+                default -> { }
+            }
+        }
+        if (uid < 0 || user == null || display == null || shm == null || socket == null) {
+            return null;
+        }
+        return new SessionEndpoint(uid, user, display, shm, socket, label);
+    }
+
+    /**
+     * Whether a path is one only {@code requiredOwnerUid} could have written:
+     * owned by it, and writable by nobody else. Group- or other-writable means
+     * some other account can rewrite the file, which makes its contents that
+     * account's claim rather than root's. Symlinks are not followed — the
+     * link's owner is not the target's.
+     *
+     * Parameterised on the owner rather than hardcoding root so the rule can be
+     * exercised honestly by a test running as an ordinary user; production
+     * passes 0.
+     */
+    static boolean trustedFile(java.nio.file.Path path, long requiredOwnerUid) {
+        if (path == null) return false;
+        try {
+            java.nio.file.attribute.PosixFileAttributes a =
+                    java.nio.file.Files.readAttributes(path,
+                            java.nio.file.attribute.PosixFileAttributes.class,
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            Object owner = java.nio.file.Files.getAttribute(path, "unix:uid",
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            if (!(owner instanceof Number) || ((Number) owner).longValue() != requiredOwnerUid) {
+                return false;
+            }
+            java.util.Set<java.nio.file.attribute.PosixFilePermission> p = a.permissions();
+            return !p.contains(java.nio.file.attribute.PosixFilePermission.GROUP_WRITE)
+                    && !p.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE);
+        } catch (Exception missingOrUnreadable) {
+            return false;
+        }
+    }
+
+    /**
+     * Whether a registered shm path is a frame this session's account really
+     * owns: a regular file, not a symlink, owned by {@code uid}. A registry
+     * entry can outlive its daemon, and /dev/shm is world-writable, so a frame
+     * planted after the real one died must not be read as that session's screen.
+     * Whoever plants a symlink chooses its target, so a link is never usable
+     * however it is owned.
+     */
+    static boolean usableShm(java.nio.file.Path path, long uid) {
+        if (path == null) return false;
+        try {
+            java.nio.file.attribute.PosixFileAttributes a =
+                    java.nio.file.Files.readAttributes(path,
+                            java.nio.file.attribute.PosixFileAttributes.class,
+                            java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            if (!a.isRegularFile()) return false;
+            Object owner = java.nio.file.Files.getAttribute(path, "unix:uid",
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS);
+            return owner instanceof Number && ((Number) owner).longValue() == uid;
+        } catch (Exception missingOrUnreadable) {
+            return false;
+        }
+    }
+
+    /**
+     * The sessions root says exist. An untrusted directory is not a registry at
+     * all — every entry is ignored, which falls back to the static agent args,
+     * i.e. today's single-session behaviour. Within a trusted directory a
+     * single unreadable or malformed entry drops only itself: only root can put
+     * a file there, so a bad one is a writer's bug, and letting it disable every
+     * other session would be the worse failure.
+     */
+    static java.util.List<SessionEndpoint> readRegistry(java.nio.file.Path dir,
+                                                        long requiredOwnerUid) {
+        java.util.List<SessionEndpoint> found = new java.util.ArrayList<>();
+        if (!trustedFile(dir, requiredOwnerUid)) {
+            return found;
+        }
+        String[] names = dir.toFile().list();
+        if (names == null) return found;
+        java.util.Arrays.sort(names);               // deterministic order
+        for (String n : names) {
+            // Entries live at <uid>, so anything else is not one. A `1000.bak`
+            // or `1000.tmp` left beside `1000` would otherwise parse as a second
+            // session for the same display and refuse it permanently — a stray
+            // editor or writer temp file must not black out a session.
+            if (!allDigits(n)) continue;
+            java.nio.file.Path entry = dir.resolve(n);
+            if (!trustedFile(entry, requiredOwnerUid)) {
+                log("registry: ignoring " + entry + " (not owned by uid "
+                        + requiredOwnerUid + ", or writable by others)");
+                continue;
+            }
+            SessionEndpoint e;
+            try {
+                e = parseRegistryEntry(java.nio.file.Files.readString(entry));
+            } catch (Exception unreadable) {
+                log("registry: ignoring " + entry + " (" + unreadable + ")");
+                continue;
+            }
+            if (e == null) {
+                log("registry: ignoring " + entry + " (not a usable session entry)");
+                continue;
+            }
+            found.add(e);
+        }
+        return found;
+    }
+
+    /**
+     * The registered sessions actually usable right now: the frame really is
+     * this account's, and the socket is answered by that account. Thin
+     * composition, no policy of its own — the display comes from the registry,
+     * so a daemon too old to report one is no longer excluded for it.
+     */
+    static java.util.List<SessionEndpoint> liveSessions(
+            java.util.List<SessionEndpoint> registered) {
+        java.util.List<SessionEndpoint> live = new java.util.ArrayList<>();
+        for (SessionEndpoint e : registered) {
+            if (e == null) continue;
+            // Per entry, because one bad entry must cost only itself: a path
+            // with a NUL byte throws out of Path.of, and letting that escape
+            // took every session down with it.
+            try {
+                if (!usableShm(java.nio.file.Path.of(e.shm()), e.uid())) {
+                    log("registry: skipping " + e.socket() + " — " + e.shm()
+                            + " is not a regular frame owned by uid " + e.uid());
+                    continue;
+                }
+                DaemonClient probe = clientFor(e);
+                try {
+                    if (!"PONG".equals(probe.send("PING"))) {
+                        log("registry: skipping " + e.socket()
+                                + " — no answer authenticated as " + e.user());
+                        continue;
+                    }
+                    live.add(e);
+                } finally {
+                    probe.close();
+                }
+            } catch (Exception bad) {
+                // Exception, not Throwable: one entry's bad path must not cost
+                // the others, but an Error is not this loop's to absorb.
+                log("registry: skipping " + e.display() + " (" + bad + ")");
+            }
+        }
+        return live;
+    }
+
+    /**
+     * Point this JVM at the daemon owning the display ScreenConnect gave it.
+     *
+     * ScreenConnect spawns a fresh child JVM per selected logon session with
+     * that session's DISPLAY in its environment, and builds the Robot inside
+     * it — so a child process's own DISPLAY names the session the operator
+     * picked. (The service process runs this too, on whatever DISPLAY its
+     * environment carries; it is not exclusively a child-side path.) Runs once,
+     * before the DaemonClient/FrameReader singletons are built.
+     *
+     * A discovery failure leaves the configured shm=/socket= args in place: a
+     * box with one daemon, or a discovery that throws, behaves as it always did.
+     * A refusal (see resolveEndpoint) instead attaches to nothing at all.
+     */
+    private static synchronized void resolveForThisChild() {
+        if (resolvedForChild) return;
+        resolvedForChild = true;
+        String childDisplay = System.getenv("DISPLAY");
+        // uid -1 / user null: the operator's own shm=/socket= configuration is
+        // not a registry entry, so it has nothing to authenticate against.
+        SessionEndpoint configured = new SessionEndpoint(
+                -1, null, null, shmPath, socketPath, labelOverride);
+        SessionEndpoint chosen;
+        try {
+            java.util.List<SessionEndpoint> registered =
+                    readRegistry(java.nio.file.Path.of(REGISTRY_DIR), ROOT_UID);
+            chosen = resolveEndpoint(childDisplay, registered,
+                    liveSessions(registered), configured);
+        } catch (Throwable t) {
+            log("registry read failed (" + t + "); keeping configured endpoints");
+            return;
+        }
+        if (chosen == null) {
+            attachRefused = true;
+            log("REFUSING to attach: the registry describes DISPLAY=" + childDisplay
+                    + " but nothing usable serves it (or more than one claims it). "
+                    + "Showing nothing beats showing another session's desktop "
+                    + "under this session's name.");
+            return;
+        }
+        if (chosen == configured) {
+            log("DISPLAY=" + childDisplay + " is not described by the registry; "
+                    + "keeping configured shm=" + shmPath + " socket=" + socketPath);
+            return;
+        }
+        attachTo(chosen);               // authenticated client, frame, and name
+        log("DISPLAY=" + childDisplay + " resolved to registered session "
+                + chosen.user() + " (" + chosen.label() + ") shm=" + shmPath
+                + " socket=" + socketPath);
     }
 
     /**
@@ -191,7 +451,7 @@ public final class Bridge {
      */
     public static void setWakeLock(boolean on) {
         try {
-            init();
+            if (!attach()) return;
             daemon.input("WAKELOCK " + (on ? "1" : "0"));
             log("wake lock " + (on ? "acquire" : "release") + " forwarded (operator command)");
         } catch (Throwable t) {
@@ -208,7 +468,7 @@ public final class Bridge {
     public static void typeString(String text) {
         try {
             if (text == null || text.isEmpty()) return;
-            init();
+            if (!attach()) return;
             String b64 = java.util.Base64.getEncoder()
                     .encodeToString(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             daemon.input("TYPE " + b64);
@@ -228,7 +488,7 @@ public final class Bridge {
      */
     public static void setBlank(boolean on) {
         try {
-            init();
+            if (!attach()) return;
             daemon.input("BLANK " + (on ? "1" : "0"));
             log("blank monitor " + (on ? "on" : "off") + " forwarded (operator command)");
         } catch (Throwable t) {
@@ -243,20 +503,28 @@ public final class Bridge {
      * desktop user) for the login name via WHO and caches it. Returns null if
      * neither is available, in which case the original name is left untouched.
      */
-    private static String logonLabel() {
+    // Package-private (was private) purely so BootTests can assert the label
+    // precedence in testRegistryLabelWinsOverWho. Visibility only; no logic
+    // was changed by the test author.
+    static String logonLabel() {
         String o = labelOverride;
-        if (o != null && !o.isEmpty()) return o;
-        String cached = logonLabel;
-        if (cached != null) return cached;
+        if (o != null && !o.isEmpty()) return o;   // the operator's own label= wins
         try {
-            init();
-            String who = daemon.send("WHO");
+            // Attach FIRST: this is usually the call that resolves the session,
+            // and resolution is what learns the registered name. Checking the
+            // cache before attaching would fall through to WHO on the very
+            // first call, and the picker caches that answer for logonTtlMs —
+            // so the operator would see the login name for 30s before it
+            // flipped to the registered label.
+            if (!attach()) return null;
+            String registered = sanitizeLabel(sessionLabel);
+            if (registered != null) return registered;
+            String cached = logonLabel;
+            if (cached != null) return cached;
+            String who = sanitizeLabel(daemon.send("WHO"));
             if (who != null) {
-                who = who.trim();
-                if (!who.isEmpty() && !who.startsWith("ERR")) {
-                    logonLabel = who;
-                    return who;
-                }
+                logonLabel = who;
+                return who;
             }
         } catch (Throwable t) {
             log("logon label fetch failed: " + t);
@@ -412,6 +680,200 @@ public final class Bridge {
     }
 
     /**
+     * The comparable identity of an X display, or null when the value names no
+     * display at all.
+     *
+     * The two sides of a match come from different producers — the child JVM's
+     * DISPLAY, baked in by ScreenConnect from its logon probe, and the daemon's
+     * own --display/$DISPLAY — so either may carry the `.screen` suffix of the
+     * X display grammar ([host]:number[.screen]). The screen selects a monitor
+     * within one display, never a different session, so it is dropped before
+     * matching. A value that is not display-shaped is left alone: an opaque
+     * token then matches only itself and can never alias another session.
+     *
+     * Null, blank, and the daemon's literal UNKNOWN all mean "no display" — a
+     * daemon that cannot tell which session it owns must never be selectable.
+     */
+    static String normalizeDisplay(String display) {
+        if (display == null) return null;
+        String d = display.trim();
+        if (d.isEmpty() || "UNKNOWN".equals(d) || isErrorLine(d)) return null;
+        int colon = d.lastIndexOf(':');
+        if (colon >= 0) {
+            int dot = d.indexOf('.', colon);
+            if (dot > colon && allDigits(d.substring(colon + 1, dot))
+                    && allDigits(d.substring(dot + 1))) {
+                return d.substring(0, dot);
+            }
+        }
+        return d;
+    }
+
+    /**
+     * True for the daemon protocol's error replies, `ERR <text>` — including a
+     * bare `ERR`. A daemon older than a command answers with one, and the
+     * daemon and the agent are deployed separately, so a new agent meets an old
+     * daemon during any rolling upgrade. Keyed on the ERR *token* rather than
+     * an "ERR" prefix, so a legal hostname:display like `ERRBOX:0`, or a login
+     * name like `errol`, is not mistaken for an error.
+     */
+    private static boolean isErrorLine(String trimmed) {
+        return "ERR".equals(trimmed.split("\\s+", 2)[0]);
+    }
+
+    /**
+     * A daemon-supplied name fit to show an operator, or null if it is no name
+     * at all. The label reaches ScreenConnect's session picker, so an error
+     * line or blank must never arrive there as if it were a session.
+     */
+    static String sanitizeLabel(String label) {
+        if (label == null) return null;
+        String s = label.trim();
+        if (s.isEmpty() || isErrorLine(s)) return null;
+        return s;
+    }
+
+    private static boolean allDigits(String s) {
+        if (s.isEmpty()) return false;
+        for (int i = 0; i < s.length(); i++) {
+            if (!Character.isDigit(s.charAt(i))) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Which daemon this child JVM attaches to: the one owning the display
+     * ScreenConnect baked into *this* process's environment, not whichever pair
+     * the agent args named.
+     *
+     * Falls back to the static shm=/socket= args only when there is nothing to
+     * resolve at all — nothing discovered, or a child that cannot say which
+     * display it is. That fallback is the promise to every existing install: a
+     * box running only the backstage daemon behaves exactly as it did before
+     * this feature existed.
+     *
+     * Returns null — meaning DO NOT ATTACH — when live daemons exist but none
+     * owns this child's display, or when more than one claims it. Showing the
+     * operator another session's desktop while naming it as theirs is the exact
+     * failure this feature exists to remove, so black is the safer answer; and
+     * an ambiguous claim is a misconfiguration or a hijack attempt, where
+     * guessing deterministically is still guessing.
+     */
+    /**
+     * Which session this JVM attaches to, or null meaning attach to NOTHING.
+     *
+     * Refusal keys on whether the registry DESCRIBES this display, never on
+     * whether the live list happens to be non-empty — the two are different
+     * questions and conflating them broke both directions in practice:
+     * registering the first user session blacked out backstage, and a
+     * momentarily-dead session fell back to the configured args and showed
+     * backstage under that user's name.
+     *
+     *   child display unusable          -> fallback (the old world)
+     *   registry describes it: no       -> fallback. The registry does not claim
+     *                                      to be complete, so an unregistered
+     *                                      session keeps the operator's own
+     *                                      configuration.
+     *   describes exactly one, live     -> that session
+     *   describes exactly one, not live -> refuse. Never fall back: that is the
+     *                                      lie this feature exists to remove.
+     *   describes more than one         -> refuse; root registered two sessions
+     *                                      for one display and guessing is wrong.
+     */
+    static SessionEndpoint resolveEndpoint(String childDisplay,
+                                           java.util.List<SessionEndpoint> registered,
+                                           java.util.List<SessionEndpoint> live,
+                                           SessionEndpoint fallback) {
+        String want = normalizeDisplay(childDisplay);
+        if (want == null) return fallback;
+        SessionEndpoint described = null;
+        int describedCount = 0;
+        if (registered != null) {
+            for (SessionEndpoint e : registered) {
+                if (e == null) continue;
+                if (want.equals(normalizeDisplay(e.display()))) {
+                    describedCount++;
+                    described = e;
+                }
+            }
+        }
+        if (describedCount == 0) return knownWrong(fallback, registered, want) ? null : fallback;
+        if (describedCount > 1) return null;
+        if (live != null) {
+            for (SessionEndpoint e : live) {
+                if (e == null) continue;
+                if (want.equals(normalizeDisplay(e.display()))) return e;
+            }
+        }
+        return null;                    // described, but nothing usable serves it
+    }
+
+    /**
+     * Whether the registry contradicts the fallback: some entry claims the
+     * fallback's own frame or socket for a display other than this child's.
+     *
+     * Falling back is a statement that we have no evidence about this display,
+     * so the operator's configuration is the best guess. When the registry
+     * names the very endpoint that configuration points at, and names it as a
+     * *different* session, that guess is known wrong — using it would show
+     * backstage under the selected session's name, the failure this whole
+     * feature exists to remove.
+     *
+     * Either half is disqualifying on its own: a shared frame shows the wrong
+     * screen, a shared socket types into the wrong session.
+     */
+    private static boolean knownWrong(SessionEndpoint fallback,
+                                      java.util.List<SessionEndpoint> registered,
+                                      String wantedDisplay) {
+        if (fallback == null || registered == null) return false;
+        for (SessionEndpoint e : registered) {
+            if (e == null) continue;
+            if (wantedDisplay.equals(normalizeDisplay(e.display()))) continue;
+            boolean sameShm = e.shm() != null && e.shm().equals(fallback.shm());
+            boolean sameSocket = e.socket() != null && e.socket().equals(fallback.socket());
+            if (sameShm || sameSocket) {
+                log("REFUSING to fall back: the registry names " + fallback.shm() + " / "
+                        + fallback.socket() + " as display " + e.display()
+                        + " (" + e.user() + "), not " + wantedDisplay);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The client for one endpoint, demanding the account the registry says
+     * serves it. The fallback endpoint carries no user — it is the operator's
+     * own shm=/socket= configuration and answers to no registry entry.
+     */
+    static DaemonClient clientFor(SessionEndpoint chosen) {
+        return new DaemonClient(chosen.socket(), chosen.user());
+    }
+
+    /**
+     * Point this JVM's client and frame reader at one endpoint, replacing
+     * whatever was there. Unconditional replacement is the point: the picker
+     * path relabels sessions before any session is resolved, so an
+     * unauthenticated client on the static socket already exists by then, and a
+     * `if (daemon == null)` guard would silently keep it — wrong socket and no
+     * peer check on every keystroke thereafter.
+     */
+    static synchronized DaemonClient attachTo(SessionEndpoint chosen) {
+        if (chosen == null) return null;
+        if (daemon != null) daemon.close();
+        daemon = clientFor(chosen);
+        frame = new FrameReader(chosen.shm());
+        shmPath = chosen.shm();
+        socketPath = chosen.socket();
+        // The name travels with the session: adopting it here (rather than in
+        // the resolver) means it is set before anything can ask for a label,
+        // and a stale WHO cached for a previous session cannot outrank it.
+        sessionLabel = chosen.label();
+        logonLabel = null;
+        return daemon;
+    }
+
+    /**
      * Called from the instrumented Robot.init exit. Returns our peer, or the
      * original on any failure.
      */
@@ -420,7 +882,11 @@ public final class Bridge {
             log("wrapPeer: Robot built for device="
                     + (screen == null ? "null" : screen.getIDstring())
                     + " DISPLAY=" + System.getenv("DISPLAY"));
-            init();
+            if (!attach()) {
+                log("keeping the original X11 Robot peer: no daemon was resolved "
+                        + "for this session (see the refusal above)");
+                return original;
+            }
             String pong = daemon.send("PING");
             if (!"PONG".equals(pong)) {
                 log("daemon not answering (PING=" + pong + "); keeping original peer");
