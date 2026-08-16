@@ -220,6 +220,10 @@ read_install_state() {
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     key="${line%%=*}"; value="${line#*=}"
+    # A state file written or edited on Windows carries CR, which would ride
+    # along into an account name, a uid, and the picker label derived from it.
+    # Stripped here so every consumer gets the same clean value.
+    value="${value%$'\r'}"
     case "$key" in
       HOST_ACCOUNT)    HOST_ACCOUNT="$value" ;;
       HOST_UID)        HOST_UID="$value" ;;

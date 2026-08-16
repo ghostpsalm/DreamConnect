@@ -16,6 +16,12 @@ Type=simple
 # @INSTALL_DIR@ and @DAEMON_ARGS@ are substituted by install.sh — the latter is
 # `--monitor <connector>` for physical capture, `--virtual <WxH>` for backstage.
 ExecStart=/usr/bin/python3 @INSTALL_DIR@/runtime/dreamconnect_daemon.py --shm @SHM_PATH@ @DAEMON_ARGS@
+# A backstage display number is only known once the shell's Xwayland is up, so
+# the publisher writes it here and the daemon's --display reads ${DISPLAY} from
+# it. %t is this user unit's runtime directory (/run/user/<uid>), so there is no
+# placeholder to substitute and none to forget. `-` because a classic install
+# never writes this file: there the daemon inherits DISPLAY from the session.
+EnvironmentFile=-%t/dreamconnect-display.env
 Restart=always
 RestartSec=2
 # Owner-only files: the root SC JVM reads the shm/socket via DAC override, so

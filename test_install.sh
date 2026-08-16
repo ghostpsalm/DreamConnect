@@ -6102,6 +6102,731 @@ test_session_display_fails_when_there_is_no_usable_display() {
   assert_eq "$out" "" "session_display never returns a value from XDISPLAY=/GDM_DISPLAY="
 }
 
+# --- issue #53 slice 2: wiring the registry writers into the callers ---------
+#
+# Slice 1 built render/write/remove_registry_entry and session_display; nothing
+# called them, so the registry was still never written and #51's reader had
+# nothing to read. This slice is the call sites: runtime/dreamconnect-session
+# (a session coming up or going down) and install.sh (backstage).
+#
+# THE SEAM, and what it does NOT prove. runtime/dreamconnect-session is a CLI
+# that dispatches at the bottom, and install.sh demands root and does top-level
+# work, so neither can be sourced or executed here. These are STATIC call-site
+# assertions over the script text, the same technique
+# test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call
+# uses and for the same reason: the risk is a call that is missing, orphaned or
+# in the wrong order, and that is visible in the text.
+#
+# They prove the wiring is present and ordered. They do NOT prove systemd
+# started anything, that the daemon accepted the arguments, or that the entry
+# root writes is one the agent will trust at runtime. That is a live-install
+# check, and the reader's own rules are covered by the Java suite.
+
+func_range() {  # file funcname -> "start end" (body lines), or empty
+  awk -v fn="$2" '
+    index($0, fn "()") == 1 { start = NR; next }
+    start && /^}/ { print start " " NR; exit }
+  ' "$1"
+}
+
+code_line_in_func() {  # file funcname regex -> line number within that function, or empty
+  local range start end
+  range="$(func_range "$1" "$2")"
+  [ -n "$range" ] || return 0
+  start="${range% *}"; end="${range#* }"
+  awk -v re="$3" -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 ~ re && $0 !~ /^[[:space:]]*#/ { print NR; exit }' "$1"
+}
+
+SESSION_CLI_HINT="runtime/dreamconnect-session"
+
+# The daemon that answers the agent must know its own display and name. A daemon
+# started without --display answers UNKNOWN however new it is, which is what
+# looked like version skew; without --label the picker shows the login name.
+test_session_cli_starts_the_daemon_with_display_and_label() {
+  local cli daemon stmt
+  cli="$HERE/runtime/dreamconnect-session"
+  assert_file_exists "$cli" "$SESSION_CLI_HINT is present"
+  [ -f "$cli" ] || return 0
+
+  daemon="$(code_line_in_func "$cli" bring_up_user 'systemd-run --user --unit=dreamconnect-session-daemon')"
+  [ -n "$daemon" ] || { fail "call site: bring_up_user no longer starts the capture daemon"; return 0; }
+  stmt="$(logical_statement_at "$cli" "$daemon")"
+  [ -n "$stmt" ] || { fail "call site: could not read the daemon statement at $SESSION_CLI_HINT:$daemon"; return 0; }
+
+  assert_contains "$stmt" "--shm" "the daemon is still told which frame to write"
+  assert_contains "$stmt" "--display" \
+    "the daemon must be given --display, or it answers UNKNOWN and the agent will not select it"
+  assert_contains "$stmt" "--label" \
+    "the daemon must be given --label, or the picker names the session after the account"
+}
+
+# Ordering, install side: the display env only exists once the backstage session
+# is actually running, so registration has to come after the units are started.
+test_install_sh_starts_registration_after_its_session_is_running() {
+  local sh started reg
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  # `restart`, not `enable`: enabling only wires the unit for boot, and
+  # install.sh deliberately restarts to apply this run's changes. The restart is
+  # the line after which a session is actually running and has published a
+  # display.
+  started="$(first_code_line "$sh" 'systemctl --user restart')"
+  [ -n "$started" ] || { fail "call site: install.sh no longer starts the user units"; return 0; }
+  reg="$(first_code_line "$sh" 'write_registry_entry')"
+  [ -n "$reg" ] || { fail "call site: install.sh never calls write_registry_entry"; return 0; }
+
+  [ "$started" -lt "$reg" ] || \
+    fail "call site: write_registry_entry (line $reg) must come AFTER the session units are started (line $started) — before that there is no published display to register"
+}
+
+# Uninstall already removes /run/dreamconnect wholesale. That still covers the
+# registry — but only while the registry lives under it.
+#
+# REVISED, round 4: this used to look for the string "sessions" in install.sh,
+# and the only line that matched was a REGISTRY_DIR variable install.sh no
+# longer reads. Deleting that dead code would have REDDENED the test — it was
+# passing for the wrong reason. The registry path now comes from the script that
+# actually writes it, the removal from uninstall(), and the assertion is the
+# real relationship between them.
+test_uninstall_removes_the_registry_with_the_run_directory() {
+  local sh reg_dir range start end removed
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] && [ -f "$REGISTER_SH" ] || {
+    fail "registry coverage: need install.sh and runtime/dreamconnect-register.sh"; return 0; }
+
+  # However the script spells its default (a DC_REGISTRY_DIR_DEFAULT constant
+  # today, a ${VAR:-default} expansion before that): take the registry path it
+  # actually carries, not one this test hardcodes.
+  reg_dir="$(sed -n -e 's/^DC_REGISTRY_DIR[A-Z_]*=\"\([^\"]*\)\".*/\1/p' \
+                    -e 's/.*DC_REGISTRY_DIR:-\([^}\"]*\).*/\1/p' "$REGISTER_SH" | head -n 1)"
+  [ -n "$reg_dir" ] || {
+    fail "registry coverage: cannot find the registry directory the register script writes to"; return 0; }
+
+  range="$(func_range "$sh" uninstall)"
+  [ -n "$range" ] || { fail "install.sh has no uninstall() to scope this to"; return 0; }
+  start="${range% *}"; end="${range#* }"
+  removed="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ && /rm -rf \/run\/dreamconnect/ { print NR; exit }' "$sh")"
+  [ -n "$removed" ] || {
+    fail "uninstall: nothing removes /run/dreamconnect, so the session registry survives an uninstall and keeps naming sessions that no longer exist"
+    return 0; }
+
+  case "$reg_dir" in
+    /run/dreamconnect/*) ;;
+    *) fail "registry coverage: the register script writes to [$reg_dir], which uninstall's 'rm -rf /run/dreamconnect' does not cover" ;;
+  esac
+}
+
+# --- issue #53 slice 3: registration is a property of a session being up -----
+#
+# Slice 2 registered inline, from install.sh and dreamconnect-session. Review
+# killed that design, and the reason is worth keeping in the tests: /run is
+# tmpfs, so after a reboot backstage's entry is gone while the first
+# `dreamconnect-session to <user>` writes one — and #51's known-wrong-fallback
+# rule then REFUSES backstage's own ScreenConnect child. Backstage is
+# black-holed until someone re-runs the installer. Registration therefore has
+# to live and die with the session, not with an install.
+#
+# The shape: runtime/dreamconnect-register.sh (root, sourceable, functions
+# above a main guard) does the work; systemd/dreamconnect-register@.service
+# binds an entry's lifetime to a unit instance (ExecStart registers, ExecStop
+# deregisters, RemainAfterExit=yes). install.sh enables the instance for its
+# account; dreamconnect-session starts and stops it per on-demand session.
+#
+# SIGNATURES CHOSEN (say so if you would rather name them differently):
+#   register_label      <account>                       -> the picker name
+#   account_for_uid     <uid>                           -> login name (DC_PASSWD_DB honoured)
+#   register_session    <uid> <registry_dir> [envfile] [timeout_seconds]
+#   deregister_session  <uid> <registry_dir>
+# envfile defaults to /run/user/<uid>/dreamconnect-display.env and is a
+# parameter only so this suite can point it somewhere writable; the timeout is
+# the bounded wait for a session that is still coming up.
+#
+# What this seam proves and does not: the register script's LOGIC is executed
+# for real here (temp registry dirs, temp env files, DC_STATE_FILE/DC_PASSWD_DB
+# fixtures). The call sites and units are static text assertions, as in slice 2
+# — present and ordered, not "systemd did it".
+
+REGISTER_SH="$HERE/runtime/dreamconnect-register.sh"
+REGISTER_UNIT="$HERE/systemd/dreamconnect-register@.service"
+# Sourced if it exists; every test below guards, so a missing script fails each
+# of them by name instead of exploding once at startup.
+[ -f "$REGISTER_SH" ] && . "$REGISTER_SH"
+
+require_register_script() {  # label
+  local fn
+  [ -f "$REGISTER_SH" ] || { fail "$1: runtime/dreamconnect-register.sh does not exist"; return 1; }
+  for fn in register_label account_for_uid register_session deregister_session; do
+    declare -F "$fn" >/dev/null && continue
+    fail "$1: $fn() is not defined by runtime/dreamconnect-register.sh"
+    return 1
+  done
+  return 0
+}
+
+# Same rule install-lib.sh lives by, and for the same reason: the unit sources
+# nothing, but this suite does, and a script that acts on being read cannot be
+# unit-tested at all.
+test_register_script_is_sourceable_side_effect_free() {
+  local out rc
+  [ -f "$REGISTER_SH" ] || { fail "runtime/dreamconnect-register.sh does not exist"; return 0; }
+  out="$(bash -c 'set -euo pipefail; . "$1"' _ "$REGISTER_SH" 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "sourcing dreamconnect-register.sh exits 0 (functions above a main guard)"
+  assert_eq "$out" "" "sourcing dreamconnect-register.sh is silent"
+}
+
+test_register_script_defines_its_functions() {
+  require_register_script "register script functions" || return 0
+}
+
+# The registry writers live in install-lib.sh. The register script runs from
+# $INSTALL_DIR on a real box, where only what install.sh copies exists — so it
+# must source the library AND install.sh must ship it, or under `set -e` the
+# unit fails at its first call and the session is never registered.
+test_register_script_can_call_the_registry_writers_at_runtime() {
+  local sh sourced
+  [ -f "$REGISTER_SH" ] || { fail "runtime/dreamconnect-register.sh does not exist"; return 0; }
+  sh="$HERE/install.sh"
+  sourced="$(first_code_line "$REGISTER_SH" '(\.|source)[[:space:]]+[^[:space:]]*install-lib\.sh')"
+  [ -n "$sourced" ] || [ -n "$(first_code_line "$REGISTER_SH" '^write_registry_entry\(\)')" ] || {
+    fail "runtime: dreamconnect-register.sh neither sources install-lib.sh nor defines the writers itself"
+    return 0; }
+  if [ -n "$sourced" ]; then
+    [ -n "$(first_code_line "$sh" 'install .*install-lib\.sh')" ] || \
+      fail "runtime: dreamconnect-register.sh sources install-lib.sh but install.sh never installs it into \$INSTALL_DIR"
+  fi
+  [ -n "$(first_code_line "$sh" 'install .*dreamconnect-register\.sh')" ] || \
+    fail "runtime: install.sh never installs dreamconnect-register.sh, so the unit's ExecStart has nothing to run"
+}
+
+# Backstage is the account recorded as HOST_ACCOUNT; it is the one entry the
+# operator must be able to pick out by name, and the spec names it
+# "[Backstage]". Every other account is called by its own name — an on-demand
+# user session named "[Backstage]" would be worse than unlabelled.
+test_register_label_marks_the_backstage_account_and_names_everyone_else() {
+  local DC_STATE_FILE="$TMP/register-label/install.state"
+  require_register_script "register_label" || return 0
+  mkdir -p "$(dirname "$DC_STATE_FILE")"
+  printf 'HOST_ACCOUNT=dreamconnect-host\nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+
+  assert_eq "$(register_label dreamconnect-host 2>/dev/null)" "[Backstage]" \
+    "the recorded host account is the backstage session in the picker"
+  assert_eq "$(register_label kogies 2>/dev/null)" "kogies" \
+    "any other account is named after itself"
+}
+
+# The whole point of the entry is the display, and the display only exists once
+# the session's Xwayland has published it. No display means no entry: an entry
+# naming a display nothing serves is worse than no entry at all, because #51
+# refuses that display rather than falling back (finding 3 of this review).
+test_register_session_refuses_when_no_display_was_published() {
+  local dir env rc
+  local DC_STATE_FILE="$TMP/register-nodisplay/install.state"
+  local DC_PASSWD_DB="$TMP/register-nodisplay/passwd"
+  require_register_script "register_session refusals" || return 0
+  mkdir -p "$TMP/register-nodisplay"
+  printf 'HOST_ACCOUNT=dreamconnect-host\nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  printf 'kogies:x:1000:1000::/home/kogies:/bin/bash\n' > "$DC_PASSWD_DB"
+  dir="$TMP/register-nodisplay/sessions"
+
+  # Never published: the bounded wait must give up, not hang the unit.
+  register_session 1000 "$dir" "$TMP/register-nodisplay/absent.env" 1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "register_session with no published display: expected non-zero exit, got 0"
+  assert_file_absent "$dir/1000" "and no entry is written for a session with no display"
+
+  # Published but empty — the unset-variable shape the publisher can leave.
+  env="$TMP/register-nodisplay/blank.env"
+  printf 'DISPLAY=\nXAUTHORITY=/run/user/1000/x\n' > "$env"
+  register_session 1000 "$dir" "$env" 1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "register_session with a blank DISPLAY: expected non-zero exit, got 0"
+  assert_file_absent "$dir/1000" "and still nothing is written"
+}
+
+# The state file is how the script knows which account is backstage. Without it
+# every session would be labelled by name, including backstage — the picker
+# entry operators are told to look for silently disappears.
+test_register_session_refuses_when_the_install_state_names_no_account() {
+  local dir env rc
+  local DC_STATE_FILE="$TMP/register-nostate/install.state"
+  local DC_PASSWD_DB="$TMP/register-nostate/passwd"
+  require_register_script "register_session without state" || return 0
+  mkdir -p "$TMP/register-nostate"
+  printf 'kogies:x:1000:1000::/home/kogies:/bin/bash\n' > "$DC_PASSWD_DB"
+  env="$TMP/register-nostate/display.env"
+  printf 'DISPLAY=:3\nXAUTHORITY=/run/user/1000/x\n' > "$env"
+  dir="$TMP/register-nostate/sessions"
+
+  register_session 1000 "$dir" "$env" 1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "register_session with no install state: expected non-zero exit, got 0"
+  assert_file_absent "$dir/1000" "no entry is written when the state file is missing"
+
+  printf 'HOST_ACCOUNT=\nHOST_UID=\nCREATED_ACCOUNT=0\n' > "$DC_STATE_FILE"
+  register_session 1000 "$dir" "$env" 1 >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] || fail "register_session with a blank HOST_ACCOUNT: expected non-zero exit, got 0"
+  assert_file_absent "$dir/1000" "nor when the state records no account"
+}
+
+# The entry has to satisfy the shipped reader, which is the authority here:
+# agent/boot/dreamconnect/boot/Bridge.java — parseRegistryEntry requires
+# uid/user/display/shm/socket, readRegistry ignores any filename that is not all
+# digits and any file that is group- or other-writable, and usableShm requires
+# the frame to be the entry uid's own.
+test_register_session_writes_an_entry_the_reader_accepts() {
+  local dir env body mode
+  local DC_STATE_FILE="$TMP/register-ok/install.state"
+  local DC_PASSWD_DB="$TMP/register-ok/passwd"
+  require_register_script "register_session" || return 0
+  mkdir -p "$TMP/register-ok"
+  printf 'HOST_ACCOUNT=dreamconnect-host\nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\n' > "$DC_PASSWD_DB"
+  env="$TMP/register-ok/display.env"
+  printf 'DISPLAY=:7\nXAUTHORITY=/run/user/992/dreamconnect.Xauthority\n' > "$env"
+  dir="$TMP/register-ok/sessions"
+
+  ( umask 000; register_session 992 "$dir" "$env" 1 >/dev/null 2>&1 )
+  assert_file_exists "$dir/992" "the entry is written at <registry>/<uid>"
+  [ -f "$dir/992" ] || return 0
+  body="$(cat "$dir/992" 2>/dev/null || true)"
+  assert_line "$body" "uid=992"                                  "entry carries the uid"
+  assert_line "$body" "user=dreamconnect-host"                   "entry carries the account name"
+  assert_line "$body" "display=:7"                               "entry carries the PUBLISHED display, read from the env file"
+  assert_line "$body" "shm=/dev/shm/dreamconnect.frame.992"      "entry carries the uid-scoped frame the daemon writes"
+  assert_line "$body" "socket=/run/user/992/dreamconnect.sock"   "entry carries the uid's control socket"
+  assert_line "$body" "label=[Backstage]"                        "and the backstage account is labelled for the picker"
+  mode="$(stat -c '%a' "$dir/992" 2>/dev/null)"
+  assert_eq "$mode" "644" "entry mode is 0644 even under umask 000 — the reader ignores anything group/other-writable"
+}
+
+# ExecStop is what makes deregistration automatic; this is the function it runs.
+test_deregister_session_removes_that_entry_only() {
+  local dir env rc
+  local DC_STATE_FILE="$TMP/register-dereg/install.state"
+  local DC_PASSWD_DB="$TMP/register-dereg/passwd"
+  require_register_script "deregister_session" || return 0
+  mkdir -p "$TMP/register-dereg"
+  printf 'HOST_ACCOUNT=dreamconnect-host\nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' > "$DC_PASSWD_DB"
+  env="$TMP/register-dereg/display.env"
+  printf 'DISPLAY=:7\n' > "$env"
+  dir="$TMP/register-dereg/sessions"
+  register_session 992 "$dir" "$env" 1 >/dev/null 2>&1
+  register_session 1000 "$dir" "$env" 1 >/dev/null 2>&1
+
+  deregister_session 992 "$dir" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "deregister_session succeeds"
+  assert_file_absent "$dir/992" "the entry is gone with the session"
+  assert_file_exists "$dir/1000" "the other session's entry is untouched"
+  deregister_session 992 "$dir" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "0" "and deregistering twice is not an error (ExecStop can run after a failed start)"
+}
+
+# --- unit files --------------------------------------------------------------
+
+# FINDING 1, and the reason this slice exists at all: the daemon unit gained
+# `EnvironmentFile=-/run/user/@UID@/dreamconnect-display.env`, but install.sh's
+# sed for that unit substitutes @INSTALL_DIR@/@SESSION_UNIT@/@SHM_PATH@/
+# @DAEMON_ARGS@ only. The literal @UID@ survived, the leading `-` silenced the
+# missing file, ${DISPLAY} expanded to empty and the daemon still answered
+# UNKNOWN. It is a systemd USER unit, so %t already IS /run/user/<uid>: no
+# substitution needed, and nothing left to forget.
+test_daemon_unit_environment_file_needs_no_substitution() {
+  local unit line
+  unit="$HERE/systemd/dreamconnect-daemon.service"
+  assert_file_exists "$unit" "daemon unit template is present"
+  [ -f "$unit" ] || return 0
+
+  line="$(awk '/^EnvironmentFile=/ { print; exit }' "$unit")"
+  [ -n "$line" ] || { fail "daemon unit no longer reads the published display env at all"; return 0; }
+  assert_not_contains "$line" "@" \
+    "the EnvironmentFile path must carry no @PLACEHOLDER@ — one that install.sh does not substitute survives into the rendered unit and silently disables the display"
+  assert_contains "$line" "%t" \
+    "a user unit's %t already means /run/user/<uid>, which is what removes the need to substitute anything"
+}
+
+# Real directives rather than substrings: a token in a comment, or under the
+# wrong section, is not a property of the unit.
+unit_directive() {  # section key file -> one value per line
+  awk -v want="$1" -v key="$2" '
+    /^[[:space:]]*[#;]/ { next }
+    /^\[/ { sec = $0; sub(/^\[/, "", sec); sub(/\].*$/, "", sec); next }
+    sec == want {
+      i = index($0, "=")
+      if (i > 0) {
+        k = substr($0, 1, i - 1); gsub(/[[:space:]]/, "", k)
+        if (k == key) print substr($0, i + 1)
+      }
+    }' "$3"
+}
+
+# REVISED, round 4 — the previous version asserted the substring
+# `user@%i.service` anywhere in the file, which `After=` alone satisfies. It
+# therefore named a property the unit did not have: review demonstrated that
+# with only `After=`+`Wants=`, stopping the session's user manager leaves this
+# unit ACTIVE, so the entry outlives the session. A later session that reclaims
+# that display number then makes two entries for one display, the agent refuses,
+# and that session is black permanently — the exact failure this unit design
+# exists to prevent.
+#
+# What is asserted now is the stop-propagating dependency itself. BindsTo=,
+# PartOf= or StopPropagatedFrom= naming user@%i.service all satisfy it, because
+# all three propagate a stop; After=/Wants= alone no longer do. My
+# recommendation is BindsTo=, because it also covers the manager FAILING rather
+# than being cleanly stopped — but the choice is the implementer's and this does
+# not force it. After= is still required alongside: a stop-propagating
+# dependency with no ordering can race the thing it depends on.
+test_register_unit_ties_the_entry_to_the_unit_lifetime() {
+  local u="$REGISTER_UNIT" bind
+  [ -f "$u" ] || { fail "systemd/dreamconnect-register@.service does not exist"; return 0; }
+
+  assert_contains "$(unit_directive Service ExecStart "$u")" "register" \
+    "the unit registers on start"
+  assert_contains "$(unit_directive Service ExecStop "$u")" "deregister" \
+    "the unit deregisters on stop — this is what removes the stale-entry case"
+  assert_eq "$(unit_directive Service RemainAfterExit "$u" | tr -d ' ')" "yes" \
+    "without RemainAfterExit=yes the oneshot goes inactive at once and ExecStop never runs"
+  assert_contains "$(unit_directive Service ExecStart "$u")" "%i" \
+    "the instance name is the uid being registered"
+  assert_contains "$(unit_directive Unit After "$u")" "user@%i.service" \
+    "ordered after the user manager: /run/user/<uid> and its display env do not exist before it"
+  [ -n "$(unit_directive Install WantedBy "$u")" ] || \
+    fail "the unit has no [Install] WantedBy, so it cannot be enabled and a reboot never re-registers"
+
+  bind="$(unit_directive Unit BindsTo "$u")$(unit_directive Unit PartOf "$u")$(unit_directive Unit StopPropagatedFrom "$u")"
+  case "$bind" in
+    *user@%i.service*) ;;
+    *) fail "the unit has no stop-propagating dependency on user@%i.service (BindsTo=/PartOf=/StopPropagatedFrom=) — with only After=/Wants= the session's manager can stop while this unit stays active, and the entry outlives the session it promises" ;;
+  esac
+}
+
+# STRENGTHENED (the seraph found the old shape vacuous): the previous test
+# grepped each placeholder against the WHOLE of install.sh, so @UID@ in the
+# daemon unit was satisfied by any unrelated line mentioning @UID@ elsewhere —
+# which is exactly how finding 1 shipped. Now every placeholder is checked
+# against the sed statement that renders ITS OWN file.
+render_statement_for() {  # install_sh template_basename -> the joined sed statement, or empty
+  local sh="$1" base="$2" line stmt
+  for line in $(awk '/sed -e/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    stmt="$(logical_statement_at "$sh" "$line")"
+    case "$stmt" in *"$base"*) printf '%s\n' "$stmt"; return 0 ;; esac
+  done
+  return 0
+}
+
+test_every_unit_template_placeholder_is_substituted_by_its_own_render() {
+  local sh unit base ph stmt checked=0
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  for unit in "$HERE"/systemd/*.service; do
+    [ -f "$unit" ] || continue
+    base="$(basename "$unit")"
+    # Only templates that actually carry placeholders need a render.
+    local phs; phs="$(grep -o '@[A-Z_]\{1,\}@' "$unit" 2>/dev/null | sort -u)"
+    [ -n "$phs" ] || continue
+    stmt="$(render_statement_for "$sh" "$base")"
+    [ -n "$stmt" ] || { fail "$base carries placeholders ($(echo $phs)) but install.sh has no sed that renders it"; continue; }
+    for ph in $phs; do
+      checked=$((checked + 1))
+      case "$stmt" in
+        *"$ph"*) ;;
+        *) fail "$base uses $ph but the sed that renders $base never substitutes it — the literal survives into the unit systemd reads" ;;
+      esac
+    done
+  done
+  [ "$checked" -gt 0 ] || fail "placeholder guard checked nothing — the loop found no unit template with placeholders, so this test proves nothing"
+}
+
+# --- call sites, revised for the new lifecycle -------------------------------
+
+# Is a line inside an `if [ "$BACKSTAGE" -eq 1 ]` THEN-branch? Walks the file
+# keeping a stack of if/else/fi, so a line in the else-branch answers no.
+guarded_by_backstage() {  # file line -> yes|no
+  awk -v target="$2" '
+    NR == target { for (i = 1; i <= depth; i++) if (bs[i] && !el[i]) { print "yes"; exit } print "no"; exit }
+    /^[[:space:]]*if[[:space:]]+\[[[:space:]]*"\$BACKSTAGE"[[:space:]]+-eq[[:space:]]+1/ { depth++; bs[depth] = 1; el[depth] = 0; next }
+    /^[[:space:]]*if[[:space:]]/ { depth++; bs[depth] = 0; el[depth] = 0; next }
+    /^[[:space:]]*else([[:space:]]|$)/ { if (depth > 0) el[depth] = 1; next }
+    /^[[:space:]]*fi([[:space:]]|$)/ { if (depth > 0) depth--; next }
+  ' "$1"
+}
+
+# install.sh no longer writes entries itself: it enables the instance so the
+# session re-registers on every boot.
+test_install_sh_enables_registration_for_its_account() {
+  local sh enabled started stmt
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  enabled="$(first_code_line "$sh" 'systemctl[[:space:]]+enable[[:space:]]+.*dreamconnect-register@')"
+  [ -n "$enabled" ] || {
+    fail "call site: install.sh never enables dreamconnect-register@<uid>.service — after a reboot the session it installed is unregistered and #51 refuses it"
+    return 0; }
+  stmt="$(logical_statement_at "$sh" "$enabled")"
+  assert_contains "$stmt" 'USER_UID' "the instance is the uid of the account being installed"
+
+  started="$(first_code_line "$sh" 'systemctl[[:space:]]+(start|restart)[[:space:]]+.*dreamconnect-register@')"
+  [ -n "$started" ] || \
+    fail "call site: install.sh must also START the register instance, or this install stays unregistered until the next boot"
+}
+
+# NEW, round 4. Nothing publishes /run/user/<uid>/dreamconnect-display.env
+# outside backstage (only dreamconnect-backstage.service and
+# dreamconnect-session write it), so on a classic install the register unit
+# burns its whole bounded wait and then fails — on every boot, forever.
+# A classic install is single-session: with no registry the agent falls back to
+# the static shm=/socket= args, which is exactly today's behaviour and is
+# correct. So registration there buys nothing and costs a permanently failed
+# unit.
+test_install_sh_enables_registration_only_for_backstage() {
+  local sh line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  local range ustart uend
+  range="$(func_range "$sh" uninstall)"
+  ustart="${range% *}"; uend="${range#* }"
+  [ -n "$range" ] || { ustart=0; uend=0; }
+  [ -n "$(first_code_line "$sh" 'systemctl[[:space:]]+(enable|start|restart)[[:space:]]+.*dreamconnect-register@')" ] || {
+    fail "call site: install.sh never enables registration at all, so this test would check nothing"
+    return 0; }
+  # Only the install path: uninstall() legitimately disables the instance for
+  # any account, backstage or not.
+  for line in $(awk -v us="$ustart" -v ue="$uend" \
+      '/systemctl[[:space:]]+(enable|start|restart)[[:space:]]+.*dreamconnect-register@/ \
+       && $0 !~ /^[[:space:]]*#/ && !(NR > us && NR < ue) { print NR }' "$sh"); do
+    assert_eq "$(guarded_by_backstage "$sh" "$line")" "yes" \
+      "install.sh:$line touches dreamconnect-register@ outside the backstage branch — a classic install has nothing publishing a display env, so the unit waits out its timeout and then fails on every boot"
+  done
+}
+
+# And a classic install must still finish with no registry whatsoever: that
+# fallback is what makes skipping registration there safe rather than a
+# regression, so a failed registration must never be fatal either.
+test_classic_install_needs_no_registry_at_all() {
+  local sh started stmt
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  [ -z "$(first_code_line "$sh" 'write_registry_entry')" ] || \
+    fail "call site: install.sh writes a registry entry directly; a classic install must need no registry at all"
+
+  started="$(first_code_line "$sh" 'systemctl[[:space:]]+(start|restart)[[:space:]]+.*dreamconnect-register@')"
+  if [ -n "$started" ]; then
+    stmt="$(logical_statement_at "$sh" "$started")"
+    case "$stmt" in
+      *"||"*) ;;
+      *) fail "call site: install.sh:$started lets a failed registration abort the install — an unregistered session still works from the static args, so this must be non-fatal: [$stmt]" ;;
+    esac
+  fi
+}
+
+# FINDING 3: a classic install registered ${DISPLAY:-} — the installing shell's
+# display, which over `ssh -X` is localhost:10.0. That names a display nothing
+# serves, and #51 refuses rather than falls back, so it is strictly worse than
+# not registering. Both the inline write and the guess have to be gone.
+test_install_sh_no_longer_registers_inline_or_guesses_the_display() {
+  local sh
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  [ -z "$(first_code_line "$sh" 'write_registry_entry')" ] || \
+    fail "call site: install.sh still writes a registry entry inline — that entry dies with the next reboot while the unit-managed one does not"
+  [ -z "$(first_code_line "$sh" 'DISPLAY:-')" ] || \
+    fail "call site: install.sh still falls back to \${DISPLAY:-}, the installing shell's own display — over ssh -X that registers localhost:10.0 and the session then refuses"
+}
+
+test_install_sh_starts_registration_after_its_session_is_running() {
+  local sh started reg
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  started="$(first_code_line "$sh" 'systemctl --user restart')"
+  [ -n "$started" ] || { fail "call site: install.sh no longer starts the user units"; return 0; }
+  reg="$(first_code_line "$sh" 'systemctl[[:space:]]+(enable|start|restart)[[:space:]]+.*dreamconnect-register@')"
+  [ -n "$reg" ] || { fail "call site: install.sh never starts dreamconnect-register@"; return 0; }
+  [ "$started" -lt "$reg" ] || \
+    fail "call site: registration (line $reg) must come AFTER the session units are started (line $started) — before that there is no published display to register"
+}
+
+# The CLI keeps its ordering — publish, start the daemon, then register — but
+# now by starting the unit instance rather than writing the file itself.
+test_session_cli_starts_registration_after_the_daemon() {
+  local cli published daemon reg
+  cli="$HERE/runtime/dreamconnect-session"
+  [ -f "$cli" ] || { fail "$SESSION_CLI_HINT is present"; return 0; }
+
+  published="$(code_line_in_func "$cli" bring_up_user 'dreamconnect-backstage-env\.sh')"
+  daemon="$(code_line_in_func "$cli" bring_up_user 'systemd-run --user --unit=dreamconnect-session-daemon')"
+  reg="$(code_line_in_func "$cli" bring_up_user 'dreamconnect-register@')"
+  [ -n "$published" ] && [ -n "$daemon" ] || { fail "call site: bring_up_user no longer publishes the display or starts the daemon"; return 0; }
+  [ -n "$reg" ] || {
+    fail "call site: bring_up_user never starts dreamconnect-register@<uid> — the session it brings up is invisible to the agent"
+    return 0; }
+
+  [ "$published" -lt "$reg" ] || \
+    fail "call site: registration (line $reg) must come AFTER the display is published (line $published)"
+  [ "$daemon" -lt "$reg" ] || \
+    fail "call site: registration (line $reg) must come AFTER the daemon is started (line $daemon) — an entry is a promise that the session can be attached to"
+}
+
+test_session_cli_stops_registration_on_teardown() {
+  local cli stopped stmt
+  cli="$HERE/runtime/dreamconnect-session"
+  [ -f "$cli" ] || { fail "$SESSION_CLI_HINT is present"; return 0; }
+
+  stopped="$(code_line_in_func "$cli" tear_down_user 'dreamconnect-register@')"
+  [ -n "$stopped" ] || {
+    fail "call site: tear_down_user never stops dreamconnect-register@<uid> — the entry outlives the daemon and that display refuses until it is removed by hand"
+    return 0; }
+  stmt="$(logical_statement_at "$cli" "$stopped")"
+  assert_contains "$stmt" "stop" "teardown STOPS the instance, which is what runs its ExecStop deregistration"
+  assert_contains "$stmt" 'uid' "and it names the uid whose session is going away"
+}
+
+# The CLI must stop writing the registry itself, and must stop hard-failing
+# commands that never touch it: the top-level `declare -F … || die` guard
+# aborted `status` and `backstage` too.
+test_session_cli_no_longer_writes_the_registry_itself() {
+  local cli guard range start end
+  cli="$HERE/runtime/dreamconnect-session"
+  [ -f "$cli" ] || { fail "$SESSION_CLI_HINT is present"; return 0; }
+
+  [ -z "$(first_code_line "$cli" 'write_registry_entry')" ] || \
+    fail "call site: $SESSION_CLI_HINT still writes registry entries inline instead of starting the unit that owns them"
+  [ -z "$(first_code_line "$cli" 'remove_registry_entry')" ] || \
+    fail "call site: $SESSION_CLI_HINT still removes registry entries inline"
+
+  guard="$(first_code_line "$cli" 'declare -F .*(die|exit)')"
+  if [ -n "$guard" ]; then
+    range="$(func_range "$cli" bring_up_user)"
+    start="${range% *}"; end="${range#* }"
+    { [ -n "$range" ] && [ "$guard" -gt "$start" ] && [ "$guard" -lt "$end" ]; } || \
+      fail "call site: the 'declare -F … || die' guard at line $guard runs at top level, so it kills 'status' and 'backstage' — commands that never register anything"
+  fi
+}
+
+unquote() { local v="$1"; v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"; printf '%s\n' "$v"; }
+
+# A literal is its own value; "$var" is resolved to the single assignment of
+# that name inside the function. Empty means "the text cannot say" — either the
+# name is never assigned there, or it is assigned more than once, and a call
+# site whose value cannot be read is reported rather than assumed.
+resolved_value_in_func() {  # file func token -> value, or empty
+  local file="$1" func="$2" tok name range start end count
+  tok="$(unquote "$3")"
+  case "$tok" in
+    '$'*) name="${tok#\$}"; name="${name#\{}"; name="${name%\}}" ;;
+    *) printf '%s\n' "$tok"; return 0 ;;
+  esac
+  range="$(func_range "$file" "$func")"
+  [ -n "$range" ] || return 0
+  start="${range% *}"; end="${range#* }"
+  count="$(awk -v s="$start" -v e="$end" -v n="$name" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ \
+       && $0 ~ "(^|[[:space:];])(local[[:space:]]+)?" n "=" { c++ } END { print c + 0 }' "$file")"
+  [ "$count" = "1" ] || return 0
+  awk -v s="$start" -v e="$end" -v n="$name" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ {
+       if (match($0, "(^|[[:space:];])(local[[:space:]]+)?" n "=")) {
+         v = substr($0, RSTART + RLENGTH)
+         sub(/^"/, "", v); sub(/".*$/, "", v)
+         print v; exit } }' "$file"
+}
+
+# Cross-file: the daemon writes one frame and the register script claims
+# another, and nothing errors — the reader just drops the entry (usableShm
+# requires the frame to be the entry uid's own). Slice 2 checked this within one
+# file; the paths now live in two, so this is where drift would hide.
+test_register_script_and_the_daemon_agree_on_the_uid_scoped_paths() {
+  local cli daemon dstmt dshm dval body
+  cli="$HERE/runtime/dreamconnect-session"
+  [ -f "$cli" ] && [ -f "$REGISTER_SH" ] || {
+    fail "path agreement: need both $SESSION_CLI_HINT and runtime/dreamconnect-register.sh"
+    return 0; }
+
+  daemon="$(code_line_in_func "$cli" bring_up_user 'systemd-run --user --unit=dreamconnect-session-daemon')"
+  [ -n "$daemon" ] || { fail "path agreement: bring_up_user no longer starts the daemon"; return 0; }
+  dstmt="$(logical_statement_at "$cli" "$daemon")"
+  dshm="$(printf '%s\n' "$dstmt" | sed -n 's/.*--shm[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p')"
+  dval="$(resolved_value_in_func "$cli" bring_up_user "$dshm")"
+  [ -n "$dval" ] || { fail "path agreement: cannot tell what the daemon's --shm [$dshm] holds in bring_up_user"; return 0; }
+  assert_eq "$dval" '/dev/shm/dreamconnect.frame.$uid' "the daemon writes this uid's own frame"
+
+  body="$(grep -v '^[[:space:]]*#' "$REGISTER_SH" 2>/dev/null || true)"
+  assert_contains "$body" '/dev/shm/dreamconnect.frame.' \
+    "and the register script claims a uid-scoped frame, not the legacy unscoped one"
+  assert_contains "$body" '/run/user/' \
+    "and the uid's own runtime socket"
+  assert_not_contains "$body" '"/dev/shm/dreamconnect.frame"' \
+    "the unscoped frame path must not be what gets registered — the reader drops an entry whose frame is not the account's"
+}
+
+# --- issue #53 round 4: what a green suite was hiding -------------------------
+
+# Uninstall left /etc/systemd/system/dreamconnect-register@.service and its
+# multi-user.target.wants symlink behind. $INSTALL_DIR is deliberately kept, so
+# the ExecStart still resolves and the enabled instance keeps failing on every
+# boot of a box that has been uninstalled. The same gap swallows an account
+# change: the old dreamconnect-register@<olduid> stays enabled.
+test_uninstall_disables_and_removes_the_register_unit() {
+  local sh range start end disabled removed
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  range="$(func_range "$sh" uninstall)"
+  [ -n "$range" ] || { fail "install.sh has no uninstall() to scope this to"; return 0; }
+  start="${range% *}"; end="${range#* }"
+
+  disabled="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ && /systemctl.*disable.*dreamconnect-register@/ { print NR; exit }' "$sh")"
+  [ -n "$disabled" ] || \
+    fail "uninstall: nothing disables dreamconnect-register@<uid> — the instance stays enabled and fails on every boot after the software is gone"
+
+  removed="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ && /dreamconnect-register@\.service/ && /rm|unlink/ { print NR; exit }' "$sh")"
+  [ -n "$removed" ] || \
+    fail "uninstall: the unit file /etc/systemd/system/dreamconnect-register@.service is never removed"
+}
+
+# register_label parsed HOST_ACCOUNT with its own sed (FIRST match) while the
+# rest of the codebase uses read_install_state (LAST match). A duplicated key
+# made them disagree, and the disagreement is not cosmetic: a human's session
+# gets labelled [Backstage], so the operator is told an attended session is the
+# unattended one. Asserted as AGREEMENT with the shipped reader, so any
+# implementation that agrees passes.
+test_register_label_agrees_with_the_state_reader_on_a_duplicated_key() {
+  local DC_STATE_FILE="$TMP/label-dup/install.state"
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
+  require_register_script "register_label duplicate key" || return 0
+  mkdir -p "$TMP/label-dup"
+  printf 'HOST_ACCOUNT=someone-else\nHOST_UID=1000\nHOST_ACCOUNT=dreamconnect-host\nCREATED_ACCOUNT=1\n' \
+    > "$DC_STATE_FILE"
+
+  read_install_state
+  assert_eq "$HOST_ACCOUNT" "dreamconnect-host" \
+    "precondition: the shipped state reader takes the LAST HOST_ACCOUNT"
+  assert_eq "$(register_label dreamconnect-host 2>/dev/null)" "[Backstage]" \
+    "register_label agrees with it: the account the reader reports is the backstage one"
+  assert_eq "$(register_label someone-else 2>/dev/null)" "someone-else" \
+    "and an account the reader does NOT report is not [Backstage] — labelling an attended session as the unattended one is what this prevents"
+}
+
+# A CRLF state file (edited on Windows, or written through a tool that adds
+# them) leaves HOST_ACCOUNT="dreamconnect-host\r". A parser that does not strip
+# it silently stops recognising the backstage account, and backstage loses its
+# name in the picker with nothing in any log.
+test_register_label_survives_a_crlf_state_file() {
+  local DC_STATE_FILE="$TMP/label-crlf/install.state"
+  require_register_script "register_label CRLF" || return 0
+  mkdir -p "$TMP/label-crlf"
+  printf 'HOST_ACCOUNT=dreamconnect-host\r\nHOST_UID=992\r\nCREATED_ACCOUNT=1\r\n' > "$DC_STATE_FILE"
+
+  assert_eq "$(register_label dreamconnect-host 2>/dev/null)" "[Backstage]" \
+    "a CRLF state file still names the backstage account"
+  assert_eq "$(register_label kogies 2>/dev/null)" "kogies" \
+    "and still names everyone else after themselves"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -6300,7 +7025,32 @@ for CURRENT in \
   test_remove_registry_entry_is_idempotent_and_leaves_others_alone \
   test_remove_registry_entry_refuses_a_uid_that_is_not_a_number \
   test_session_display_reads_the_published_display \
-  test_session_display_fails_when_there_is_no_usable_display
+  test_session_display_fails_when_there_is_no_usable_display \
+  test_session_cli_starts_the_daemon_with_display_and_label \
+  test_install_sh_starts_registration_after_its_session_is_running \
+  test_uninstall_removes_the_registry_with_the_run_directory \
+  test_register_script_is_sourceable_side_effect_free \
+  test_register_script_defines_its_functions \
+  test_register_script_can_call_the_registry_writers_at_runtime \
+  test_register_label_marks_the_backstage_account_and_names_everyone_else \
+  test_register_session_refuses_when_no_display_was_published \
+  test_register_session_refuses_when_the_install_state_names_no_account \
+  test_register_session_writes_an_entry_the_reader_accepts \
+  test_deregister_session_removes_that_entry_only \
+  test_daemon_unit_environment_file_needs_no_substitution \
+  test_register_unit_ties_the_entry_to_the_unit_lifetime \
+  test_every_unit_template_placeholder_is_substituted_by_its_own_render \
+  test_install_sh_enables_registration_for_its_account \
+  test_install_sh_no_longer_registers_inline_or_guesses_the_display \
+  test_session_cli_starts_registration_after_the_daemon \
+  test_session_cli_stops_registration_on_teardown \
+  test_session_cli_no_longer_writes_the_registry_itself \
+  test_register_script_and_the_daemon_agree_on_the_uid_scoped_paths \
+  test_install_sh_enables_registration_only_for_backstage \
+  test_classic_install_needs_no_registry_at_all \
+  test_uninstall_disables_and_removes_the_register_unit \
+  test_register_label_agrees_with_the_state_reader_on_a_duplicated_key \
+  test_register_label_survives_a_crlf_state_file
 do
   before=$FAILURES
   "$CURRENT"

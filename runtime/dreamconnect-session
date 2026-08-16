@@ -19,6 +19,9 @@ set -euo pipefail
 INSTALL_DIR="${INSTALL_DIR:-/opt/dreamconnect}"
 STATE_DIR="/run/dreamconnect"
 ACTIVE_FILE="$STATE_DIR/active"          # holds the active account name
+# Which sessions EXIST — /run/dreamconnect/sessions — is a different fact, and
+# not this script's to write: dreamconnect-register@<uid>.service owns those
+# entries, so that an entry's lifetime is a session's rather than a command's.
 RES="${DREAMCONNECT_BACKSTAGE_RES:-1280x720}"
 # Perf knobs carried onto whatever session is shown (see the encoder spike).
 FPS="${DREAMCONNECT_FPS:-60}"
@@ -47,6 +50,17 @@ if [ "${DC_RENDER_ONLY:-}" = "1" ]; then
   render_dropin "${1:?uid}" "${2:-}"
   exit 0
 fi
+
+# Sourced AFTER the render-only exit on purpose: those renders run straight from
+# a checkout, where the installed library does not exist, and a failed source
+# under `set -e` would take them down with it. The checkout path is the fallback
+# so this script also works from the repo.
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for _lib in "$INSTALL_DIR/install-lib.sh" "$_HERE/../install-lib.sh"; do
+  if [ -r "$_lib" ]; then . "$_lib"; break; fi
+done
+declare -F session_display >/dev/null \
+  || die "install-lib.sh not found (looked in $INSTALL_DIR and $_HERE/..); reinstall"
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
@@ -93,18 +107,38 @@ bring_up_user() {  # user
   run_user "$user" "$INSTALL_DIR/runtime/dreamconnect-backstage-env.sh" || \
     echo "!! display env publish failed for $user (SC may init headless)"
 
+  # The display exists only once the env above is published, so read it here
+  # rather than earlier: it is what the daemon reports itself as serving, and
+  # what the agent matches a ScreenConnect child against.
+  local display shm
+  display="$(session_display "/run/user/$uid/dreamconnect-display.env" || true)"
+  [ -n "$display" ] || echo "!! no display published for $user; the agent cannot match this session"
+  shm="/dev/shm/dreamconnect.frame.$uid"
+
   if ! run_user "$user" systemctl --user is-active dreamconnect-session-daemon.service >/dev/null 2>&1; then
     echo ">> starting capture daemon for $user"
     run_user "$user" systemd-run --user --unit=dreamconnect-session-daemon \
       --description="dreamconnect capture daemon for $user" \
       /usr/bin/python3 "$INSTALL_DIR/runtime/dreamconnect_daemon.py" \
-        --shm "/dev/shm/dreamconnect.frame.$uid" --virtual "$RES" >/dev/null
+        --shm "$shm" --virtual "$RES" --display "$display" --label "$user" >/dev/null
   fi
+
+  # Register last: an entry is a promise that this session can be attached to,
+  # so it must not exist before the daemon that serves it. The unit owns the
+  # entry's lifetime — its ExecStop is what removes it — so registration is
+  # started here rather than written here.
+  echo ">> registering $user's session"
+  systemctl restart "dreamconnect-register@$uid.service" \
+    || echo "!! could not register $user's session; the agent will not offer it"
 }
 
 tear_down_user() {  # user
   local user="$1" uid; uid="$(uid_of "$user")"
   echo ">> tearing down $user's session"
+  # Deregister FIRST: an entry outliving its daemon is a promise we can no
+  # longer keep, and the agent would refuse that display rather than fall back.
+  # Stopping the unit is what removes it (ExecStop).
+  systemctl stop "dreamconnect-register@$uid.service" 2>/dev/null || true
   run_user "$user" systemctl --user stop dreamconnect-session-daemon.service 2>/dev/null || true
   run_user "$user" systemctl --user stop dreamconnect-session-shell.service 2>/dev/null || true
   run_user "$user" systemctl --user reset-failed dreamconnect-session-daemon.service dreamconnect-session-shell.service 2>/dev/null || true

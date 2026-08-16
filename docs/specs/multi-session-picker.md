@@ -34,10 +34,30 @@ the hard part for us:
 So no live re-attach, no pointer-follow: the agent needs only
 
 1. **Discovery — a root-owned registry, not a filesystem scan.**
-   `/run/dreamconnect/sessions/<uid>` is written by root (the same root that
-   starts sessions: `dreamconnect-session`, and the installer for backstage) and
-   names, per session: `uid`, `user`, `display`, `shm`, `socket`, `label`. The
-   agent reads only this. Two levels of trust, deliberately different:
+   `/run/dreamconnect/sessions/<uid>` names, per session: `uid`, `user`,
+   `display`, `shm`, `socket`, `label`. The agent reads only this.
+
+   **One writer, and it is a unit rather than a command** (revised 2026-08-16
+   after review): `dreamconnect-register@<uid>.service`, root, `ExecStart`
+   registering and `ExecStop` deregistering with `RemainAfterExit=yes`, and
+   `BindsTo=user@%i.service` so the entry dies with the session. The installer
+   enables an instance for a backstage account and `dreamconnect-session`
+   starts and stops one per on-demand session; neither writes an entry itself.
+
+   The lifetime is the point. `/run` is tmpfs, so an entry written at install
+   time is gone after a reboot — and a backstage session that is running but
+   unregistered gets *refused* rather than shown, because the agent will not
+   fall back onto a display the registry has given to somebody else. Equally,
+   an entry that outlives its session collides with whatever later session
+   reclaims that display number, and both are then refused. Registration is
+   therefore a property of a session being up, held by something that stops
+   when the session does.
+
+   A classic (attended) install registers nothing: it has no display publisher
+   and only one session, so an absent registry correctly leaves the agent on
+   the configured shm/socket — what it did before any of this existed.
+
+   Two levels of trust, deliberately different:
    - **The directory.** If `/run/dreamconnect/sessions` is not root-owned, or is
      writable by group or other, there is *no registry at all* — every entry is
      ignored and the agent falls back to today's single-session behaviour.
@@ -94,9 +114,10 @@ So no live re-attach, no pointer-follow: the agent needs only
    non-empty:**
    - the registry names no session for this display → **fall back** to the
      static args, *unless the fallback is known to be wrong* (below). The
-     registry does not claim to be complete: while #53 is unwritten, or for any
-     session root has not registered, the operator's own configuration is still
-     the best statement of intent. Without this rule the first registered user
+     registry does not claim to be complete: a classic install registers
+     nothing, and any session root has not registered is likewise undescribed,
+     so there the operator's own configuration is still the best statement of
+     intent. Without this rule the first registered user
      session blacks out backstage, which was demonstrated live.
    - **known-wrong fallback → refuse.** If a registry entry claims the
      fallback's own `shm` *or* `socket` for some *other* display, falling back

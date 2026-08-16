@@ -1,0 +1,30 @@
+[Unit]
+Description=dreamconnect: publish session %i to the agent's session registry
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# %i is the uid. /run/user/%i and the display env published inside it do not
+# exist before that account's manager is up, so order against it. The register
+# script waits for the display itself, which covers the gap between the manager
+# starting and the session's Xwayland actually publishing one.
+After=user@%i.service
+# BindsTo, not Wants: the entry promises that session can be attached to, so it
+# must die WITH the session. Wants/After propagate a start, never a stop — a
+# session ended by `loginctl terminate-user`, a crashed shell, or the manager
+# failing would otherwise leave the entry behind, and a later session reclaiming
+# that display number would then be refused as a duplicate claim. BindsTo also
+# covers the manager failing, not just stopping.
+BindsTo=user@%i.service
+
+[Service]
+Type=oneshot
+# RemainAfterExit is load-bearing, not tidiness: without it the oneshot goes
+# inactive the moment ExecStart returns and ExecStop never runs, so the entry
+# would outlive the session and the agent would refuse that display instead of
+# falling back.
+RemainAfterExit=yes
+ExecStart=@INSTALL_DIR@/runtime/dreamconnect-register.sh register %i
+ExecStop=@INSTALL_DIR@/runtime/dreamconnect-register.sh deregister %i
+
+[Install]
+# Enabled per account so a reboot re-registers: an entry lives in /run, which
+# does not survive one.
+WantedBy=multi-user.target

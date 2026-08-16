@@ -141,6 +141,15 @@ uninstall() {
     [ -L "/usr/local/bin/$t" ] && rm -f "/usr/local/bin/$t"
   done
   rm -f /usr/local/bin/.dc-xprobe-wrapper
+  # The register instance and its unit. $INSTALL_DIR is deliberately left in
+  # place by this uninstall, so an enabled instance would keep finding its
+  # ExecStart and keep failing on every boot. Stopping it also removes that
+  # account's registry entry, via the unit's own ExecStop.
+  if [ -n "$target_uid" ]; then
+    systemctl disable --now "dreamconnect-register@$target_uid.service" 2>/dev/null || true
+  fi
+  rm -f /etc/systemd/system/dreamconnect-register@.service
+  systemctl daemon-reload 2>/dev/null || true
   # Undo the linger install always enables — previously never reverted here,
   # a pre-existing gap (see ROADMAP.md H6).
   loginctl disable-linger "$target_name" 2>/dev/null || true
@@ -399,6 +408,11 @@ install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-backstage-env.sh" "$
 # backstage mode — it repoints SC between the backstage account and a user's
 # session — so it is deployed and put on PATH only there.
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-session" "$INSTALL_DIR/runtime/"
+# dreamconnect-session sources this for the registry writers, so it has to be
+# on the box, not just in a checkout.
+install -o root -g root -m 0644 "$HERE/install-lib.sh" "$INSTALL_DIR/install-lib.sh"
+# Driven by dreamconnect-register@.service; also runnable by hand for a one-off.
+install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-register.sh" "$INSTALL_DIR/runtime/"
 if [ "$BACKSTAGE" -eq 1 ]; then
   ln -sf "$INSTALL_DIR/runtime/dreamconnect-session" /usr/local/bin/dreamconnect-session
 fi
@@ -423,11 +437,20 @@ for t in xdpyinfo xrandr xwininfo xrdb xdotool; do ln -sf .dc-xprobe-wrapper "/u
 # backstage daemon must depend on the shell unit itself.
 if [ "$BACKSTAGE" -eq 1 ]; then
   SESSION_UNIT="dreamconnect-backstage.service"
-  DAEMON_ARGS="--virtual $BACKSTAGE_RES"
+  # --display reads ${DISPLAY} from the unit's EnvironmentFile, written by the
+  # publisher once the headless shell's Xwayland is up: a backstage display
+  # number is not knowable at install time. Without it the daemon answers
+  # UNKNOWN and the agent cannot match this session to a picker entry.
+  DAEMON_ARGS="--virtual $BACKSTAGE_RES --display \${DISPLAY} --label '[Backstage]'"
 else
   SESSION_UNIT="graphical-session.target"
   DAEMON_ARGS="--monitor $MONITOR"
 fi
+
+# Which sessions EXIST — /run/dreamconnect/sessions — is written only by
+# dreamconnect-register@<uid>.service, so that an entry's lifetime is a
+# session's. It is a different fact from /run/dreamconnect/active, which records
+# only which account the client is currently pointed at.
 
 # The frame is scoped by uid: /dev/shm is sticky, so a frame left behind by an
 # install under a different account cannot be unlinked by this one — every write
@@ -447,6 +470,14 @@ sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
     "$HERE/systemd/dreamconnect-daemon.service" \
     > "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
 chown "$USER_NAME:" "$USER_HOME/.config/systemd/user/dreamconnect-daemon.service"
+
+# The registration unit is a SYSTEM unit: the registry it writes must be
+# root-owned, or the agent ignores it wholesale.
+echo ">> installing session registration unit"
+sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+    "$HERE/systemd/dreamconnect-register@.service" \
+    > /etc/systemd/system/dreamconnect-register@.service
+systemctl daemon-reload
 
 if [ "$BACKSTAGE" -eq 1 ]; then
   echo ">> installing backstage session unit (headless gnome-shell, ${BACKSTAGE_RES})"
@@ -475,6 +506,27 @@ if [ "$BACKSTAGE" -eq 1 ]; then
 else
   "${RUN_USER[@]}" systemctl --user enable dreamconnect-daemon.service
   "${RUN_USER[@]}" systemctl --user restart dreamconnect-daemon.service
+fi
+
+# --- register this session ---------------------------------------------------
+# The agent only considers sessions root has registered, so an unregistered
+# session never appears in the picker. Registration is a unit rather than a step
+# here because /run is tmpfs: an entry written now is gone after a reboot, and a
+# backstage session that is up but unregistered gets REFUSED rather than shown.
+# Enabling it re-registers on every boot; starting it registers this one now.
+# The unit waits for the display the session publishes, so it does not matter
+# that Xwayland may not have picked a number yet.
+#
+# Backstage only. A classic install has no display publisher, so registration
+# could never succeed there — it would burn the wait, fail, and fail again on
+# every boot. It is also unnecessary: a classic box has one session, so an
+# absent registry means the agent uses the configured shm/socket, which is
+# exactly what it did before any of this existed.
+if [ "$BACKSTAGE" -eq 1 ]; then
+  echo ">> enabling session registration for $USER_NAME (uid $USER_UID)"
+  systemctl enable "dreamconnect-register@$USER_UID.service"
+  systemctl restart "dreamconnect-register@$USER_UID.service" \
+    || echo "!! registration failed; ScreenConnect will not offer this session yet"
 fi
 
 # --- ScreenConnect drop-in --------------------------------------------------
