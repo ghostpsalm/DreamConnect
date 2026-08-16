@@ -649,15 +649,37 @@ class Session:
         log(f"pasted {len(text)} chars via clipboard (contained non-keymappable chars)")
 
 
+def _unset_if_blank(value):
+    """A blank string is an absent value, not a value. Shared by the display
+    and label paths so both treat a unit's unexpanded variable the same way."""
+    return value.strip() if value and value.strip() else None
+
+
+def resolve_display(arg, env):
+    """The X display this daemon's session owns, or None if we can't tell.
+
+    The --display arg wins: backstage units know their display and pass it in,
+    and the shell they start from may carry a $DISPLAY of its own. A classic
+    daemon under graphical-session.target has no arg and inherits $DISPLAY.
+
+    Blank is unset, not a display: a systemd unit expanding a variable that was
+    never set ships a blank argument, and whitespace must never reach the
+    agent's picker as if it named a session.
+    """
+    return _unset_if_blank(arg) or _unset_if_blank(env.get("DISPLAY")) or None
+
+
 class ControlServer(threading.Thread):
     """Line-based Unix socket protocol. See handle() for the grammar."""
 
     daemon = True
 
-    def __init__(self, sock_path, session):
+    def __init__(self, sock_path, session, display=None, label=None):
         super().__init__()
         self.sock_path = sock_path
         self.session = session
+        self.display = display
+        self.label = label
 
     def run(self):
         if os.path.exists(self.sock_path):
@@ -732,11 +754,18 @@ class ControlServer(threading.Thread):
         if cmd == "NODE":
             return str(s.node_id)
         if cmd == "WHO":
-            # The desktop user's login name. The daemon runs as that user; the
-            # agent (root, inside ScreenConnect's JVM) can't derive it, so it
-            # asks us — it uses this to relabel the ":0" logon session in the
-            # operator's session picker with a friendlier name.
-            return getpass.getuser()
+            # The picker entry for this session. Defaults to the desktop user's
+            # login name: the daemon runs as that user; the agent (root, inside
+            # ScreenConnect's JVM) can't derive it, so it asks us — it uses this
+            # to relabel the logon session in the operator's session picker with
+            # a friendlier name. --label overrides it verbatim (backstage);
+            # a blank label is unset, so the login name still answers.
+            return _unset_if_blank(self.label) or getpass.getuser()
+        if cmd == "DISPLAY":
+            # Which X display this session owns, so the agent can match a picker
+            # entry to the right daemon instead of assuming the JVM's $DISPLAY.
+            # A blank display is UNKNOWN, never whitespace on the wire.
+            return _unset_if_blank(self.display) or "UNKNOWN"
         return f"ERR unknown cmd {cmd}"
 
 
@@ -759,6 +788,8 @@ def main():
                          "so this only fires on a real stall, not an idle screen.")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
     ap.add_argument("--socket", default=os.path.join(runtime_dir, "dreamconnect.sock"))
+    ap.add_argument("--display", help="X display this session owns (default: $DISPLAY)")
+    ap.add_argument("--label", help="picker entry name (default: the login name)")
     args = ap.parse_args()
 
     virtual = None
@@ -774,7 +805,9 @@ def main():
     session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
                       virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
     session.start()
-    ControlServer(args.socket, session).start()
+    ControlServer(args.socket, session,
+                  display=resolve_display(args.display, os.environ),
+                  label=args.label).start()
 
     # Poll for a stalled capture pipeline a few times per timeout window. Disabled
     # when the timeout is 0.

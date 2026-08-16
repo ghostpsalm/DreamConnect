@@ -55,6 +55,7 @@ returned, which keeps the reply stream aligned with control commands only.
 | `PING` | liveness | `PONG` |
 | `GEOM` | stream size | `<w> <h>` |
 | `NODE` | PipeWire node id | `<id>` |
+| `DISPLAY` | the X display this session owns, so the agent can match a picker entry to the right daemon | `<display>` or `UNKNOWN` |
 | `M <x> <y>` | pointer absolute move (screen px) | — |
 | `B <evdev_button> <state>` | pointer button (state 1/0) | — |
 | `W <axis> <steps>` | wheel (axis 0=vert 1=horiz) | — |
@@ -72,7 +73,7 @@ agent does the AWT→evdev translation (see `../keymap/`) before sending.
 
 ```sh
 python3 dreamconnect_daemon.py --monitor HDMI-2
-# options: --shm PATH  --socket PATH
+# options: --shm PATH  --socket PATH  --display :0  --label '[Backstage]'
 ```
 Requires `python3-gobject`, `gstreamer1-plugin-pipewire`, a running Wayland
 GNOME session, and a capture source (a real or dummy-plug monitor).

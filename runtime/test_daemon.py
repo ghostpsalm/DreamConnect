@@ -7,6 +7,7 @@ and the virtual-mode tests only exercise pure string/argument construction.
 Run: python3 -m unittest runtime.test_daemon   (or: python3 runtime/test_daemon.py)
 """
 import os
+import pwd
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dreamconnect_daemon as d  # noqa: E402
+
+SOCK = "/tmp/dreamconnect-test-unused.sock"  # never bound: we only call handle()
 
 
 class StubSession:
@@ -81,6 +84,122 @@ class TestHandle(unittest.TestCase):
         self.assertEqual(self.s.calls, [])              # nothing dispatched
         # the next control command still replies correctly
         self.assertEqual(self.cs.handle("PING"), "PONG")
+
+    def test_existing_commands_unchanged_when_display_and_label_are_set(self):
+        # Issue #50: "Existing commands (PING, GEOM, NODE, WHO, input) unchanged."
+        cs = d.ControlServer(SOCK, self.s, display=":0", label="[Backstage]")
+        self.assertEqual(cs.handle("PING"), "PONG")
+        self.assertEqual(cs.handle("GEOM"), "1920 1080")
+        self.assertEqual(cs.handle("NODE"), "66")
+        self.assertIsNone(cs.handle("M 100 200"))
+        self.assertEqual(self.s.calls[-1], ("M", 100.0, 200.0))
+        self.assertTrue(cs.handle("BOGUS").startswith("ERR"))
+
+
+class TestDisplayCommand(unittest.TestCase):
+    """Issue #50: 'New control-socket command DISPLAY replies the daemon's
+    session X display (e.g. :0), or UNKNOWN when the daemon could not learn it.'
+    """
+
+    def setUp(self):
+        self.s = StubSession()
+
+    def test_display_replies_the_session_x_display(self):
+        cs = d.ControlServer(SOCK, self.s, display=":0")
+        self.assertEqual(cs.handle("DISPLAY"), ":0")
+
+    def test_display_replies_unknown_when_the_daemon_could_not_learn_it(self):
+        cs = d.ControlServer(SOCK, self.s)
+        self.assertEqual(cs.handle("DISPLAY"), "UNKNOWN")
+
+
+class TestDisplayResolutionOrder(unittest.TestCase):
+    """Issue #50: '--display arg wins, else $DISPLAY env, else unknown.'
+
+    Asserted through the protocol reply (the observable seam), so the internal
+    representation of "unknown" is the builder's choice. main() is expected to
+    wire these together as ControlServer(..., display=resolve_display(args.display,
+    os.environ)); the env is passed in explicitly here to keep the test pure.
+    """
+
+    def setUp(self):
+        self.s = StubSession()
+
+    def _display_reply(self, arg, env):
+        return d.ControlServer(SOCK, self.s, display=d.resolve_display(arg, env)).handle("DISPLAY")
+
+    def test_display_arg_wins_over_env(self):
+        # backstage units pass --display (slice 4) into a shell that may also
+        # carry a $DISPLAY of its own; the arg is authoritative.
+        self.assertEqual(self._display_reply(":1", {"DISPLAY": ":0"}), ":1")
+
+    def test_env_display_used_when_no_arg(self):
+        # a classic daemon under graphical-session.target inherits $DISPLAY.
+        self.assertEqual(self._display_reply(None, {"DISPLAY": ":0"}), ":0")
+
+    def test_unknown_when_neither_arg_nor_env(self):
+        self.assertEqual(self._display_reply(None, {}), "UNKNOWN")
+
+
+class TestWhoLabel(unittest.TestCase):
+    """Issue #50: 'New --label arg: when set, WHO replies it verbatim (backstage
+    answers [Backstage]); when unset, WHO behaviour is unchanged (login name).'
+    """
+
+    def setUp(self):
+        self.s = StubSession()
+
+    def test_who_replies_the_label_verbatim(self):
+        cs = d.ControlServer(SOCK, self.s, label="[Backstage]")
+        self.assertEqual(cs.handle("WHO"), "[Backstage]")
+
+    def test_who_is_the_login_name_when_no_label(self):
+        # "login name" read from the passwd database, independently of however
+        # the daemon derives it.
+        cs = d.ControlServer(SOCK, self.s)
+        self.assertEqual(cs.handle("WHO"), pwd.getpwuid(os.getuid()).pw_name)
+
+
+BLANKS = ("", " ", "   ", "\t", " \t ", "\n")
+
+
+class TestBlankArgsAreUnset(unittest.TestCase):
+    """Owner rider on pd-066f33ba1c55 (factory/decision-consumption), verbatim:
+    'empty/whitespace --display or --label is treated as unset (UNKNOWN /
+    login name)'.
+
+    A systemd unit that expands an unset variable ships a blank argument, so
+    blank must not reach the agent's picker as a display or an entry name.
+    """
+
+    def setUp(self):
+        self.s = StubSession()
+
+    def test_blank_display_arg_is_unset_so_env_is_used(self):
+        for arg in BLANKS:
+            with self.subTest(arg=repr(arg)):
+                self.assertEqual(d.resolve_display(arg, {"DISPLAY": ":0"}), ":0")
+
+    def test_blank_display_arg_with_no_env_resolves_to_unknown(self):
+        for arg in BLANKS:
+            with self.subTest(arg=repr(arg)):
+                self.assertIsNone(d.resolve_display(arg, {}))
+                cs = d.ControlServer(SOCK, self.s, display=d.resolve_display(arg, {}))
+                self.assertEqual(cs.handle("DISPLAY"), "UNKNOWN")
+
+    def test_display_command_reports_unknown_for_a_blank_display(self):
+        # Defence in depth at the protocol seam itself: whatever route put a
+        # blank there, the agent is told UNKNOWN, never whitespace.
+        for blank in BLANKS:
+            with self.subTest(display=repr(blank)):
+                cs = d.ControlServer(SOCK, self.s, display=blank)
+                self.assertEqual(cs.handle("DISPLAY"), "UNKNOWN")
+
+    def test_who_falls_back_to_the_login_name_for_a_blank_label(self):
+        for blank in BLANKS:
+            with self.subTest(label=repr(blank)):
+                cs = d.ControlServer(SOCK, self.s, label=blank)
+                self.assertEqual(cs.handle("WHO"), pwd.getpwuid(os.getuid()).pw_name)
 
 
 class TestFrameBufferReclaim(unittest.TestCase):
