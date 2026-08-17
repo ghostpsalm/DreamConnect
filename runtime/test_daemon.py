@@ -386,5 +386,221 @@ class TestPipelineDescription(unittest.TestCase):
         self.assertIsNone(self._session().virtual)
 
 
+class _Unpackable:
+    """Stands in for a GLib.Variant reply: the daemon only ever does
+    `.unpack()[0]` on what call_sync returns."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def unpack(self):
+        return (self._value,)
+
+
+class FakeBus:
+    """Records every D-Bus call the session makes and answers plausibly.
+
+    Every Mutter interaction in Session goes through bus.call_sync, so this is
+    the whole seam: no Mutter, no GLib main loop, no PipeWire. Method names are
+    what the assertions read; the paths it hands back are unique per call so a
+    test can tell one session from its replacement.
+    """
+
+    def __init__(self, fail_on=(), fail_nth_create=None):
+        self.calls = []             # (path, iface, method)
+        self.unsubscribed = []
+        self.fail_on = set(fail_on)
+        self.fail_nth_create = fail_nth_create
+        self._creates = 0
+        self._n = 0
+
+    def call_sync(self, dest, path, iface, method, args, reply_type, flags,
+                  timeout, cancellable):
+        self.calls.append((path, iface, method))
+        self._n += 1
+        if method in self.fail_on:
+            raise RuntimeError("fake bus: %s refused (session already gone)" % method)
+        if method == "CreateSession":
+            if iface == d.RD_IFACE:
+                self._creates += 1
+                if self._creates == self.fail_nth_create:
+                    raise RuntimeError("fake bus: CreateSession #%d failed" % self._creates)
+                return _Unpackable("/rd/session/u%d" % self._creates)
+            return _Unpackable("/sc/session/u%d" % self._n)
+        if method == "Get":
+            return _Unpackable("sess-id-%d" % self._n)
+        if method in ("RecordVirtual", "RecordMonitor", "RecordArea"):
+            return _Unpackable("/stream/u%d" % self._n)
+        return _Unpackable(None)
+
+    def signal_subscribe(self, *a, **kw):
+        self._n += 1
+        return self._n
+
+    def signal_unsubscribe(self, sid):
+        self.unsubscribed.append(sid)
+
+    # --- readers the tests use ------------------------------------------
+    def methods(self):
+        return [c[2] for c in self.calls]
+
+    def stops(self):
+        return [c[0] for c in self.calls if c[2] == "Stop"]
+
+
+class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
+    """Issue #55, reported from a live backstage session: "two displays, one of
+    them black", no top bar, no apps.
+
+    Diagnosed live: the backstage X screen had grown to 2560x720 — TWO 1280x720
+    virtual monitors side by side — and the journal showed `Added virtual
+    monitor` 25 times. Every start() calls RecordVirtual, which makes Mutter
+    conjure a monitor, and the previous RemoteDesktop session is never stopped,
+    so each restart leaves its monitor behind. We capture one of them;
+    ScreenConnect sizes its canvas from the whole X screen, so the operator gets
+    a black half. Worse, GNOME puts the top bar on the PRIMARY monitor — the one
+    we are not capturing — so a healthy desktop looks broken.
+
+    _recover() fires on a Mutter session close, a GStreamer error/EOS, or the
+    stall watchdog, so this is the ordinary path, not an edge case.
+
+    What is pinned here is the property, not the mechanism: before a replacement
+    session is created, the previous one is Stopped, and the identifiers are
+    cleared so nothing can later aim a Stop at a dead session. Whether that
+    lives in start() or in a teardown helper is the implementer's choice.
+    """
+
+    def _session(self, bus):
+        # Backstage/virtual: the path that conjures a monitor, and the one the
+        # operator was on. It returns from start() right after subscribing, so
+        # no GStreamer or PipeWire is involved.
+        return d.Session(bus, None, None, virtual=(1280, 720))
+
+    def test_first_start_stops_nothing(self):
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        self.assertEqual(bus.stops(), [],
+                         "a first start has no previous session to stop")
+        self.assertEqual(s.rd_path, "/rd/session/u1")
+        self.assertIn("RecordVirtual", bus.methods())
+
+    def test_second_start_stops_the_previous_remote_desktop_session(self):
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        first_rd = s.rd_path
+        s.start()
+        self.assertEqual(bus.stops(), [first_rd],
+                         "the replacement session stops exactly the previous "
+                         "RemoteDesktop session (%s), which is what releases its "
+                         "virtual monitor" % first_rd)
+        self.assertNotEqual(s.rd_path, first_rd, "and a new session replaces it")
+
+    def test_the_stop_comes_before_the_replacement_is_created(self):
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        s.start()
+        methods = bus.methods()
+        self.assertIn("Stop", methods,
+                      "the replacement start issues no Stop at all, so there is no "
+                      "ordering to check: %s" % methods)
+        stop_at = methods.index("Stop")
+        creates = [i for i, m in enumerate(methods) if m == "CreateSession"]
+        self.assertGreater(len(creates), 2, "two starts create at least two sessions")
+        self.assertLess(stop_at, creates[2],
+                        "the old session is stopped BEFORE the new one is created: "
+                        "stopping afterwards would still leave both monitors present "
+                        "for the moment Mutter sizes the screen (order was %s)" % methods)
+
+    def test_a_failing_stop_does_not_prevent_the_new_session(self):
+        # The commonest restart trigger IS a Mutter-closed session, where Stop
+        # legitimately fails. Refusing to recover from that would be worse than
+        # the leak this fixes.
+        bus = FakeBus(fail_on=("Stop",))
+        s = self._session(bus)
+        s.start()
+        s.start()
+        self.assertEqual(s.rd_path, "/rd/session/u2",
+                         "a Stop that raises is tolerated and the replacement is "
+                         "still established")
+        methods = bus.methods()
+        self.assertIn("Stop", methods,
+                      "the replacement start issues no Stop at all: %s" % methods)
+        self.assertIn("RecordVirtual", methods[methods.index("Stop"):],
+                      "including the RecordVirtual that gives the operator a picture")
+
+    def test_the_restart_path_goes_through_the_same_teardown(self):
+        # _recover() -> (1s timer) -> _restart() -> start(). The timer is the
+        # only part not exercised here; scheduling it is asserted separately.
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        first_rd = s.rd_path
+        s._restart()
+        self.assertEqual(bus.stops(), [first_rd],
+                         "the route that actually causes this in production — a "
+                         "Mutter close, a GStreamer error, or the stall watchdog — "
+                         "goes through the teardown, so the fix cannot be bypassed")
+        self.assertFalse(s._restarting, "and a successful restart clears the guard")
+
+    def test_recover_schedules_the_restart_that_does_the_teardown(self):
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        scheduled = []
+        real_timeout = d.GLib.timeout_add_seconds
+        d.GLib.timeout_add_seconds = lambda secs, fn, *a: scheduled.append((secs, fn)) or 1
+        try:
+            s._recover()
+        finally:
+            d.GLib.timeout_add_seconds = real_timeout
+        self.assertEqual([fn for _, fn in scheduled], [s._restart],
+                         "_recover schedules _restart, which is where the teardown "
+                         "must live for a Mutter close to release its monitor")
+
+    def test_n_restarts_produce_n_stops(self):
+        # The property the operator actually cares about: the journal showed
+        # `Added virtual monitor` 25 times and the X screen was 2560 wide. One
+        # stop per restart is what keeps that at one monitor.
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        expected = []
+        for _ in range(5):
+            expected.append(s.rd_path)
+            s._restart()
+        self.assertEqual(bus.stops(), expected,
+                         "five restarts stop five sessions, each the one it replaced "
+                         "— anything less accumulates virtual monitors")
+        self.assertEqual(bus.methods().count("RecordVirtual"), 6,
+                         "six RecordVirtual calls, five of them replacing a stopped "
+                         "session rather than adding to it")
+
+    def test_a_failed_restart_leaves_no_stale_session_to_stop(self):
+        # If creating the replacement fails, the identifiers must not still name
+        # the session we just stopped: a later Stop would then be aimed at a dead
+        # path, and (worse) a later start would believe it had a session.
+        bus = FakeBus(fail_nth_create=2)
+        s = self._session(bus)
+        s.start()
+        stopped = s.rd_path
+        with self.assertRaises(Exception):
+            s.start()
+        self.assertIsNone(s.rd_path,
+                          "rd_path is cleared by the teardown, not left naming the "
+                          "session that was just stopped")
+        self.assertIsNone(s.stream_path, "and so is the stream")
+        self.assertIsNone(s.node_id, "and the PipeWire node id")
+
+        bus.calls.clear()
+        s.start()
+        self.assertEqual(bus.stops(), [],
+                         "so the next start stops nothing — there is no session to "
+                         "stop, and aiming a Stop at %s would be aiming at a corpse"
+                         % stopped)
+
+
 if __name__ == "__main__":
     unittest.main()

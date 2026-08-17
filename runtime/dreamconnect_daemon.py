@@ -403,6 +403,28 @@ class Session:
                 pass
         self._sub_ids = []
 
+        # Stop the session this daemon already holds before creating its
+        # replacement. Mutter conjures a virtual monitor per RecordVirtual
+        # session and drops it only when that session ends, so skipping this
+        # leaks one monitor per restart: the X screen grows, gnome-shell puts
+        # its top bar on a monitor we do not capture, and the operator sees a
+        # black half-screen next to a desktop with no top bar. Observed live
+        # after 25 restarts — a 2560x720 screen for a 1280x720 session (#55).
+        #
+        # Failure is tolerated on purpose: the commonest reason we are here is
+        # that Mutter already closed the session, and refusing to recover from
+        # that would trade a leaked monitor for a dead bridge. The identifiers
+        # are cleared either way, so a later stop can never aim at a corpse.
+        if self.rd_path:
+            try:
+                self._rd("Stop")
+            except Exception as e:  # noqa: BLE001
+                log(f"previous session would not stop ({e}); continuing")
+            self.rd_path = None
+            self.sc_path = None
+            self.stream_path = None
+            self.node_id = None
+
         self.rd_path = self.bus.call_sync(
             RD_DEST, RD_PATH, RD_IFACE, "CreateSession", None, None,
             Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
