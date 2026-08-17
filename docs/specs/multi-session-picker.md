@@ -92,11 +92,37 @@ So no live re-attach, no pointer-follow: the agent needs only
    The `shm` file is additionally required to be a regular file (not a symlink)
    owned by the entry's `uid`, since a stale registry entry could otherwise be
    met by a frame planted after the real daemon died.
-2. **Curation, multi-daemon** — keep every picker entry backed by a live
-   daemon, relabelled with that daemon's name; drop unbacked entries (greeter);
-   order the backstage/default entry first so SC's auto-pick lands on it.
-   Fallback when discovery finds nothing: today's single-session behaviour from
-   the static args.
+2. **Curation, multi-daemon** — the picker offers exactly what a child could
+   attach to. An entry is kept when `resolveEndpoint(display, registered, live,
+   null)` returns an endpoint, and is named from *that* endpoint; anything else
+   is dropped. Curation asks the resolver rather than re-deriving its rules, so
+   what is offered and what a selection attaches to cannot drift apart — they
+   did drift once, and the picker offered a session that resolved to black.
+
+   Note this is stricter than "backed by a live daemon": a display two
+   *registered* entries claim is dropped even if one of them is live, because
+   resolution refuses an ambiguous claim; and a display the registry never
+   names is dropped too, even though per-child resolution would have served it
+   from the static args.
+
+   Dropped entries go because they **cannot work**, not because they mislead.
+   Before per-child resolution, selecting a foreign entry showed this session's
+   frame under another name; now it refuses and the operator gets black. The
+   GDM greeter's `:1024` is the everyday case.
+
+   **The configured display is the exception, and is kept even when nothing
+   serves it** — ordered first, since ScreenConnect auto-picks the first entry.
+   Dropping it would silently auto-pick whatever else survived, which on a box
+   with an attended session means landing the operator in a human's desktop
+   while backstage restarts. Black, named as the session you asked for, is the
+   better answer.
+
+   Ordering keys on the **configured display** — the agent's own `DISPLAY`,
+   what the drop-in aims ScreenConnect at — rather than on the backstage label,
+   so it also holds on a classic install where no backstage session exists.
+
+   Fallback when the registry describes nothing: today's single-session
+   behaviour from the static args.
 3. **Per-child endpoint resolution** — at `wrapPeer` time, map the child's own
    `DISPLAY` to that daemon's `(shm, socket)` and attach frames *and* input
    there. The static `shm=`/`socket=` args are the fallback only when there is
@@ -175,8 +201,10 @@ stalls thereafter.
    the person at the machine.
 3. As an operator, I want switching back to `[Backstage]` to return me to the
    admin desktop, so that one connection serves both purposes.
-4. As an operator, I want sessions with no daemon behind them (the GDM greeter)
-   hidden, so that the picker never offers a session that cannot work.
+4. As an operator, I want sessions nothing can serve (the GDM greeter) hidden,
+   so that the picker only offers sessions that can work — with one exception:
+   the configured session stays listed even while its daemon is down, so that
+   auto-pick cannot quietly move me into somebody else's desktop instead.
 5. As an installer/maintainer, I want a box with only the backstage daemon to
    behave exactly as today, so that existing installs are unaffected until a
    second daemon exists.
@@ -185,9 +213,14 @@ stalls thereafter.
 
 - **`Bridge` pure cores** (`agent/test/dreamconnect/boot/BootTests.java`,
   existing seam):
-  - multi-daemon curation — given a probe array and a `display → label` map:
-    backed entries kept and relabelled, unbacked dropped, default-first
-    ordering, empty-map fallback to today's single-display behaviour.
+  - multi-daemon curation — given a probe array, the configured display and
+    label, and the registered and live session lists: entries kept exactly when
+    the resolver accepts them and named from the endpoint it returns, unbacked
+    dropped, the configured entry kept and ordered first even when dead,
+    duplicate displays collapsed, and an empty registry falling back to today's
+    single-display behaviour. The offered-equals-resolvable equivalence is
+    asserted display-by-display against the shipped resolver, so the two cannot
+    drift apart again.
   - endpoint resolution — given a child `DISPLAY` and the registry's entries:
     correct endpoint chosen; fallback to the static args only when there is
     nothing to resolve; refusal (attach nothing) on no-match or ambiguity.

@@ -315,8 +315,33 @@ public final class Bridge {
      * a file there, so a bad one is a writer's bug, and letting it disable every
      * other session would be the worse failure.
      */
+    /** Counts real registry reads, so a test can prove discovery did NOT happen. */
+    private static final java.util.concurrent.atomic.AtomicLong registryReads =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /**
+     * Counts logonLabel() calls, so a test can assert that input the curator
+     * will not touch does not even compute a label — which costs a round trip
+     * to the daemon. Unlike registryReadCount this moves whether or not
+     * resolution has already run, so the assertion does not depend on which
+     * other tests ran first.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong logonLabelCalls =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    static long logonLabelCount() { return logonLabelCalls.get(); }
+
+    static long registryReadCount() { return registryReads.get(); }
+
+    /** True when an array holds at least one entry worth curating. */
+    private static boolean hasAnyEntry(Object[] arr) {
+        for (Object e : arr) if (e != null) return true;
+        return false;
+    }
+
     static java.util.List<SessionEndpoint> readRegistry(java.nio.file.Path dir,
                                                         long requiredOwnerUid) {
+        registryReads.incrementAndGet();
         java.util.List<SessionEndpoint> found = new java.util.ArrayList<>();
         if (!trustedFile(dir, requiredOwnerUid)) {
             return found;
@@ -507,6 +532,7 @@ public final class Bridge {
     // precedence in testRegistryLabelWinsOverWho. Visibility only; no logic
     // was changed by the test author.
     static String logonLabel() {
+        logonLabelCalls.incrementAndGet();
         String o = labelOverride;
         if (o != null && !o.isEmpty()) return o;   // the operator's own label= wins
         try {
@@ -543,7 +569,35 @@ public final class Bridge {
      * Best-effort; never throws into SC.
      */
     public static Object curateLogonSessions(Object ret) {
-        return curateLogonSessions(ret, System.getenv("DISPLAY"), logonLabel());
+        // Work ONLY for input curation can actually act on. Reading the registry
+        // opens a socket per registered session, and this runs on
+        // ScreenConnect's logon-probe path — the message thread that also
+        // carries input, and that a hostile session's unanswered socket can
+        // stall for two seconds apiece. Asking the daemon for a label costs a
+        // round trip of its own.
+        //
+        // An empty or all-null array matters more than it looks: results are
+        // cached only when non-empty, so the logonttl cache never arms on that
+        // path and the cost would repeat on every probe rather than every 30s.
+        // ScreenConnect returns exactly that while a session is restarting.
+        if (ret == null) return ret;
+        if (ret.getClass().isArray() && !hasAnyEntry((Object[]) ret)) return ret;
+        if (!ret.getClass().isArray() || !curateEnabled) {
+            return curateLogonSessions(ret, System.getenv("DISPLAY"), logonLabel());
+        }
+        java.util.List<SessionEndpoint> registered;
+        java.util.List<SessionEndpoint> live;
+        try {
+            registered = readRegistry(java.nio.file.Path.of(REGISTRY_DIR), ROOT_UID);
+            live = liveSessions(registered);
+        } catch (Throwable t) {
+            // A registry we cannot read is a registry we do not have: curate as
+            // the single-display install this has always been able to be.
+            log("registry read failed while curating (" + t + "); using the configured display");
+            registered = java.util.List.of();
+            live = java.util.List.of();
+        }
+        return curateLogonSessions(ret, System.getenv("DISPLAY"), logonLabel(), registered, live);
     }
 
     // --- logon-probe rate limiting -----------------------------------------
@@ -599,6 +653,114 @@ public final class Bridge {
      * array, when nothing matches our display: an unexpected DISPLAY must never
      * empty the picker and leave the operator unable to connect.
      */
+    /**
+     * Curation with the registry in hand: every session an operator can
+     * actually reach, and only those.
+     *
+     * The old rule — keep the one display this bridge captures — encoded a
+     * premise that stopped being true at #51. Each ScreenConnect child now
+     * resolves its own daemon from the registry, so a second session in the
+     * picker is not misleading any more: selecting it works. Filtering it out
+     * is what would be wrong.
+     *
+     * An entry with no live registered session behind it is dropped, and the
+     * reason has changed with it: such an entry no longer shows this session's
+     * frame under another name, it REFUSES, and the operator gets black. So it
+     * is dropped because it cannot work rather than because it deceives. The
+     * GDM greeter's ":1024", present whenever nobody is logged in, is the
+     * standard case; a display two live sessions both claim is the other, since
+     * resolution refuses that too.
+     *
+     * The configured session is ordered first because ScreenConnect auto-picks
+     * the first entry, and the configured session is the one the drop-in aims
+     * it at. That rule also holds on a classic install, where there is no
+     * backstage session to name.
+     *
+     * With nothing registered this delegates to the single-display form, so
+     * every existing install behaves exactly as it did.
+     */
+    static Object curateLogonSessions(Object ret, String configuredDisplay,
+                                      String configuredLabel,
+                                      java.util.List<SessionEndpoint> registered,
+                                      java.util.List<SessionEndpoint> live) {
+        try {
+            if (ret == null || !ret.getClass().isArray() || registered == null
+                    || registered.isEmpty() || !curateEnabled) {
+                return curateLogonSessions(ret, configuredDisplay, configuredLabel);
+            }
+            Object[] arr = (Object[]) ret;
+            String want = normalizeDisplay(configuredDisplay);
+            java.util.List<Object> first = new java.util.ArrayList<>();
+            java.util.List<String> firstNames = new java.util.ArrayList<>();
+            java.util.List<Object> rest = new java.util.ArrayList<>();
+            java.util.List<String> restNames = new java.util.ArrayList<>();
+            java.util.Set<String> seen = new java.util.HashSet<>();
+            for (Object e : arr) {
+                if (e == null) continue;
+                String d = normalizeDisplay(sessionDisplay(e));
+                if (d == null || !seen.add(d)) continue;   // one row per display
+                boolean isConfigured = d.equals(want);
+                // Ask the resolver itself rather than re-deriving its rules: what
+                // the picker offers and what a child will attach to then cannot
+                // drift apart, which is how a session that resolves to nothing
+                // came to be offered in the first place.
+                SessionEndpoint owner = resolveEndpoint(d, registered, live, null);
+                if (owner == null && !isConfigured) continue;
+                String name = owner != null ? sanitizeLabel(owner.label()) : null;
+                if (name == null && isConfigured) name = sanitizeLabel(configuredLabel);
+                if (isConfigured) {
+                    // Kept even when its daemon is down. Selecting it then refuses
+                    // and shows black, which tells the operator this session is
+                    // unavailable — better than dropping it, which would silently
+                    // auto-pick whatever else survived, quite possibly a human's
+                    // desktop they never asked to watch.
+                    first.add(e);
+                    firstNames.add(name);
+                } else {
+                    rest.add(e);
+                    restNames.add(name);
+                }
+            }
+            first.addAll(rest);
+            firstNames.addAll(restNames);
+            if (first.isEmpty()) {                  // never leave the operator with no way in
+                return curateLogonSessions(ret, configuredDisplay, configuredLabel);
+            }
+            // Relabel only once the array is settled, and put every name back if
+            // any rename fails: a throw partway through must not leave the
+            // caller's entries half-renamed, whether it happens during the scan
+            // or here.
+            java.util.List<String> before = new java.util.ArrayList<>();
+            for (Object e : first) before.add(sessionDisplay(e));
+            try {
+                for (int i = 0; i < first.size(); i++) {
+                    String n = firstNames.get(i);
+                    if (n != null) relabelOne(first.get(i), n, false);
+                }
+            } catch (Throwable renameFailed) {
+                for (int i = 0; i < first.size(); i++) {
+                    try {
+                        first.get(i).getClass().getField("logonSessionName")
+                                .set(first.get(i), before.get(i));
+                    } catch (Throwable ignored) {
+                        // Nothing better to do: this entry was never renamed, or
+                        // its field is unwritable — which is what threw.
+                    }
+                }
+                throw renameFailed;
+            }
+            Object out = java.lang.reflect.Array.newInstance(
+                    arr.getClass().getComponentType(), first.size());
+            for (int i = 0; i < first.size(); i++) {
+                java.lang.reflect.Array.set(out, i, first.get(i));
+            }
+            return out;
+        } catch (Throwable t) {
+            log("curateLogonSessions failed: " + t);
+            return ret;
+        }
+    }
+
     static Object curateLogonSessions(Object ret, String display, String label) {
         try {
             if (ret == null) return ret;

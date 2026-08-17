@@ -43,6 +43,17 @@ public class BootTests {
         testFrameReader();
         testFrameReaderNeverBlackMidWrite();
         testCurateLogonSessions();
+        testCurateKeepsEverySessionWithALiveDaemon();
+        testCurateOrdersTheConfiguredSessionFirst();
+        testCurateMatchesDisplaysAcrossNormalisation();
+        testCurateDropsWhatCannotWork();
+        testCurateFallsBackToTodaysBehaviourWithNoRegistry();
+        testCurateNeverEmptiesThePicker();
+        testCurateOffKeepsEverything();
+        testCurateOffersOnlyWhatResolutionWillAccept();
+        testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown();
+        testCurateRelabelsAtomically();
+        testCurateCollapsesDuplicateDisplayEntries();
         testCaptureTuning();
         testLogonProbeCache();
         testNormalizeDisplay();
@@ -73,6 +84,7 @@ public class BootTests {
         // ABOVE this line.
         testAttachedClientIsPeerAuthenticated();
         testRegistryLabelWinsOverWho();
+        testCurateEntryPointDoesNoWorkForInputItCannotCurate();
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -488,6 +500,17 @@ public class BootTests {
 
     /** A stand-in for ScreenConnect's Messages$LogonSessionInfo2: the curate
      *  code reads/writes the public logonSessionName field by reflection. */
+    /**
+     * A logon entry whose name can be READ but not written: `Field.set` on a
+     * public final instance field throws IllegalAccessException (verified on
+     * this JDK). It stands for any element the relabel loop can fail on after
+     * an earlier one has already been renamed.
+     */
+    public static class FinalNameLogon {
+        public final String logonSessionName;
+        public FinalNameLogon(String n) { this.logonSessionName = n; }
+    }
+
     public static class FakeLogon {
         public String logonSessionName;
         public FakeLogon(String n) { this.logonSessionName = n; }
@@ -1529,6 +1552,570 @@ public class BootTests {
             check(absent != null && absent.isEmpty(),
                   "no registry directory at all -> empty list, never null: that is what falls back to "
                   + "the static args (got " + (absent == null ? "null" : String.valueOf(absent.size())) + ")");
+        } finally {
+            rmTree(dir);
+        }
+    }
+
+    // ---- issue #52: multi-daemon curation of the logon-session picker ------
+
+    /**
+     * Fixtures for the curated picker. These are the two sessions the live box
+     * actually has: backstage on :0 and an attended login on :4, both
+     * registered by root and verified live. The greeter's :1024 is enumerated
+     * by ScreenConnect's probe whenever nobody is logged in and has nothing
+     * behind it.
+     */
+    private static final SessionEndpoint LIVE_BACKSTAGE = new SessionEndpoint(
+            992, "backstage", ":0",
+            "/dev/shm/dreamconnect.frame.992", "/run/user/992/dreamconnect.sock", "[Backstage]");
+    private static final SessionEndpoint LIVE_CONSOLE = new SessionEndpoint(
+            1000, "kogies", ":4",
+            "/dev/shm/dreamconnect.frame.1000", "/run/user/1000/dreamconnect.sock", "kogies");
+
+    /** The picker as the operator would read it, for legible failures. */
+    private static String namesOf(Object curated) {
+        if (!(curated instanceof FakeLogon[])) return String.valueOf(curated);
+        FakeLogon[] arr = (FakeLogon[]) curated;
+        StringBuilder sb = new StringBuilder(arr.length + " [");
+        for (int i = 0; i < arr.length; i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(arr[i] == null ? "null" : arr[i].logonSessionName);
+        }
+        return sb.append(']').toString();
+    }
+
+    /**
+     * NEW, issue #52. Curation's premise changed underneath it and the code
+     * still encodes the old one. Its javadoc says "the bridge only ever
+     * presents ONE display — the one the daemon captures — so any other
+     * session in the picker is misleading: selecting it still shows our
+     * frame." That was true of a bridge with one hard-wired endpoint. Since
+     * #51 each ScreenConnect child resolves its OWN daemon from the registry,
+     * so a second session is not misleading — it works. Filtering it out is
+     * now the bug, and it is why the operator saw one entry on a box with two
+     * working sessions an hour ago.
+     *
+     * SIGNATURE CHOSEN (the builder implements to it):
+     *   curateLogonSessions(ret, configuredDisplay, configuredLabel, live)
+     * where `live` is Bridge.liveSessions' output — the registered sessions
+     * that passed shm ownership and peer authentication. The existing 3-arg
+     * form is exactly the empty-list case, which is what keeps every existing
+     * install on today's behaviour.
+     *
+     * Relabelling is per session, from that session's own registry label, not
+     * from one static string: `[Backstage]` and `kogies` are what root
+     * registered, and the whole point of showing two entries is that the
+     * operator can tell them apart.
+     */
+    private static void testCurateKeepsEverySessionWithALiveDaemon() {
+        FakeLogon[] probe = { new FakeLogon(":1024"), new FakeLogon(":4"), new FakeLogon(":0") };
+        Object out = Bridge.curateLogonSessions(probe, ":0", "[Backstage]",
+                List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+
+        check(out instanceof FakeLogon[], "curate returns an array of the same type (got " + out + ")");
+        if (!(out instanceof FakeLogon[])) return;
+        FakeLogon[] arr = (FakeLogon[]) out;
+        check(arr.length == 2,
+              "both sessions with a live daemon are kept — a second session is no longer misleading, "
+              + "it resolves to its own daemon (got " + namesOf(out) + ")");
+        String all = namesOf(out);
+        check(all.contains("[Backstage]"),
+              "the backstage entry is named from ITS registry entry (got " + all + ")");
+        check(all.contains("kogies"),
+              "and the attended session from its own, not from one static label (got " + all + ")");
+        check(!all.contains(":1024"),
+              "the greeter, with nothing registered behind it, is gone (got " + all + ")");
+    }
+
+    /**
+     * Ordering. ScreenConnect auto-selects the FIRST entry (spike), so the
+     * order decides what an operator who does not choose ends up looking at.
+     *
+     * TEST-AUTHOR'S CALL, since the issue says "backstage first" and the
+     * coordinator proposed "the session this JVM is configured for": I assert
+     * the CONFIGURED one. Reasons — it is what the drop-in aims ScreenConnect
+     * at (the static shm=/socket= args), so auto-pick lands where the box is
+     * configured to point; it generalises to a classic install, which has no
+     * backstage at all; and "backstage" is only identifiable here by matching
+     * the label text `[Backstage]`, which is operator-facing prose, not an
+     * identity. On the standard backstage box the two rules agree.
+     *
+     * The second case is the one that separates them: configured `:4` puts the
+     * attended session first even though backstage exists.
+     */
+    private static void testCurateOrdersTheConfiguredSessionFirst() {
+        FakeLogon[] probe = { new FakeLogon(":4"), new FakeLogon(":1024"), new FakeLogon(":0") };
+        FakeLogon[] backstageFirst = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+        check(backstageFirst.length == 2 && "[Backstage]".equals(backstageFirst[0].logonSessionName),
+              "configured :0 -> backstage is first, so SC's auto-pick lands on it (got "
+              + namesOf(backstageFirst) + ")");
+
+        FakeLogon[] probe2 = { new FakeLogon(":0"), new FakeLogon(":1024"), new FakeLogon(":4") };
+        FakeLogon[] consoleFirst = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe2, ":4", "kogies", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+        check(consoleFirst.length == 2 && "kogies".equals(consoleFirst[0].logonSessionName),
+              "configured :4 -> the attended session is first: auto-pick follows what this JVM is "
+              + "pointed at, which is what makes the rule work on a box with no backstage (got "
+              + namesOf(consoleFirst) + ")");
+    }
+
+    /**
+     * The probe's names and the registry's displays come from different
+     * producers — ScreenConnect's getDisplayInfos on one side, root's
+     * registration on the other — so either may carry the screen suffix.
+     * Bridge.normalizeDisplay is the authority and is already tested; this
+     * asserts curation actually goes through it, in both directions.
+     */
+    private static void testCurateMatchesDisplaysAcrossNormalisation() {
+        // The configured label is deliberately NOT the registry label. Without
+        // that, a match and a never-empty fallback are indistinguishable —
+        // both would leave one entry named "[Backstage]" — and a curation that
+        // compared displays raw would pass this test by falling back. (Found
+        // by a scratch mutant that dropped normalisation on the registry side
+        // and stayed green.)
+        final String CFG = "static-args-fallback";
+
+        SessionEndpoint suffixed = new SessionEndpoint(992, "backstage", ":0.0",
+                "/dev/shm/dreamconnect.frame.992", "/run/user/992/dreamconnect.sock", "[Backstage]");
+        FakeLogon[] probeBare = { new FakeLogon(":0") };
+        FakeLogon[] a = (FakeLogon[]) Bridge.curateLogonSessions(
+                probeBare, ":0", CFG, List.of(suffixed), List.of(suffixed));
+        check(a.length == 1 && "[Backstage]".equals(a[0].logonSessionName),
+              "probe \":0\" matches a session registered as \":0.0\", and is named from THAT session "
+              + "(got " + namesOf(a) + "; the static-args label would mean it never matched)");
+
+        FakeLogon[] probeSuffixed = { new FakeLogon(":0.0"), new FakeLogon(":1024") };
+        FakeLogon[] b = (FakeLogon[]) Bridge.curateLogonSessions(
+                probeSuffixed, ":0.0", CFG, List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+        check(b.length == 1 && "[Backstage]".equals(b[0].logonSessionName),
+              "and probe \":0.0\" matches a session registered as \":0\" (got " + namesOf(b) + ")");
+    }
+
+    /**
+     * What gets dropped, and WHY the reason changed. With one hard-wired
+     * endpoint an unbacked entry was a lie: selecting it showed our frame
+     * under another session's name. Now it is not a lie — resolution REFUSES
+     * an undescribed-but-registered or dead display and the operator gets
+     * black. So the entry is dropped because it CANNOT WORK, not because it
+     * deceives. Same outcome, different rule, and the difference matters for
+     * the cases below:
+     *
+     *   - the greeter (:1024): nothing registered, nothing to resolve;
+     *   - registered but NOT live: it is in the registry and absent from
+     *     `live` (daemon down, frame not the account's, peer would not
+     *     authenticate), and #51 refuses exactly that;
+     *   - MY EXTENSION, flagged because the issue does not name it: a display
+     *     claimed by two live sessions. #51 refuses an ambiguous display, so
+     *     selecting it is guaranteed black. Same rule — offer nothing that
+     *     cannot work. Delete this one assertion if you disagree.
+     */
+    private static void testCurateDropsWhatCannotWork() {
+        FakeLogon[] probe = { new FakeLogon(":0"), new FakeLogon(":1024") };
+        FakeLogon[] greeterGone = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+        check(greeterGone.length == 1 && !namesOf(greeterGone).contains(":1024"),
+              "the greeter is dropped: nothing is registered behind it, so selecting it refuses (got "
+              + namesOf(greeterGone) + ")");
+
+        // Registered but not live: :4 is absent from the live list.
+        FakeLogon[] probe2 = { new FakeLogon(":0"), new FakeLogon(":4") };
+        FakeLogon[] deadGone = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe2, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE));
+        check(deadGone.length == 1 && !namesOf(deadGone).contains(":4"),
+              "a session whose daemon is not live is dropped too — selecting it would refuse and "
+              + "show black (got " + namesOf(deadGone) + ")");
+
+        SessionEndpoint duplicate = new SessionEndpoint(1001, "ghost", ":4",
+                "/dev/shm/dreamconnect.frame.1001", "/run/user/1001/dreamconnect.sock", "stale");
+        FakeLogon[] probe3 = { new FakeLogon(":0"), new FakeLogon(":4") };
+        FakeLogon[] ambiguousGone = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe3, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE, duplicate),
+                List.of(LIVE_BACKSTAGE, LIVE_CONSOLE, duplicate));
+        check(ambiguousGone.length == 1 && !namesOf(ambiguousGone).contains(":4"),
+              "a display two live sessions claim is dropped: #51 refuses an ambiguous display, so "
+              + "offering it can only produce black (got " + namesOf(ambiguousGone) + ")");
+
+        // Curation filters what the probe returned; it can never invent an
+        // entry, because the logonSessionID that selects a session is SC's.
+        FakeLogon[] probe4 = { new FakeLogon(":0") };
+        FakeLogon[] noGain = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe4, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+        check(noGain.length <= probe4.length,
+              "a live session the probe did not enumerate is not added — we have no session id for it (got "
+              + namesOf(noGain) + ")");
+    }
+
+    /**
+     * The load-bearing fallback: with no registry, or an empty one, curation
+     * behaves EXACTLY as it does today — filter to the configured display,
+     * relabel with the configured label. Every install that predates the
+     * registry is on this path, and #53 only registers on backstage boxes, so
+     * a classic install stays here forever.
+     *
+     * Asserted against the 3-arg form's own behaviour rather than restating
+     * it: the two must not drift, whichever way the builder implements it.
+     */
+    private static void testCurateFallsBackToTodaysBehaviourWithNoRegistry() {
+        FakeLogon[] a = { new FakeLogon(":1024"), new FakeLogon(":0") };
+        FakeLogon[] b = { new FakeLogon(":1024"), new FakeLogon(":0") };
+        FakeLogon[] today = (FakeLogon[]) Bridge.curateLogonSessions(a, ":0", "[Backstage]");
+        FakeLogon[] empty = (FakeLogon[]) Bridge.curateLogonSessions(b, ":0", "[Backstage]", List.of(), List.of());
+        check(namesOf(empty).equals(namesOf(today)),
+              "an empty registry curates exactly as the 3-arg form does today (today=" + namesOf(today)
+              + " empty-registry=" + namesOf(empty) + ")");
+
+        FakeLogon[] c = { new FakeLogon(":1024"), new FakeLogon(":0") };
+        FakeLogon[] nul = (FakeLogon[]) Bridge.curateLogonSessions(c, ":0", "[Backstage]", null, null);
+        check(namesOf(nul).equals(namesOf(today)),
+              "and so does a null live list — a discovery that threw must not change the picker (got "
+              + namesOf(nul) + ")");
+    }
+
+    /**
+     * Never empty the picker. An operator who cannot see any session cannot
+     * connect at all, which is worse than an unfiltered list — and this is
+     * reachable without anything being broken: a child JVM whose DISPLAY is
+     * not one the registry knows, on a box where the registry does know
+     * others.
+     */
+    private static void testCurateNeverEmptiesThePicker() {
+        FakeLogon[] probe = { new FakeLogon(":7"), new FakeLogon(":8") };
+        FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":7", "operator", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+        // REVISED, round 2 — this asserted only `length > 0`, which a picker
+        // containing nothing but dead entries also satisfies. What matters is
+        // that the operator is still offered the session this JVM is pointed
+        // at: :7 is the configured display, so :7 must be there and first.
+        check(out.length > 0 && ":7".equals(sessionNameOf(out[0])) || out.length > 0
+                      && "operator".equals(sessionNameOf(out[0])),
+              "no probe entry matches any live session -> the picker keeps the CONFIGURED session (:7) "
+              + "and offers it first, rather than merely being non-empty (got " + namesOf(out) + ")");
+
+        FakeLogon[] none = (FakeLogon[]) Bridge.curateLogonSessions(
+                new FakeLogon[0], ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+        check(none.length == 0, "an empty probe stays empty — curation invents nothing (got "
+              + namesOf(none) + ")");
+
+        check(Bridge.curateLogonSessions(null, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE)) == null,
+              "null in, null out");
+        FakeLogon single = new FakeLogon(":0");
+        Object s = Bridge.curateLogonSessions(single, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+        check(s == single, "a single (non-array) session is returned as itself, never wrapped or dropped");
+    }
+
+    /**
+     * curate=off is the observation mode the spike shipped: show the operator
+     * everything the probe found, so what SC really enumerates can be read
+     * off the log and the picker. It must survive the multi-session rewrite —
+     * including keeping the greeter, which is exactly what one wants to see
+     * when diagnosing.
+     *
+     * Restores the knob before returning: it is process-wide static state and
+     * every later test would otherwise run in observation mode.
+     */
+    private static void testCurateOffKeepsEverything() {
+        try {
+            Bridge.configure("curate=off");
+            FakeLogon[] probe = { new FakeLogon(":1024"), new FakeLogon(":4"), new FakeLogon(":0") };
+            FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
+                    probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+            check(out.length == 3,
+                  "curate=off keeps every entry the probe returned, greeter included (got "
+                  + namesOf(out) + ")");
+            check(namesOf(out).contains(":1024"),
+                  "including the unbacked one, which is the entry an operator is usually diagnosing (got "
+                  + namesOf(out) + ")");
+        } finally {
+            Bridge.configure("curate=on");
+        }
+        FakeLogon[] probe2 = { new FakeLogon(":1024"), new FakeLogon(":0") };
+        FakeLogon[] back = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe2, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE));
+        check(back.length == 1,
+              "and curation resumes once the knob is back on (got " + namesOf(back) + ")");
+    }
+
+    // ---- issue #52 round 2: what the green suite was hiding ----------------
+
+    /**
+     * NEW, round 2. THE defect: curation counted claims on the LIVE list while
+     * resolveEndpoint counts them on the REGISTERED one, so the two disagreed
+     * and the picker offered a session that resolution then refused —
+     * demonstrated against the deployed jar with two registered entries for
+     * `:4` and only one live: the operator picks `kogies` and gets black.
+     *
+     * SIGNATURE CHOSEN (the builder implements to it):
+     *   curateLogonSessions(ret, configuredDisplay, configuredLabel, registered, live)
+     * Recommended implementation, because it makes the drift unrepresentable
+     * rather than merely tested-for: decide each entry by
+     * `resolveEndpoint(display, registered, live, null) != null`, and take the
+     * label from the endpoint it returns. This test asserts that EQUIVALENCE
+     * directly, so any implementation that agrees passes and any that
+     * re-derives the rule separately has to keep agreeing.
+     *
+     * The `null` fallback in the equivalence is what makes it exact: with no
+     * fallback, resolveEndpoint returns non-null exactly when the registry
+     * describes the display once AND it is live — which is precisely the set of
+     * entries an operator can select and get a picture from.
+     */
+    private static void testCurateOffersOnlyWhatResolutionWillAccept() {
+        SessionEndpoint dupA = new SessionEndpoint(1000, "kogies", ":4",
+                "/dev/shm/dreamconnect.frame.1000", "/run/user/1000/dreamconnect.sock", "kogies");
+        SessionEndpoint dupB = new SessionEndpoint(1001, "ghost", ":4.0",
+                "/dev/shm/dreamconnect.frame.1001", "/run/user/1001/dreamconnect.sock", "stale");
+        SessionEndpoint deadOne = new SessionEndpoint(1002, "asleep", ":5",
+                "/dev/shm/dreamconnect.frame.1002", "/run/user/1002/dreamconnect.sock", "asleep");
+        List<SessionEndpoint> registered = List.of(LIVE_BACKSTAGE, dupA, dupB, deadOne);
+        List<SessionEndpoint> live = List.of(LIVE_BACKSTAGE, dupA);
+
+        FakeLogon[] probe = { new FakeLogon(":0"), new FakeLogon(":4"),
+                              new FakeLogon(":5"), new FakeLogon(":1024") };
+        FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":0", "[Backstage]", registered, live);
+
+        check(out.length == 1 && "[Backstage]".equals(out[0].logonSessionName),
+              "only :0 survives: :4 is claimed by TWO registered sessions (one live), :5 is "
+              + "registered but dead, :1024 is unregistered (got " + namesOf(out) + ")");
+
+        // The equivalence itself, display by display, against the shipped
+        // resolver — this is what stops the two rules drifting again.
+        String[] displays = { ":0", ":4", ":5", ":1024" };
+        for (String d : displays) {
+            boolean resolvable = Bridge.resolveEndpoint(d, registered, live, null) != null;
+            FakeLogon[] one = { new FakeLogon(d) };
+            // A non-configured display, so the keep-the-configured-session rule
+            // (testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown) does
+            // not apply and this measures the general rule alone.
+            FakeLogon[] curated = (FakeLogon[]) Bridge.curateLogonSessions(
+                    one, ":99", "static-args", registered, live);
+            boolean offered = curated.length == 1 && !"static-args".equals(curated[0].logonSessionName);
+            check(offered == resolvable,
+                  "display " + d + ": curation offers it (" + offered + ") exactly when resolution "
+                  + "accepts it (" + resolvable + ") — the picker must never offer what selecting "
+                  + "would refuse");
+        }
+    }
+
+    /**
+     * NEW, round 2. The configured session is kept even when its daemon is
+     * down, and still ordered first.
+     *
+     * Demonstrated: registry with backstage :0 and kogies :4, backstage's
+     * daemon restarting — curation returned [kogies] alone, so ScreenConnect's
+     * auto-pick silently put the operator inside an attended user's desktop.
+     * Not merely deprioritised: backstage became unselectable. Pre-#52 that
+     * could not happen, because only the configured display ever survived.
+     *
+     * This is a deliberate EXCEPTION to "drop what cannot work", and the reason
+     * is worth stating: selecting the configured entry while its daemon is down
+     * refuses, and the operator sees black — which tells them backstage is
+     * down. Landing them unannounced in a human's session is worse than a black
+     * screen that names the session they asked for.
+     */
+    private static void testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown() {
+        List<SessionEndpoint> registered = List.of(LIVE_BACKSTAGE, LIVE_CONSOLE);
+        List<SessionEndpoint> live = List.of(LIVE_CONSOLE);          // backstage restarting
+
+        FakeLogon[] probe = { new FakeLogon(":4"), new FakeLogon(":0"), new FakeLogon(":1024") };
+        FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":0", "[Backstage]", registered, live);
+
+        check(out.length == 2,
+              "the configured session stays in the picker while its daemon is down, alongside the "
+              + "one that is up (got " + namesOf(out) + ")");
+        check(out.length > 0 && "[Backstage]".equals(out[0].logonSessionName),
+              "and it is STILL FIRST, so auto-pick lands on the session the operator expects rather "
+              + "than silently inside an attended user's desktop (got " + namesOf(out) + ")");
+        check(!namesOf(out).contains(":1024"),
+              "the exception is for the configured session only — the greeter is still dropped (got "
+              + namesOf(out) + ")");
+
+        // Same when the registry does not describe the configured display at
+        // all: it resolves to the static args, so it works, and dropping it
+        // would make the only working session unselectable.
+        FakeLogon[] probe2 = { new FakeLogon(":4"), new FakeLogon(":9") };
+        FakeLogon[] out2 = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe2, ":9", "static-args", registered, live);
+        check(out2.length > 0 && "static-args".equals(sessionNameOf(out2[0])),
+              "a configured display the registry never mentions is kept and first: it resolves to "
+              + "the static shm=/socket= args, which is a working session (got " + namesOf(out2) + ")");
+    }
+
+    /**
+     * NEW, round 2. Relabelling must be atomic.
+     *
+     * Demonstrated with a heterogeneous array: curation relabels as it scans,
+     * so a throw part way (ScreenConnect handing us an element without the
+     * logonSessionName field) leaves the ORIGINAL array returned with some
+     * entries already renamed — a picker half in one world and half in the
+     * other. The 3-arg form this replaced relabelled only after its scan, so it
+     * was atomic; that property was lost, not traded away.
+     *
+     * Object[] rather than FakeLogon[] because the mixture is the point: the
+     * array ScreenConnect hands the hook is its own type, and one bad element
+     * is all it takes.
+     */
+    private static void testCurateRelabelsAtomically() {
+        FakeLogon good = new FakeLogon(":0");
+        Object[] mixed = { good, new Object() };   // the Object has no logonSessionName
+
+        Object out = Bridge.curateLogonSessions(mixed, ":0", "[Backstage]",
+                List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+
+        check(":0".equals(good.logonSessionName),
+              "a throw mid-curation leaves NO entry renamed: either the whole picker is curated or "
+              + "none of it is (got \"" + good.logonSessionName + "\")");
+        check(out == mixed,
+              "and the caller gets its own array back untouched, never a partly rewritten one (got "
+              + (out == mixed ? "the original" : String.valueOf(out)) + ")");
+
+        // ROUND 3 (breaker): the case above throws during the SCAN, before any
+        // renaming starts, so it never exercised the relabel loop itself. This
+        // one gets past the scan — both entries are registered and live — and
+        // throws on the SECOND rename, which is where a partial rewrite is
+        // actually produced. Satisfying it means remembering the original
+        // names and putting them back when a rename fails.
+        FakeLogon renamable = new FakeLogon(":0");
+        FinalNameLogon unrenamable = new FinalNameLogon(":4");
+        Object[] halfWritable = { renamable, unrenamable };
+        Object out2 = Bridge.curateLogonSessions(halfWritable, ":0", "[Backstage]",
+                List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
+
+        check(":0".equals(renamable.logonSessionName),
+              "a throw in the RELABEL loop leaves no entry renamed either: the picker is curated "
+              + "whole or not at all (got \"" + renamable.logonSessionName + "\")");
+        check(out2 == halfWritable,
+              "and the original array is what comes back (got "
+              + (out2 == halfWritable ? "the original" : String.valueOf(out2)) + ")");
+    }
+
+    /**
+     * NEW, round 2. Two probe entries that NORMALISE to one display are one
+     * session, and two rows both named "[Backstage]" are indistinguishable to
+     * the operator — they would have to guess, and both lead to the same
+     * daemon. Reachable only since matching became normalisation-insensitive,
+     * so this is new ground rather than a regression.
+     *
+     * First in probe order wins, deterministically: an operator who reconnects
+     * must not see the rows swap.
+     */
+    private static void testCurateCollapsesDuplicateDisplayEntries() {
+        FakeLogon first = new FakeLogon(":0");
+        FakeLogon second = new FakeLogon(":0.0");
+        FakeLogon[] probe = { first, second, new FakeLogon(":1024") };
+        FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
+                probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
+
+        check(out.length == 1,
+              "\":0\" and \":0.0\" are one session, so the picker shows one row, not two identical "
+              + "ones the operator has to choose between (got " + namesOf(out) + ")");
+        check(out.length == 1 && out[0] == first,
+              "and it is the first in probe order, so the picker does not reshuffle between "
+              + "reconnects (got " + namesOf(out) + ")");
+    }
+
+    /**
+     * REVISED, round 3 — this test was order-dependent and did not prove its
+     * claim. On a fresh JVM `curateLogonSessions((Object) null)` DOES discover:
+     * it computes logonLabel() first, which attaches, which resolves, which
+     * reads the registry (`null: registryReads 0 -> 1`, with a live PING). It
+     * was green only because testLogonProbeCache had already memoised
+     * resolvedForChild earlier in main(). An assertion that passes because of
+     * what ran before it proves nothing about the code under test.
+     *
+     * Fixed by observing the LABEL as well as the registry. logonLabelCount()
+     * moves on every logonLabel() call whether or not resolution is already
+     * warm, so it is independent of test order — and for input the curator
+     * cannot act on, computing a label is exactly the call that drags discovery
+     * in on the first probe of a JVM.
+     *
+     * The rule asserted:
+     *   - ret == null, an EMPTY array, or an array of nothing but nulls:
+     *     no label and no registry read. The 3-arg form ignores the label for
+     *     all three, so computing one is pure waste — and it is waste that
+     *     costs a socket per registered session on the message thread that
+     *     carries input.
+     *   - a non-array (the One hook's single session): no registry read. The
+     *     label IS used there, to rename the entry, so it is not forbidden.
+     *
+     * ALSO round 3, defect 1: an empty array passes isArray(), so it read the
+     * registry and PINGed every registered session on EVERY probe — and
+     * because curateLogonSessionsCached caches only non-empty results,
+     * logonProbeSkip never armed, so unlike the normal path this repeated
+     * every ~6 s forever. Demonstrated: `EMPTY array: registryReads 1 -> 2`,
+     * `reads=3,4,5` across three calls. The trigger is real: getDisplayInfos
+     * returns zero displays while backstage restarts.
+     *
+     * ORDERING: registered after testRegistryLabelWinsOverWho, so the label
+     * precondition below is served from labelOverride and touches no socket.
+     */
+    private static void testCurateEntryPointDoesNoWorkForInputItCannotCurate() throws Exception {
+        Path dir = Files.createTempDirectory("dcboot-readcount");
+        try {
+            // Preconditions: both counters must be real, or every assertion
+            // below would hold vacuously on a constant.
+            long r0 = Bridge.registryReadCount();
+            Bridge.readRegistry(dir, uidOf(dir));
+            check(Bridge.registryReadCount() > r0,
+                  "precondition: registryReadCount() counts a real registry read (" + r0 + " -> "
+                  + Bridge.registryReadCount() + ")");
+            long l0 = Bridge.logonLabelCount();
+            Bridge.logonLabel();
+            check(Bridge.logonLabelCount() > l0,
+                  "precondition: logonLabelCount() counts a real logonLabel() call (" + l0 + " -> "
+                  + Bridge.logonLabelCount() + ")");
+
+            long reads = Bridge.registryReadCount();
+            long labels = Bridge.logonLabelCount();
+            Object nul = Bridge.curateLogonSessions((Object) null);
+            check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
+                  "null: no registry read and no label computed — the 3-arg form ignores the label "
+                  + "for null, so computing one is waste that pulls discovery in behind it (reads "
+                  + reads + " -> " + Bridge.registryReadCount() + ", labels " + labels + " -> "
+                  + Bridge.logonLabelCount() + ")");
+            check(nul == null, "and null still comes back as null");
+
+            reads = Bridge.registryReadCount();
+            Object notAnArray = Bridge.curateLogonSessions(new FakeLogon(":0"));
+            check(Bridge.registryReadCount() == reads,
+                  "a single session (the One hook): no registry read — the label may be computed, it "
+                  + "is what renames the entry, but nothing may open a socket per registered session "
+                  + "(reads " + reads + " -> " + Bridge.registryReadCount() + ")");
+            check(notAnArray != null, "and the single session is still returned to the caller");
+
+            reads = Bridge.registryReadCount();
+            labels = Bridge.logonLabelCount();
+            Object empty = Bridge.curateLogonSessions(new FakeLogon[0]);
+            check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
+                  "an EMPTY array does no discovery: there is nothing to curate, and this is the "
+                  + "state a backstage restart produces — repeated every ~6 s probe, uncached, "
+                  + "forever (reads " + reads + " -> " + Bridge.registryReadCount() + ", labels "
+                  + labels + " -> " + Bridge.logonLabelCount() + ")");
+            check(empty instanceof FakeLogon[] && ((FakeLogon[]) empty).length == 0,
+                  "and it comes back empty, not null (got " + namesOf(empty) + ")");
+
+            reads = Bridge.registryReadCount();
+            labels = Bridge.logonLabelCount();
+            Object nulls = Bridge.curateLogonSessions(new FakeLogon[] { null });
+            check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
+                  "an array of nothing but nulls likewise: scanning for one usable element is free, "
+                  + "discovery is not (reads " + reads + " -> " + Bridge.registryReadCount()
+                  + ", labels " + labels + " -> " + Bridge.logonLabelCount() + ")");
+            check(nulls instanceof FakeLogon[] && ((FakeLogon[]) nulls).length == 1,
+                  "and the caller's array is handed back unchanged (got " + namesOf(nulls) + ")");
+
+            // Repeat: the cost must not come back on the next heartbeat either.
+            reads = Bridge.registryReadCount();
+            Bridge.curateLogonSessions(new FakeLogon[0]);
+            Bridge.curateLogonSessions(new FakeLogon[0]);
+            Bridge.curateLogonSessions(new FakeLogon[0]);
+            check(Bridge.registryReadCount() == reads,
+                  "and it stays free across successive probes — the demonstrated defect was "
+                  + "reads=3,4,5 on three calls, because the empty result is never cached and "
+                  + "logonProbeSkip therefore never arms (reads " + reads + " -> "
+                  + Bridge.registryReadCount() + ")");
         } finally {
             rmTree(dir);
         }
