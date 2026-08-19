@@ -418,6 +418,24 @@ a time.
 ---
 
 ## Version history
+- **v1.5.0** (2026-08-19) — backstage sessions and a multi-session picker. The
+  bridge runs against a headless session, so a box is reachable from boot with
+  no dummy plug, no autologin and the greeter still up; `dreamconnect-session`
+  brings a chosen account's session up on demand and points ScreenConnect at
+  it. Each ScreenConnect child now attaches to the daemon serving *its own*
+  display, resolved from a root-owned session registry
+  (`/run/dreamconnect/sessions/<uid>`) written by `dreamconnect-register@<uid>`
+  for as long as that session is up, with every connection authenticated by
+  `SO_PEERCRED`. The picker offers exactly the sessions a selection could
+  actually attach to and names each from its own registry entry.
+  Resolution fails closed throughout: where it cannot be sure which session a
+  display belongs to it attaches to nothing and shows black, rather than
+  showing one session under another's name.
+  Also: the daemon stops its previous Mutter session before replacing it, so
+  restarts no longer leak a virtual monitor (which grew the backstage screen
+  and hid the shell's top bar on a monitor nothing captured).
+  **Attended sessions are not yet registered** — a logged-in console user does
+  not appear in the picker on this release; see the release notes.
 - **v1.4.1** (2026-07-29) — hardening: `DREAMCONNECT_HOST_ACCOUNT` pointed at an
   existing account is now fully reversible (H6) — a crash-safe one-host-account-
   per-box invariant, `root`/`user`/`local` reserved everywhere without breaking
