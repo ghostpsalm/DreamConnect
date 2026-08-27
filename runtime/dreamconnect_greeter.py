@@ -149,6 +149,67 @@ def pipeline_desc(display, use_damage=False):
     )
 
 
+def find_duplicate_sessions(sessions):
+    """[(id, user, class)] -> [(user, [ids])] for users with >1 graphical session.
+
+    Only Class=user counts. logind also lists a `manager` session per logged-in
+    account (the systemd user manager) and `manager-early`/`greeter` entries for
+    the greeter's dynamic users; counting those reports a duplicate for every
+    single login, which would make the warning meaningless.
+    """
+    by_user = {}
+    for session_id, user, klass in sessions:
+        if klass == "user":
+            by_user.setdefault(user, []).append(session_id)
+    return sorted((u, ids) for u, ids in by_user.items() if len(ids) > 1)
+
+
+def parse_session_properties(text):
+    """logind property blocks -> [(id, user, class)].
+
+    `loginctl show-session` emits Key=Value lines with a blank line between
+    sessions. Parsed rather than reading `list-sessions` columns because that
+    table's fields shift with content and there is no stable machine format:
+    -o json is accepted and silently ignored on systemd 258.
+    """
+    sessions, current = [], {}
+
+    def flush():
+        if current.get("Id"):
+            sessions.append((current["Id"], current.get("Name", ""),
+                             current.get("Class", "")))
+        current.clear()
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            flush()
+            continue
+        key, _, value = line.partition("=")
+        if key in ("Id", "Name", "Class"):
+            current[key] = value
+    flush()
+    return sessions
+
+
+def _list_sessions():
+    """[(id, user, class)] from logind, or [] if it cannot be read."""
+    try:
+        listing = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                                 capture_output=True, text=True, timeout=5,
+                                 check=True).stdout
+        # Only field 1 (the session id) is positionally safe to read here.
+        ids = [line.split()[0] for line in listing.splitlines() if line.split()]
+        if not ids:
+            return []
+        out = subprocess.run(["loginctl", "show-session", *ids,
+                              "-p", "Id", "-p", "Name", "-p", "Class"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return []
+    return parse_session_properties(out)
+
+
 class GreeterSession:
     """Presents `Session`'s surface, sourced from a local RDP login view.
 
@@ -181,9 +242,17 @@ class GreeterSession:
 
     # ---- lifecycle ---------------------------------------------------------
     def start(self):
+        """Bring up everything except the RDP connection.
+
+        The connection is opened lazily, on first attach. Holding it open from
+        startup would keep a GDM greeter session alive on every endpoint for as
+        long as the daemon runs, for nobody's benefit — and every one of the
+        session-lifecycle hazards is live only while that connection exists.
+        The Xvfb and the capture pipeline are cheap and stay up, so the picker
+        entry is always there to be chosen.
+        """
         self._start_xvfb()
         self._connect_x()
-        self._start_rdp()
         self._start_pipeline()
 
     def _start_xvfb(self):
@@ -243,19 +312,28 @@ class GreeterSession:
         self._last_frame_ms = _now_ms()
         self.pipeline.set_state(Gst.State.PLAYING)
 
+    def _reap(self, proc, name):
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log(f"greeter: {name} ignored SIGTERM, killing")
+                proc.kill()
+
+    def _stop_rdp(self):
+        if self._rdp_alive():
+            log("greeter: last client detached; closing the login view")
+        self._reap(self.rdp, "xfreerdp")
+        self.rdp = None
+
     def stop(self):
         if self.pipeline:
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
-        for proc, name in ((self.rdp, "xfreerdp"), (self.xvfb, "Xvfb")):
-            if proc and proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    log(f"greeter: {name} ignored SIGTERM, killing")
-                    proc.kill()
-        self.rdp = self.xvfb = None
+        self._stop_rdp()
+        self._reap(self.xvfb, "Xvfb")
+        self.xvfb = None
 
     # ---- capture -----------------------------------------------------------
     def _on_sample(self, sink):
@@ -281,10 +359,31 @@ class GreeterSession:
         return Gst.FlowReturn.OK
 
     def client_connected(self):
+        """First attach opens the login view."""
         self.active_clients += 1
+        if self.active_clients == 1 and not self._rdp_alive():
+            try:
+                self._start_rdp()
+            except Exception as e:  # noqa: BLE001
+                # Never let a failed connect take the daemon down: the operator
+                # sees a blank view and the watchdog keeps retrying, which beats
+                # a dead unit and no picker entry at all.
+                log(f"greeter: could not open the login view: {e}")
 
     def client_disconnected(self):
+        """Last detach closes it again, and GDM reaps the greeter behind it.
+
+        A session created through the greeter is NOT ended by this — it is a
+        real login and outlives the connection. Re-attaching lands on a fresh
+        greeter and requires authenticating again, which is the same boundary a
+        reconnect faces anywhere else.
+        """
         self.active_clients = max(0, self.active_clients - 1)
+        if self.active_clients == 0:
+            self._stop_rdp()
+
+    def _rdp_alive(self):
+        return self.rdp is not None and self.rdp.poll() is None
 
     def _watchdog(self):
         """Restart the RDP client if the view goes dead while someone is watching.
@@ -293,16 +392,13 @@ class GreeterSession:
         serving its last contents, so ximagesrc happily reports frames and only
         the *client* is gone. Check the process, not just frame arrival.
 
-        Deliberately NOT gated on a client being attached, unlike the Mutter
-        path's watchdog. There the capture only matters while somebody reads it.
-        Here a dead RDP client means the login view is gone and GDM has reaped
-        the greeter session behind it, so an operator who attaches later finds a
-        frozen last frame and no way to recover. Reconnecting while idle keeps
-        the view ready for whoever arrives — which is the entire point of a mode
-        that exists to be there before anyone is logged in.
+        Gated on a client being attached, because with lazy connect "no client,
+        no RDP" is the intended resting state, not a fault. An operator who
+        attaches gets a fresh connection from client_connected(); this only has
+        to cover the connection dying *underneath* somebody who is watching.
         """
         from gi.repository import GLib
-        if self.stall_timeout_ms <= 0:
+        if self.stall_timeout_ms <= 0 or self.active_clients == 0:
             return GLib.SOURCE_CONTINUE
         if self.rdp and self.rdp.poll() is not None:
             log(f"greeter: RDP client exited (rc={self.rdp.returncode}); reconnecting")
@@ -395,6 +491,20 @@ class GreeterSession:
                                X.ButtonPress if pressed else X.ButtonRelease,
                                x_button)
         self._x.sync()
+
+    # ---- duplicate-session detection ---------------------------------------
+    # Reported, never acted on. DreamConnect does not end a session it did not
+    # create, and a duplicate is the operator's call to resolve, not ours.
+    def duplicate_sessions(self):
+        """Users holding more than one graphical session: [(user, [ids]), ...].
+
+        The case worth catching: someone logs in through the greeter, then the
+        same account logs in at the physical console. GDM cannot migrate a
+        seatless session onto a seat — ActivateSessionOnSeat fails with "not on
+        seat seat0" — so instead of reusing it, it starts a second one and that
+        user now has two live desktops.
+        """
+        return find_duplicate_sessions(_list_sessions())
 
     # ---- operator commands that do not apply here --------------------------
     # A headless greeter has no physical panel to blank and no local idle timer

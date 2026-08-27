@@ -127,6 +127,98 @@ class TestPipeline(unittest.TestCase):
         self.assertIn("appsink name=sink", g.pipeline_desc(":89"))
 
 
+class TestDuplicateDetection(unittest.TestCase):
+    """A double login is what we promise to surface; miscounting makes it noise."""
+
+    def test_two_graphical_sessions_for_one_user_is_a_duplicate(self):
+        rows = [("18", "alice", "user"), ("34", "alice", "user")]
+        self.assertEqual(g.find_duplicate_sessions(rows), [("alice", ["18", "34"])])
+
+    def test_the_systemd_manager_session_is_not_a_second_login(self):
+        # Every logged-in account has a `manager` session too. Counting it would
+        # report a duplicate for every single normal login.
+        rows = [("18", "alice", "user"), ("1", "alice", "manager")]
+        self.assertEqual(g.find_duplicate_sessions(rows), [])
+
+    def test_greeter_sessions_do_not_count(self):
+        rows = [("c1", "gdm-greeter", "greeter"),
+                ("30", "gdm-greeter", "manager-early")]
+        self.assertEqual(g.find_duplicate_sessions(rows), [])
+
+    def test_separate_users_are_not_duplicates(self):
+        rows = [("18", "alice", "user"), ("9", "bob", "user")]
+        self.assertEqual(g.find_duplicate_sessions(rows), [])
+
+
+class TestSessionPropertyParsing(unittest.TestCase):
+    """loginctl accepts -o json and silently ignores it, so we parse properties."""
+
+    def test_parses_blank_line_separated_blocks(self):
+        text = "Id=18\nName=alice\nClass=user\n\nId=34\nName=alice\nClass=user\n"
+        self.assertEqual(g.parse_session_properties(text),
+                         [("18", "alice", "user"), ("34", "alice", "user")])
+
+    def test_ignores_unrelated_properties(self):
+        text = "Id=18\nName=alice\nClass=user\nSeat=seat0\nRemote=no\n"
+        self.assertEqual(g.parse_session_properties(text),
+                         [("18", "alice", "user")])
+
+    def test_a_trailing_block_without_a_blank_line_is_kept(self):
+        self.assertEqual(g.parse_session_properties("Id=9\nName=bob\nClass=user"),
+                         [("9", "bob", "user")])
+
+    def test_empty_input_yields_nothing(self):
+        self.assertEqual(g.parse_session_properties(""), [])
+
+
+class TestLazyConnect(unittest.TestCase):
+    """The RDP connection follows attachment, so no greeter session idles."""
+
+    def _session(self):
+        s = g.GreeterSession.__new__(g.GreeterSession)
+        s.active_clients = 0
+        s.rdp = None
+        s.started = 0
+        s.stopped = 0
+        s._start_rdp = lambda: setattr(s, "started", s.started + 1)
+        s._stop_rdp = lambda: setattr(s, "stopped", s.stopped + 1)
+        return s
+
+    def test_first_attach_opens_the_view(self):
+        s = self._session()
+        s.client_connected()
+        self.assertEqual(s.started, 1)
+
+    def test_a_second_attach_does_not_open_a_second_connection(self):
+        s = self._session()
+        s.client_connected()
+        s.rdp = type("P", (), {"poll": lambda self: None})()  # now alive
+        s.client_connected()
+        self.assertEqual(s.started, 1)
+
+    def test_last_detach_closes_the_view(self):
+        s = self._session()
+        s.client_connected()
+        s.client_disconnected()
+        self.assertEqual(s.stopped, 1)
+
+    def test_detach_with_others_still_attached_keeps_it_open(self):
+        s = self._session()
+        s.client_connected()
+        s.rdp = type("P", (), {"poll": lambda self: None})()
+        s.client_connected()
+        s.client_disconnected()
+        self.assertEqual(s.stopped, 0)
+
+    def test_a_failed_connect_does_not_propagate(self):
+        # A dead unit and no picker entry is worse than a blank view.
+        s = self._session()
+        def boom(): raise RuntimeError("no route to the login service")
+        s._start_rdp = boom
+        s.client_connected()  # must not raise
+        self.assertEqual(s.active_clients, 1)
+
+
 class TestControlSurface(unittest.TestCase):
     """GreeterSession must satisfy everything ControlServer.handle() calls."""
 

@@ -783,6 +783,16 @@ class ControlServer(threading.Thread):
             # a friendlier name. --label overrides it verbatim (backstage);
             # a blank label is unset, so the login name still answers.
             return _unset_if_blank(self.label) or getpass.getuser()
+        if cmd == "DUPES":
+            # Users holding more than one graphical session, so the operator can
+            # see a double login rather than discover it later. Reported only:
+            # we never end a session we did not create. Modes that cannot tell
+            # (the Mutter path) answer empty rather than ERR, so the agent can
+            # ask unconditionally.
+            finder = getattr(s, "duplicate_sessions", None)
+            if not finder:
+                return ""
+            return " ".join(f"{user}:{','.join(ids)}" for user, ids in finder())
         if cmd == "DISPLAY":
             # Which X display this session owns, so the agent can match a picker
             # entry to the right daemon instead of assuming the JVM's $DISPLAY.
