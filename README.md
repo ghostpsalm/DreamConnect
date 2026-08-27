@@ -38,9 +38,14 @@ box. Today it targets exactly that:
   logged in. *Backstage* (`DREAMCONNECT_BACKSTAGE=1`) runs its own headless
   GNOME session and needs **no login and no monitor**, but gives
   you a private admin desktop rather than the console user's.
-- **Neither mode can drive the GDM login greeter** — Mutter inhibits capture and
-  input there by design. Backstage sidesteps that by not needing a login at all;
-  it does not make the greeter itself viewable.
+- **Three modes.** *Attended* and *backstage* both need a session to exist and
+  cannot show the login screen — Mutter inhibits capture and input at the greeter
+  by design. *Greeter* mode (`--greeter`, opt-in) fixes that a different way: it
+  becomes an RDP client of GNOME's own `gnome-remote-desktop` **system** service,
+  which hands it a separate headless GDM greeter, and republishes that through
+  the same seam. An operator can then log the box in. See
+  [greeter mode](docs/greeter-login.md) — including why you must log in as an
+  account with no console session.
 
 Broadening to other compositors and distros is explicitly on the
 [roadmap](ROADMAP.md). See [Limitations](#limitations) for the full list.
@@ -179,11 +184,14 @@ Environment (see [Scope](#scope--maturity--read-this-first)):
 - **Fedora-tested; the installer is Fedora-shaped** (`dnf`, GDM). The core is
   distro-agnostic; other distros need manual dependency install for now.
   *(Roadmap.)*
-- **Can't drive the GDM login greeter** — Mutter inhibits capture and input at
-  the greeter by design. Backstage (`DREAMCONNECT_BACKSTAGE=1`) removes the need
-  to log in at all, but it shows a private headless desktop, not the greeter and
-  not the console user's session. Seeing what a logged-in user sees still
-  requires that user to be logged in.
+- **The native modes can't drive the GDM login greeter** — Mutter inhibits
+  capture and input at the greeter by design. Backstage
+  (`DREAMCONNECT_BACKSTAGE=1`) removes the need to log in at all, but it shows a
+  private headless desktop, not the greeter and not the console user's session.
+  [Greeter mode](docs/greeter-login.md) (`--greeter`) does give you a login
+  screen, via `gnome-remote-desktop`'s system service — but a *separate* headless
+  greeter, not seat0's. Seeing what a logged-in user sees still requires that
+  user to be logged in.
 
 Features:
 - **Single monitor** only, and the keymap assumes a **US-ish physical layout**.

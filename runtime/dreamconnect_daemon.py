@@ -802,6 +802,27 @@ def main():
                          "monitor (RecordVirtual) at this resolution instead of a "
                          "physical connector. Needs no monitor, no dummy plug and "
                          "no login; overrides --monitor/--all-monitors.")
+    ap.add_argument("--greeter", action="store_true",
+                    help="greeter mode: serve the GDM login screen by acting as "
+                         "an RDP client of the local gnome-remote-desktop system "
+                         "(Remote Login) service, so an operator can log the box "
+                         "in. Needs no Mutter session of its own and overrides "
+                         "--monitor/--all-monitors/--virtual.")
+    ap.add_argument("--rdp-host", default="127.0.0.1",
+                    help="greeter mode: remote-login host (default: loopback; "
+                         "there is no reason to point this off-box)")
+    ap.add_argument("--rdp-port", type=int, default=3389,
+                    help="greeter mode: remote-login port")
+    ap.add_argument("--rdp-user", default="dreamconnect",
+                    help="greeter mode: remote-login transport username")
+    ap.add_argument("--rdp-password-file",
+                    help="greeter mode: file holding the remote-login transport "
+                         "password. A file, not an argument, so the credential "
+                         "never appears in argv or /proc.")
+    ap.add_argument("--greeter-display", default=":89",
+                    help="greeter mode: private X display the RDP client draws on")
+    ap.add_argument("--greeter-size", default="1920x1080",
+                    help="greeter mode: resolution to request from the login view")
     ap.add_argument("--shm", default="/dev/shm/dreamconnect.frame")
     ap.add_argument("--stall-timeout-ms", type=int, default=4000,
                     help="rebuild the capture session if a client is attached but "
@@ -821,14 +842,41 @@ def main():
         except ValueError as e:
             ap.error(str(e))
 
+    greeter_size = None
+    if args.greeter:
+        try:
+            greeter_size = parse_resolution(args.greeter_size)
+        except ValueError as e:
+            ap.error(str(e))
+        if not args.rdp_password_file:
+            ap.error("--greeter needs --rdp-password-file")
+
     Gst.init(None)
-    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     frame = FrameBuffer(args.shm)
-    session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
-                      virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
+    if args.greeter:
+        # Greeter mode owns no Mutter session, so it needs no session bus — it
+        # is an RDP client of the local remote-login service. Importing here
+        # keeps python-xlib off the dependency path for the normal modes.
+        from dreamconnect_greeter import GreeterSession
+        width, height = greeter_size
+        session = GreeterSession(frame, width=width, height=height,
+                                 display=args.greeter_display,
+                                 rdp_host=args.rdp_host, rdp_port=args.rdp_port,
+                                 rdp_user=args.rdp_user,
+                                 password_file=args.rdp_password_file,
+                                 stall_timeout_ms=args.stall_timeout_ms)
+    else:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
+                          virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
     session.start()
-    ControlServer(args.socket, session,
-                  display=resolve_display(args.display, os.environ),
+    # Greeter mode answers the picker with its own private display, not the
+    # daemon's inherited $DISPLAY: the agent matches a picker entry to a daemon
+    # by display, and this session's pixels live on the Xvfb, not wherever the
+    # unit happened to start.
+    picker_display = (args.greeter_display if args.greeter
+                      else resolve_display(args.display, os.environ))
+    ControlServer(args.socket, session, display=picker_display,
                   label=args.label).start()
 
     # Poll for a stalled capture pipeline a few times per timeout window. Disabled
@@ -853,10 +901,14 @@ def main():
         loop.run()
     finally:
         # Restore any local blank + wake lock before releasing the session, so
-        # we never leave the box blanked/awake after the daemon exits.
+        # we never leave the box blanked/awake after the daemon exits. Greeter
+        # mode releases an Xvfb and an RDP client instead of a Mutter session;
+        # leaving either behind would hold the private display against the next
+        # start.
+        release = session.stop if args.greeter else (lambda: session._rd("Stop"))
         for cleanup in (lambda: session.set_blank(False),
                         session._release_wake_lock,
-                        lambda: session._rd("Stop")):
+                        release):
             try:
                 cleanup()
             except Exception:  # noqa: BLE001
