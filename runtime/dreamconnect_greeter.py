@@ -69,6 +69,9 @@ AXIS_TO_X_BUTTONS = {AXIS_VERTICAL: (4, 5), AXIS_HORIZONTAL: (6, 7)}
 # translation: both sides are already using the evdev keymap.
 XKB_KEYCODE_OFFSET = 8
 
+# Needed to reach the shifted level of a key (capitals, most punctuation).
+KEY_LEFTSHIFT = 42
+
 # A keycode we borrow to type a keysym the greeter's layout has no key for
 # (accented characters in a password, say). 255 is above every real key on a
 # standard keymap, so remapping it cannot shadow one.
@@ -289,9 +292,17 @@ class GreeterSession:
         The failure this catches is the RDP connection dropping — the Xvfb keeps
         serving its last contents, so ximagesrc happily reports frames and only
         the *client* is gone. Check the process, not just frame arrival.
+
+        Deliberately NOT gated on a client being attached, unlike the Mutter
+        path's watchdog. There the capture only matters while somebody reads it.
+        Here a dead RDP client means the login view is gone and GDM has reaped
+        the greeter session behind it, so an operator who attaches later finds a
+        frozen last frame and no way to recover. Reconnecting while idle keeps
+        the view ready for whoever arrives — which is the entire point of a mode
+        that exists to be there before anyone is logged in.
         """
         from gi.repository import GLib
-        if self.stall_timeout_ms <= 0 or self.active_clients == 0:
+        if self.stall_timeout_ms <= 0:
             return GLib.SOURCE_CONTINUE
         if self.rdp and self.rdp.poll() is not None:
             log(f"greeter: RDP client exited (rc={self.rdp.returncode}); reconnecting")
@@ -325,19 +336,42 @@ class GreeterSession:
         self._fake_key(evdev_to_x_keycode(evdev_code), pressed)
 
     def key_sym(self, keysym, pressed):
-        keycode = self._x.keysym_to_keycode(keysym)
-        if keycode:
-            self._fake_key(keycode, pressed)
+        """Inject a keysym, synthesising Shift when the symbol needs it.
+
+        keysym_to_keycode() alone is a trap: it returns the keycode carrying the
+        symbol but not *which level* of it. 'D' and 'd' live on one keycode, so
+        pressing it bare yields 'd' — a password typed through here would come
+        out silently lowercased and simply fail to authenticate, with nothing in
+        any log to say why. keysym_to_keycodes() gives (keycode, index) pairs;
+        an odd index is a shifted level.
+        """
+        keycode, needs_shift = self._lookup_keysym(keysym)
+        if keycode is None:
+            # No key on the greeter's layout produces this symbol. Borrow one,
+            # mapping it at both levels so it needs no modifier.
+            self._x.change_keyboard_mapping(SCRATCH_KEYCODE, [[keysym, keysym]])
+            self._x.sync()
+            try:
+                self._fake_key(SCRATCH_KEYCODE, pressed)
+            finally:
+                if not pressed:  # release is the second half; restore after it
+                    self._x.change_keyboard_mapping(SCRATCH_KEYCODE, [[0, 0]])
+                    self._x.sync()
             return
-        # No key on the greeter's layout produces this symbol. Borrow one.
-        self._x.change_keyboard_mapping(SCRATCH_KEYCODE, [[keysym, keysym]])
-        self._x.sync()
-        try:
-            self._fake_key(SCRATCH_KEYCODE, pressed)
-        finally:
-            if not pressed:  # release is the second half; restore after it
-                self._x.change_keyboard_mapping(SCRATCH_KEYCODE, [[0, 0]])
-                self._x.sync()
+        # Shift wraps the key on the way in and unwraps on the way out, so it is
+        # held across the caller's separate press and release calls.
+        if needs_shift and pressed:
+            self._fake_key(evdev_to_x_keycode(KEY_LEFTSHIFT), True)
+        self._fake_key(keycode, pressed)
+        if needs_shift and not pressed:
+            self._fake_key(evdev_to_x_keycode(KEY_LEFTSHIFT), False)
+
+    def _lookup_keysym(self, keysym):
+        """(X keycode, needs_shift) for a keysym, or (None, False) if unmapped."""
+        for keycode, index in self._x.keysym_to_keycodes(keysym):
+            if keycode:
+                return keycode, bool(index & 1)
+        return None, False
 
     def type_string(self, text):
         for ch in text:

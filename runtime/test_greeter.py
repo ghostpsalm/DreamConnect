@@ -56,6 +56,43 @@ class TestAxisTranslation(unittest.TestCase):
         self.assertEqual(g.axis_to_x_button(7, 1), (None, 0))
 
 
+class TestShiftLevels(unittest.TestCase):
+    """A capital typed without Shift silently arrives lowercase.
+
+    This is the failure that has no symptom: a password goes in, PAM rejects
+    it, and nothing anywhere says the characters were wrong. The lookup must
+    report the shift level, not just the keycode.
+    """
+
+    class FakeX:
+        # 'd'/'D' share a keycode; index 1 is the shifted level.
+        MAP = {ord("d"): [(40, 0)], ord("D"): [(40, 1)],
+               ord("1"): [(10, 0)], ord("!"): [(10, 1)]}
+
+        def keysym_to_keycodes(self, keysym):
+            return self.MAP.get(keysym, [])
+
+    def setUp(self):
+        self.s = g.GreeterSession.__new__(g.GreeterSession)
+        self.s._x = self.FakeX()
+
+    def test_lowercase_needs_no_shift(self):
+        self.assertEqual(self.s._lookup_keysym(ord("d")), (40, False))
+
+    def test_uppercase_needs_shift(self):
+        self.assertEqual(self.s._lookup_keysym(ord("D")), (40, True))
+
+    def test_shifted_punctuation_needs_shift(self):
+        self.assertEqual(self.s._lookup_keysym(ord("!")), (10, True))
+
+    def test_unmapped_keysym_reports_no_keycode(self):
+        # Falls through to the scratch-keycode remap rather than typing nothing.
+        self.assertEqual(self.s._lookup_keysym(0x01F600), (None, False))
+
+    def test_shift_is_a_real_evdev_keycode(self):
+        self.assertEqual(g.evdev_to_x_keycode(g.KEY_LEFTSHIFT), 50)
+
+
 class TestCommandLines(unittest.TestCase):
     def test_password_is_never_an_argument(self):
         argv = g.xfreerdp_argv("127.0.0.1", 3389, "dreamconnect", 1920, 1080)

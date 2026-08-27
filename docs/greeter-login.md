@@ -71,6 +71,49 @@ dreamconnect_daemon.py --greeter \
 
 To remove it entirely: `sudo runtime/dreamconnect-greeter-provision.sh disable`.
 
+## Session lifecycle — measured, not assumed
+
+All of the following was observed on Fedora 44 / GNOME 50 by driving greeter
+mode through its own control socket and reading `loginctl`.
+
+**One greeter at a time, and it is consumed by the login.** A running greeter
+daemon holds exactly one greeter session open. Logging in *consumes* it: after a
+successful authentication there are zero greeter sessions and one user session.
+Greeters do not accumulate across reconnects either — GDM reaps the old one, and
+only a transient second appears during the handover itself.
+
+**The session you get is seatless.** `Class=user`, `Type=wayland`, `Seat=` empty,
+`Remote=yes`, `Service=gdm-password`. No monitor, no seat, entirely independent
+of seat0.
+
+**Whether a second login reuses or duplicates depends on direction**, because
+GDM only migrates a session it can activate on the requesting seat:
+
+| Second login as the same user | What GDM does | Result |
+|---|---|---|
+| Remote → remote | Remote displays have no seat, so activation is skipped and `session_unlock()` runs | **Reuses** the session — verified, same leader PID |
+| **Physical console → a user who has a greeter-mode session** | `ActivateSessionOnSeat(<seatless session>, seat0)` **fails** — a seatless session cannot be activated on a seat — so `switch_to_compatible_user_session()` returns FALSE and GDM starts a fresh one | **Two live sessions for one user** |
+| Remote → a user with a *locked seat0* session | Activation skipped (no seat on the remote side), `session_unlock()` runs against the seat0 session | **Unlocks the physical console** |
+
+Verified directly against logind:
+
+```console
+$ busctl call org.freedesktop.login1 /org/freedesktop/login1 \
+      org.freedesktop.login1.Manager ActivateSessionOnSeat ss "34" "seat0"
+Call failed: Session 34 not on seat seat0
+```
+
+That is the exact call `gdm_activate_session_by_id()` makes (`common/gdm-common.c`).
+
+### The rule this produces
+
+**Log in through greeter mode only as an account nobody uses at the console.**
+
+A dedicated support account is not merely tidier — it is what keeps rows two and
+three of that table from ever happening. Sharing an account between greeter mode
+and a human at the keyboard gets you duplicate sessions in one direction and an
+unlocked console in the other.
+
 ## Security — read before enabling
 
 ### Logging in as the console user unlocks the console
