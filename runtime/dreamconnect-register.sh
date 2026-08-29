@@ -74,6 +74,21 @@ account_for_uid() {
 # writes the entry. Refuses rather than registering a session it cannot fully
 # describe: an entry the agent trusts but that serves nothing makes it refuse
 # that display, which is worse than never having registered at all.
+# manager_display <uid> -> the DISPLAY that account's systemd user manager holds.
+# Anchored on the whole line so an XAUTHORITY or GNOME_SETUP_DISPLAY value can
+# never be mistaken for it.
+manager_display() {
+  local uid="$1" v
+  is_uid "$uid" || return 1
+  v="$(runuser -u "$(account_for_uid "$uid")" -- \
+        env XDG_RUNTIME_DIR="/run/user/$uid" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+        systemctl --user show-environment 2>/dev/null \
+        | sed -n 's/^DISPLAY=//p' | head -n 1)"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
 register_session() {
   local uid="$1" dir="${2:-$DC_REGISTRY_DIR_DEFAULT}" env="${3:-}"
   local timeout="${4:-$DC_REGISTER_TIMEOUT_DEFAULT}"
@@ -85,7 +100,16 @@ register_session() {
 
   display=""
   for ((i = 0; i < timeout; i++)); do
+    # Backstage publishes an envfile; a session it set up is described there.
     display="$(session_display "$env" 2>/dev/null || true)"
+    [ -n "$display" ] && break
+    # Anything else -- a person who simply logged in -- has no such file, and
+    # for discovery that is the normal case rather than the exception. Their
+    # user manager knows the display, because the session's Xwayland imported
+    # it there on startup. Without this fallback register_session refuses every
+    # session the installer did not create, which is exactly the set discovery
+    # exists to reach.
+    display="$(manager_display "$uid" 2>/dev/null || true)"
     [ -n "$display" ] && break
     sleep 1
   done
