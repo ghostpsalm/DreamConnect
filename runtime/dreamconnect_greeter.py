@@ -54,6 +54,9 @@ gi.require_version("Gst", "1.0")
 from gi.repository import Gst  # noqa: E402
 
 from dreamconnect_daemon import log, _now_ms  # noqa: E402
+# Same notion of "a desktop" the discovery reconciler uses; a tty login is
+# Class=user too, and counting it reported a duplicate for every console login.
+from dreamconnect_discovery import GRAPHICAL_TYPES  # noqa: E402
 
 # evdev button codes on the control socket (Mutter's vocabulary) -> X button
 # numbers. The agent speaks evdev because the Mutter path does; greeter mode
@@ -150,22 +153,27 @@ def pipeline_desc(display, use_damage=False):
 
 
 def find_duplicate_sessions(sessions):
-    """[(id, user, class)] -> [(user, [ids])] for users with >1 graphical session.
+    """[(id, user, class, type)] -> [(user, [ids])] for users with >1 desktop.
 
-    Only Class=user counts. logind also lists a `manager` session per logged-in
-    account (the systemd user manager) and `manager-early`/`greeter` entries for
-    the greeter's dynamic users; counting those reports a duplicate for every
-    single login, which would make the warning meaningless.
+    Class=user alone is not enough, and assuming it was produced a false
+    positive on the first box this ran against: a `tty` login is also
+    Class=user, so anyone with a console login plus a desktop looked like a
+    double login. The type must be graphical too.
+
+    The other classes are excluded for the same reason as always — logind lists
+    a `manager` session per logged-in account and `manager-early`/`greeter`
+    entries for display-manager plumbing, and counting those reports a
+    duplicate for every single normal login.
     """
     by_user = {}
-    for session_id, user, klass in sessions:
-        if klass == "user":
+    for session_id, user, klass, type_ in sessions:
+        if klass == "user" and type_ in GRAPHICAL_TYPES:
             by_user.setdefault(user, []).append(session_id)
     return sorted((u, ids) for u, ids in by_user.items() if len(ids) > 1)
 
 
 def parse_session_properties(text):
-    """logind property blocks -> [(id, user, class)].
+    """logind property blocks -> [(id, user, class, type)].
 
     `loginctl show-session` emits Key=Value lines with a blank line between
     sessions. Parsed rather than reading `list-sessions` columns because that
@@ -177,7 +185,7 @@ def parse_session_properties(text):
     def flush():
         if current.get("Id"):
             sessions.append((current["Id"], current.get("Name", ""),
-                             current.get("Class", "")))
+                             current.get("Class", ""), current.get("Type", "")))
         current.clear()
 
     for line in text.splitlines():
@@ -186,14 +194,14 @@ def parse_session_properties(text):
             flush()
             continue
         key, _, value = line.partition("=")
-        if key in ("Id", "Name", "Class"):
+        if key in ("Id", "Name", "Class", "Type"):
             current[key] = value
     flush()
     return sessions
 
 
 def _list_sessions():
-    """[(id, user, class)] from logind, or [] if it cannot be read."""
+    """[(id, user, class, type)] from logind, or [] if it cannot be read."""
     try:
         listing = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
                                  capture_output=True, text=True, timeout=5,
@@ -203,7 +211,7 @@ def _list_sessions():
         if not ids:
             return []
         out = subprocess.run(["loginctl", "show-session", *ids,
-                              "-p", "Id", "-p", "Name", "-p", "Class"],
+                              "-p", "Id", "-p", "Name", "-p", "Class", "-p", "Type"],
                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError, IndexError):
         return []

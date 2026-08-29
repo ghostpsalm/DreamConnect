@@ -131,22 +131,25 @@ class TestDuplicateDetection(unittest.TestCase):
     """A double login is what we promise to surface; miscounting makes it noise."""
 
     def test_two_graphical_sessions_for_one_user_is_a_duplicate(self):
-        rows = [("18", "alice", "user"), ("34", "alice", "user")]
+        rows = [("18", "alice", "user", "wayland"),
+                ("34", "alice", "user", "wayland")]
         self.assertEqual(g.find_duplicate_sessions(rows), [("alice", ["18", "34"])])
 
     def test_the_systemd_manager_session_is_not_a_second_login(self):
         # Every logged-in account has a `manager` session too. Counting it would
         # report a duplicate for every single normal login.
-        rows = [("18", "alice", "user"), ("1", "alice", "manager")]
+        rows = [("18", "alice", "user", "wayland"),
+                ("1", "alice", "manager", "unspecified")]
         self.assertEqual(g.find_duplicate_sessions(rows), [])
 
     def test_greeter_sessions_do_not_count(self):
-        rows = [("c1", "gdm-greeter", "greeter"),
-                ("30", "gdm-greeter", "manager-early")]
+        rows = [("c1", "gdm-greeter", "greeter", "wayland"),
+                ("30", "gdm-greeter", "manager-early", "unspecified")]
         self.assertEqual(g.find_duplicate_sessions(rows), [])
 
     def test_separate_users_are_not_duplicates(self):
-        rows = [("18", "alice", "user"), ("9", "bob", "user")]
+        rows = [("18", "alice", "user", "wayland"),
+                ("9", "bob", "user", "wayland")]
         self.assertEqual(g.find_duplicate_sessions(rows), [])
 
 
@@ -154,18 +157,21 @@ class TestSessionPropertyParsing(unittest.TestCase):
     """loginctl accepts -o json and silently ignores it, so we parse properties."""
 
     def test_parses_blank_line_separated_blocks(self):
-        text = "Id=18\nName=alice\nClass=user\n\nId=34\nName=alice\nClass=user\n"
+        text = ("Id=18\nName=alice\nClass=user\nType=wayland\n\n"
+                "Id=34\nName=alice\nClass=user\nType=wayland\n")
         self.assertEqual(g.parse_session_properties(text),
-                         [("18", "alice", "user"), ("34", "alice", "user")])
+                         [("18", "alice", "user", "wayland"),
+                          ("34", "alice", "user", "wayland")])
 
     def test_ignores_unrelated_properties(self):
-        text = "Id=18\nName=alice\nClass=user\nSeat=seat0\nRemote=no\n"
+        text = "Id=18\nName=alice\nClass=user\nType=wayland\nSeat=seat0\nRemote=no\n"
         self.assertEqual(g.parse_session_properties(text),
-                         [("18", "alice", "user")])
+                         [("18", "alice", "user", "wayland")])
 
     def test_a_trailing_block_without_a_blank_line_is_kept(self):
-        self.assertEqual(g.parse_session_properties("Id=9\nName=bob\nClass=user"),
-                         [("9", "bob", "user")])
+        self.assertEqual(
+            g.parse_session_properties("Id=9\nName=bob\nClass=user\nType=x11"),
+            [("9", "bob", "user", "x11")])
 
     def test_empty_input_yields_nothing(self):
         self.assertEqual(g.parse_session_properties(""), [])
