@@ -1,0 +1,22 @@
+[Unit]
+Description=dreamconnect: keep the session registry matching the sessions that exist
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# logind is what we read; without it there is nothing to reconcile.
+After=systemd-logind.service dbus.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+# Root, because the registry must stay root-owned or the agent ignores it
+# entirely -- an account that could write it could claim any session.
+ExecStart=@INSTALL_DIR@/runtime/dreamconnect_sessiond.py
+Restart=always
+RestartSec=5
+
+# The registry lives in /run and does not survive a reboot, which is correct:
+# an entry promises a session is reachable now.
+RuntimeDirectory=dreamconnect/sessions
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

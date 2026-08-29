@@ -149,6 +149,16 @@ uninstall() {
     systemctl disable --now "dreamconnect-register@$target_uid.service" 2>/dev/null || true
   fi
   rm -f /etc/systemd/system/dreamconnect-register@.service
+  # The supervisor first, so it cannot re-attach a session while we are removing
+  # the units it drives. Stopping it deliberately leaves existing entries alone
+  # — they describe sessions that are still live — and the attach instances go
+  # with their own units below.
+  systemctl disable --now dreamconnect-sessiond.service 2>/dev/null || true
+  for unit in $(systemctl list-units --all --no-legend 'dreamconnect-attach@*' 2>/dev/null | awk '{print $1}'); do
+    systemctl stop "$unit" 2>/dev/null || true
+  done
+  rm -f /etc/systemd/system/dreamconnect-sessiond.service \
+        /etc/systemd/system/dreamconnect-attach@.service
   systemctl daemon-reload 2>/dev/null || true
   # Undo the linger install always enables — previously never reverted here,
   # a pre-existing gap (see ROADMAP.md H6).
@@ -477,6 +487,19 @@ echo ">> installing session registration unit"
 sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
     "$HERE/systemd/dreamconnect-register@.service" \
     > /etc/systemd/system/dreamconnect-register@.service
+
+# Session discovery. The attach template is started per uid by the supervisor,
+# never enabled: which accounts will log in is not knowable at install time, and
+# that is precisely what discovery exists to solve. Both are installed even when
+# the supervisor is not enabled, so `systemctl start dreamconnect-sessiond` is
+# all that turning it on later requires.
+echo ">> installing session discovery units"
+sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+    "$HERE/systemd/dreamconnect-attach@.service" \
+    > /etc/systemd/system/dreamconnect-attach@.service
+sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+    "$HERE/systemd/dreamconnect-sessiond.service" \
+    > /etc/systemd/system/dreamconnect-sessiond.service
 systemctl daemon-reload
 
 if [ "$BACKSTAGE" -eq 1 ]; then

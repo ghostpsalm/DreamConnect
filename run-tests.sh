@@ -22,6 +22,10 @@ echo "== Python session-discovery tests =="
 python3 "$HERE/runtime/test_discovery.py" 2>&1 | tail -6
 
 echo
+echo "== Python supervisor tests =="
+python3 "$HERE/runtime/test_sessiond.py" 2>&1 | tail -6
+
+echo
 echo "== Python greeter tests =="
 python3 "$HERE/runtime/test_greeter.py" 2>&1 | tail -6
 
