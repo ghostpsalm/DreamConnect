@@ -69,6 +69,11 @@ SC_STREAM_IFACE = "org.gnome.Mutter.ScreenCast.Stream"
 # so a typo (192000x1080) must be refused rather than allocated.
 MAX_DIMENSION = 16384
 
+# Used when a session turns out to have no monitors and capture has to be
+# virtual. 1080p is what backstage already conjures, so an operator gets the
+# same geometry whichever way they reached the box.
+DEFAULT_VIRTUAL_SIZE = (1920, 1080)
+
 
 def log(*a):
     print("[dreamconnect]", *a, file=sys.stderr, flush=True)
@@ -345,6 +350,28 @@ class Session:
         return self.bus.call_sync(RD_DEST, self.rd_path, RD_SESSION_IFACE, method,
                                   v, None, Gio.DBusCallFlags.NONE, -1, None)
 
+    def _has_monitors(self):
+        """Does this session have any logical monitor to capture?
+
+        Asked separately from _desktop_area because "no monitors" and "could not
+        work out the bounding box" are different answers that need different
+        handling, and conflating them would make a transient DisplayConfig error
+        look like a headless session and silently switch capture modes.
+        """
+        try:
+            r = self.bus.call_sync(
+                "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                "org.gnome.Mutter.DisplayConfig", "GetCurrentState", None, None,
+                Gio.DBusCallFlags.NONE, -1, None)
+            _serial, _monitors, logical, _props = r.unpack()
+            return bool(logical)
+        except Exception as e:  # noqa: BLE001
+            # Unreadable is not the same as absent. Assume monitors exist so the
+            # behaviour stays what it has always been, rather than quietly
+            # rerouting a monitored session onto a virtual one.
+            log(f"could not read monitor state ({e}); assuming monitors exist")
+            return True
+
     def _desktop_area(self):
         """Bounding box of all logical monitors as (x, y, w, h, count), in
         desktop/logical coordinates — or None if it can't be determined."""
@@ -444,6 +471,20 @@ class Session:
         # (no panel, no dummy plug). The output is origin-anchored, so area_x/y
         # stay 0 and the pointer maths below is a no-op, same as RecordMonitor.
         props = {"cursor-mode": GLib.Variant("u", 1)}
+
+        # A session with no monitors can only be captured virtually. RecordArea
+        # over a zero-monitor desktop and RecordMonitor against a connector that
+        # is not there both fail on the Mutter call ("Unknown monitor (0)"), so
+        # a caller who could not know what outputs a session has would be forced
+        # to guess -- which is exactly the position session discovery is in when
+        # it attaches to somebody else's desktop. Headless is not an unusual
+        # case here: every remote-login and backstage session has zero monitors.
+        # Decide from what Mutter reports rather than from what the flags said.
+        if not self.virtual and not self._has_monitors():
+            self.virtual = DEFAULT_VIRTUAL_SIZE
+            log(f"no monitors on this session; capturing virtually at "
+                f"{self.virtual[0]}x{self.virtual[1]}")
+
         if self.virtual:
             self.area_x = self.area_y = 0
             self.stream_path = self.bus.call_sync(
