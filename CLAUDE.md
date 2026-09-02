@@ -27,7 +27,7 @@ whoever is changing the code.
 | `agent/` | The Java agent: `boot/` bootstrap classes, `src/`, `lib/`, `test/`, and `build.sh` |
 | `runtime/` | The Python side — `dreamconnect_daemon.py`, `_discovery.py`, `_sessiond.py`, `_greeter.py`, plus their tests |
 | `install.sh`, `install-lib.sh` | The installer, and the library that holds all of its testable logic |
-| `test_install.sh` | 224 installer tests, driven against tmp fixtures |
+| `test_install.sh` | the installer tests, driven against tmp fixtures |
 | `systemd/` | Unit templates |
 | `docs/` | Design, troubleshooting, and the per-feature specs under `docs/specs/` |
 | `factory/` | Factory run records — history, not editable |
@@ -38,9 +38,12 @@ whoever is changing the code.
 ./scripts/gate.sh
 ```
 
-It delegates to `./run-tests.sh`, which is this repo's real gate and runs everything: the Java boot
-tests, the Python daemon/discovery/supervisor/greeter suites, and `test_install.sh`. `gate.sh` is a
-delegator on purpose — a second list of suites here could disagree with the one that actually runs.
+It delegates to `./run-tests.sh`, which is this repo's real gate. **`run-tests.sh` is the authority on
+which suites run — do not restate its list here.** The first version of this paragraph did, naming the
+discovery, supervisor and greeter suites, which exist on `greeter/rdp-login-view` and not on `main`;
+the list was read off a branch checkout and was false of the branch it was committed to. A seraph
+caught it. That is exactly why `gate.sh` is a delegator: a second inventory of suites is a second thing
+that can disagree with the one that actually executes.
 
 **Green before committing.**
 
