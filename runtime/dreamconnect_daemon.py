@@ -194,7 +194,13 @@ class Session:
         self.sc_path = None
         self.stream_path = None
         self.node_id = None
-        self.width = self.height = 0
+        # Stream size as one (w, h) tuple, not two fields: the capture thread
+        # publishes it and the socket thread reads it, and a pair of separate
+        # stores is not one update — GEOM landing between them would reply the
+        # new width with the old height (#44). Rebinding a tuple is a single
+        # store, so a reader sees one mode or the other, never a mix. A lock
+        # would also do, but this costs the reader nothing.
+        self.geom = (0, 0)
         self.pipeline = None
         self._sub_ids = []          # D-Bus signal subscriptions, cleared on restart
         self._restarting = False    # guards against overlapping session restarts
@@ -601,8 +607,8 @@ class Session:
                 self.frame.write(mapinfo.data, w, h, stride)
             finally:
                 buf.unmap(mapinfo)
-            if (w, h) != (self.width, self.height):
-                self.width, self.height = w, h
+            if (w, h) != self.geom:
+                self.geom = (w, h)
                 log(f"stream geometry {w}x{h}")
         return Gst.FlowReturn.OK
 
@@ -772,7 +778,11 @@ class ControlServer(threading.Thread):
         if cmd == "PING":
             return "PONG"
         if cmd == "GEOM":
-            return f"{s.width} {s.height}"
+            # One load of the published pair, unpacked afterwards. Reading the
+            # tuple twice (s.geom[0], s.geom[1]) would reintroduce the tear the
+            # single attribute exists to prevent.
+            w, h = s.geom
+            return f"{w} {h}"
         if cmd == "NODE":
             return str(s.node_id)
         if cmd == "WHO":

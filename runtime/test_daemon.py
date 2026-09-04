@@ -22,7 +22,11 @@ SOCK = "/tmp/dreamconnect-test-unused.sock"  # never bound: we only call handle(
 class StubSession:
     def __init__(self):
         self.calls = []
-        self.width, self.height, self.node_id = 1920, 1080, 66
+        # Geometry is published as one pair, not two fields, so a reader can
+        # never observe half of a resolution change (issue #44). The double
+        # mirrors that shape: a stub still carrying .width/.height would let a
+        # two-load reader pass here while tearing against the real session.
+        self.geom, self.node_id = (1920, 1080), 66
 
     def motion_abs(self, x, y): self.calls.append(("M", x, y))
     def button(self, b, s): self.calls.append(("B", b, s))
@@ -94,6 +98,65 @@ class TestHandle(unittest.TestCase):
         self.assertIsNone(cs.handle("M 100 200"))
         self.assertEqual(self.s.calls[-1], ("M", 100.0, 200.0))
         self.assertTrue(cs.handle("BOGUS").startswith("ERR"))
+
+
+class FlickeringGeomSession:
+    """A session whose published geometry changes between every observation.
+
+    Models the capture thread landing a resolution change while the socket
+    thread is answering GEOM. Each read of a published geometry field advances
+    to the next mode, so a reader that observes the geometry *twice* sees two
+    different modes and can only reply with a torn pair, while a reader that
+    takes a single snapshot always replies with one mode intact. Both modes are
+    themselves coherent: nothing here can produce "1920 720" except the reader
+    mixing two observations.
+
+    .width/.height are kept alongside .geom on purpose. They are not part of the
+    session interface any more, but without them a two-load reader would die on
+    a missing attribute, which proves only that a rename happened; with them it
+    is caught replying with the torn pair, which is the defect itself.
+    """
+
+    MODES = ((1920, 1080), (1280, 720))
+
+    def __init__(self):
+        self.observations = 0
+        self.node_id = 66
+
+    def _observe(self):
+        mode = self.MODES[self.observations % len(self.MODES)]
+        self.observations += 1
+        return mode
+
+    @property
+    def geom(self):
+        return self._observe()
+
+    @property
+    def width(self):
+        return self._observe()[0]
+
+    @property
+    def height(self):
+        return self._observe()[1]
+
+
+class TestGeomIsAtomic(unittest.TestCase):
+    """Issue #44 (2026-07-31 review, F1): "a GEOM issued during the single frame
+    a resolution change lands can return the new width with the old height (or
+    vice-versa)". runtime/README.md:56 defines the reply as the *stream size* —
+    one size — so both numbers must come from a single observation of the pair.
+    """
+
+    def test_geom_reply_is_one_published_pair_never_a_mix_of_two(self):
+        s = FlickeringGeomSession()
+        reply = d.ControlServer(SOCK, s).handle("GEOM")
+        self.assertIn(
+            reply,
+            {f"{w} {h}" for w, h in FlickeringGeomSession.MODES},
+            f"GEOM replied {reply!r}, which is neither published geometry: it "
+            f"mixed {s.observations} observations of a changing pair",
+        )
 
 
 class TestDisplayCommand(unittest.TestCase):
