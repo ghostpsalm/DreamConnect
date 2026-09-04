@@ -19,3 +19,4 @@ number would misrepresent cost.
 | 2026-07-28T13:49:10Z | issue-24 | unknown | #24 | 8 commits | - | 250m | out 151,022 - cache-read 29,005,776 - agents 588,473 total across 13 spawns | - |
 | 2026-07-28T22:44:50Z | issue-21 | done | #21 | 6 commits | - | 882m | out 441,519 - cache-read 130,449,420 - agents 2,151,585 total across 44 spawns | - |
 | 2026-07-29T09:42:46Z | issue-19 | done | #19 | 2 commits | - | 1794m | out 123,937 - cache-read 11,881,704 - agents 522,162 total across 12 spawns | bounces=1 breaker_verdict=defect-found findings_deferred=4 findings_fixed=5 guard_tests=2 laps=4 reviewer_blocking=0 seraph_unsure=0 slices=3 tests_added=8 |
+| 2026-09-04T07:58:02Z | issue-44 | done | #44 | 2 commits | - | 332m | out 110,759 - cache-read 10,060,156 - agents 177,887 total across 4 spawns | bounces=0 guard_tests=0 laps=0 |

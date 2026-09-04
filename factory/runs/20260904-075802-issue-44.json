@@ -1,0 +1,147 @@
+{
+  "recorded_at": "2026-09-04T07:58:02Z",
+  "repo": "geom-atomicity-4",
+  "branch": "runtime/geom-atomicity-4",
+  "base": "83bef6b1da90da26ea03cfd0c2fdc00b7123a300",
+  "window_start": "2026-09-03T07:27:00+10:00",
+  "head": "c2606bceb15ab3b939db8689a4acaaecda89ad19",
+  "issue": {
+    "number": 44,
+    "state": "OPEN",
+    "title": "daemon: GEOM can read a mismatched width/height during a resolution change",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/44"
+  },
+  "commits": [
+    {
+      "sha": "c2606bceb15ab3b939db8689a4acaaecda89ad19",
+      "subject": "Roadmap: declare where the repo stands in STATUS.md"
+    },
+    {
+      "sha": "9af4dfd3da80cdc85e0f776243069beae4f30782",
+      "subject": "Daemon: publish stream geometry as one tuple (#44)"
+    }
+  ],
+  "commit_count": 2,
+  "diffstat": "3 files changed, 103 insertions(+), 5 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 178,
+      "output_tokens": 110759,
+      "cache_read_input_tokens": 10060156,
+      "cache_creation_input_tokens": 491538
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 4,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 31937,
+        "duration_ms": 73836,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 52308,
+        "duration_ms": 197714,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 45463,
+        "duration_ms": 84825,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 48179,
+        "duration_ms": 133380,
+        "models": []
+      }
+    },
+    "usage_blocks": 89,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "51dc3df9-34aa-40d5-805c-35198b2e9113.jsonl",
+        "usage_blocks": 89
+      }
+    ],
+    "agent_wall_clock_ms": 489755,
+    "first_activity": "2026-09-04T02:26:10.328000+00:00",
+    "last_activity": "2026-09-04T07:57:53.186000+00:00",
+    "notification_tokens": 177887,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 44",
+    "<task-notification>\n<task-id>a3430553b2d685583</task-id>\n<tool-use-id>toolu_015y9WyVHZUnmRbUaoXjJUa9</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-geom-atomicity-4/51dc3df9-34aa-40d5-805c-35198b2e9113/tasks/a3430553b2d685583.output</output-file>\n<status>completed</status>\n<summary>Agent \"Architect plan for issue 44\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: plan-ready\nACTION-ID: 92b1b76b2aa644c18c7a9fbc8d5d57bb\nSLICES: 1\nINVOCATION-ID: inv-001-786a2c81\nEVIDENCE REQ-001: Plan picks one shape, not a choice: publish `self.geom = (w, h)` as a single tuple attribute. `_lock` is rejected because it already serialises D-Bus injection calls (`runtime/dreamconnect_daemon.py:615-633`, each holding it across a blocking `_rd()`), so reusing it would make a low-frequency `GEOM` wait on the input hot path.\nEVIDENCE REQ-002: Defect confirmed by reading: writer `runtime/dreamconnect_daemon.py:605` `self.width, self.height = w, h` executes in `_on_sample` (capture/GStreamer thread, L578-607); reader `runtime/dreamconnect_daemon.py:775` `return f\"{s.width} {s.height}\"` runs in `ControlServer.handle` on the socket thread. Two loads of two independently-stored fields; no lock on either side. Severity Low: reply self-corrects on the next frame, `agent/boot/dreamconnect/boot/Bridge.java:1057` only logs it at attach.\n\n## Problem\nAn operator querying geometry in the single frame a guest resolution change lands can get a mismatched `W H` \u2014 new width with old height. Cosmetic, self-correcting, but the daemon publishes a pair it never writes atomically.\n\n## Seams (confirm before proceeding)\n`ControlServer.handle` via `runtime/test_daemon.py` \u2014 the repo's declared `runtime/*.py` seam. One seam.\n\n## The whole set \u2014 cross-thread multi-field state on `Cap",
+    "Seam approved and recorded for impl-44-ea08992a at tree:a5f2b5b423fe4a6ceb2d098edcec143200f5ee32. Note your plan correctly NAMES the interface and the test double - that is issue #539's new requirement working. The oracle now owns the entire test surface including StubSession; the builder may not touch a test file at all. Run confirm --approved and continue.",
+    "<task-notification>\n<task-id>a58e20aeaa57bebcd</task-id>\n<tool-use-id>toolu_01X7cxNwRbk3FBo7DAcSP1gn</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-geom-atomicity-4/51dc3df9-34aa-40d5-805c-35198b2e9113/tasks/a58e20aeaa57bebcd.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle red test for issue 44\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: a63d236139c648dca136950dbfe68fcd\nINVOCATION-ID: inv-002-6ed1d907\nEVIDENCE REQ-001: Test forces the \"single atomic observation\" shape, not just a rename. Scratch mutant `return f\"{s.geom[0]} {s.geom[1]}\"` (publishes a tuple, observes it twice) \u2192 `AssertionError: '1920 720' not found in {'1920 1080', '1280 720'}`, other 54 tests pass; scratch known-good `w, h = s.geom; return f\"{w} {h}\"` \u2192 `Ran 55 tests ... OK`. Both run in the scratchpad only; candidate `runtime/dreamconnect_daemon.py:775` is still `return f\"{s.width} {s.height}\"` and `git status` shows only `runtime/test_daemon.py` modified.\nEVIDENCE REQ-002: Defect reproduced deterministically at the seam against today's code: `python3 runtime/test_daemon.py` \u2192 `AssertionError: '1920 720' not found in {'1920 1080', '1280 720'} : GEOM replied '1920 720' ... it mixed 2 observations of a changing pair` (`dreamconnect_daemon.py:775` loads `s.width` then `s.height`; writer at `:604-605`). Severity Low corroborated: the torn reply is still a well-formed `&lt;w&gt; &lt;h&gt;` line (`runtime/README.md:56`), nothing raises, and no other test in the suite is affected by it.\n\n## Test authored\nslice: 1 (only slice) \u2014 GEOM answers one coherent pair\nseam: `ControlServer.handle(\"GEOM\")` via `runtime/test_daemon.py` (repo's declared `runtime/*.py` seam)\ntest: `/home/kogies/.factory/worktrees/dreamconnect/geom-atomicit",
+    "<task-notification>\n<task-id>a9b4062a4b4e39a58</task-id>\n<tool-use-id>toolu_01Xi7NMosnT3ragSqwXsB3KB</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-geom-atomicity-4/51dc3df9-34aa-40d5-805c-35198b2e9113/tasks/a9b4062a4b4e39a58.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder green for issue 44\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 7cc810bfb87a4ed2aa49a7cab7cf96ca\nINVOCATION-ID: inv-003-5f226239\nEVIDENCE REQ-001: Geometry is now one published tuple. `runtime/dreamconnect_daemon.py:197-203` initialises `self.geom = (0, 0)` (was `self.width = self.height = 0`); `:609-610` the capture thread rebinds it in one store (`if (w, h) != self.geom: self.geom = (w, h)`); `:780-784` GEOM does a single load `w, h = s.geom` (was `f\"{s.width} {s.height}\"`). Red confirmed against `git show HEAD:runtime/dreamconnect_daemon.py` in a scratch copy: `AssertionError: '1920 720' not found in {'1920 1080', '1280 720'} ... mixed 2 observations of a changing pair`. Green after the change: `python3 -m unittest runtime.test_daemon.TestGeomIsAtomic runtime.test_daemon.TestHandle -v` \u2192 `Ran 14 tests in 0.001s / OK`.\nEVIDENCE REQ-002: Severity/confidence line \u2014 no code obligation, so the evidence is that the confirmed defect no longer reproduces and nothing regressed: whole suite `python3 -m unittest runtime.test_daemon` \u2192 `Ran 55 tests in 0.012s / OK`, which includes the pre-existing `test_geom` and `test_existing_commands_unchanged_when_display_and_label_are_set` (GEOM still replies `1920 1080`). Cost is one tuple load on a low-frequency command, matching the issue's \"negligible cost\".\n\nNo test-file edits.\n\nWhat I did: replaced the two-field publication of stream size with a single `geom` tuple, and made the GEOM ",
+    "Owner decided CONTINUE on pd-d4941702c776. The authoritative full gate at the end of this run is that path's coverage. Run factory_implement.py next and continue to the review ladder and the final gate.",
+    "<task-notification>\n<task-id>a0e7755f5323bca12</task-id>\n<tool-use-id>toolu_01XK6pu1N8X6wBYdSroBMYjA</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-geom-atomicity-4/51dc3df9-34aa-40d5-805c-35198b2e9113/tasks/a0e7755f5323bca12.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph verify issue 44\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: 0f12723a168d45308af8e0abbd1befd4\nINVOCATION-ID: inv-004-3a20e7b0\n\nEVIDENCE REQ-001: `runtime/dreamconnect_daemon.py:203` now holds `self.geom = (0, 0)`; writer at `:610-611` does `if (w, h) != self.geom: self.geom = (w, h)` (one rebind); reader at `:784` does `w, h = s.geom` (one load). `grep -rn 'self\\.width\\|s\\.width' runtime/*.py` leaves only `FrameBuffer` (`:104,140,157`), a different class documented `:98` \"Single writer (PipeWire thread)\" whose fields are never read off the socket thread \u2014 no dangling `Session` reference. Red proven: new test run against `git show 83bef6b:runtime/dreamconnect_daemon.py` in a scratchpad \u2192 `AssertionError: '1920 720' not found in {'1280 720', '1920 1080'} ... it mixed 2 observations`, exit 1 \u2014 the exact torn pair the issue predicts. Green on candidate: `python3 runtime/test_daemon.py` \u2192 `Ran 55 tests ... OK`, exit 0.\n\nEVIDENCE REQ-002: Not an implementable requirement \u2014 it is the issue's own metadata line (\"Confidence: Confirmed. Severity: Low\"). Confirmed-ness is independently corroborated by the reproduced red above (a real `1920 720` reply from pre-fix code); Low severity is corroborated by the fix being read-path-only with unchanged output shape (`GEOM` before the first frame still replies `0 0`, from `(0, 0)` at `:203`). No code change was owed by this line.\n\n`./scripts/gate.sh` was BLOCKED by the pre_tool_use hook (co",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 43,
+    "ask: This edits a version number.": 21,
+    "ask: This would publish a GitHub release, which ships to real devices.": 7,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 7,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 7,
+    "block: recursive/forced delete": 81,
+    "block: editing the deployed factory directly": 49,
+    "block: writing to a file the harness owns": 7,
+    "block: touching a secret/credential file": 35,
+    "block: sending a secret/credential file to a network client": 210,
+    "block: sending ~/.claude.json to a network client": 14,
+    "block: force push (never rewrite published history)": 7,
+    "block: editing an existing migration": 7,
+    "block: malformed hook input": 287,
+    "block: unbounded read of a 600-line source file": 28,
+    "block: writing an owner approval from inside a factory worktree": 42,
+    "block: writing an owner approval from a session with no recorded cwd": 7,
+    "block: running an owner-decision command from inside a factory worktree": 48,
+    "block: running an owner-decision command from a session with no recorded cwd": 7,
+    "block: hard reset discards work": 7,
+    "block: unbounded read of a 1035-line source file": 7,
+    "block: unbounded read of a 12285-line source file": 7,
+    "block: a model-tool write to Factory acceptance authority state": 170,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 29,
+    "block: a factory worker role executing the authoritative full gate": 36,
+    "block: the driver's state file could not be read (/tmp/tmpikv8fio0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpntzwzmio/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmppr8ug0jx/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp40ck0ihe/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp5ns_rbv2/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: destructive SQL DDL": 2,
+    "block: the driver's state file could not be read (/tmp/tmp23o4er1z/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp2raziv5d/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 669-line source file": 1
+  },
+  "status": "done",
+  "note": "No breaker in this run: risk tier 'normal' drew architect/oracle/builder/seraph only. Seraph passed. Targeted-testing step recorded NEGATIVE_RESULT and was overridden by owner decision pd-d4941702c776 (CONTINUE) \u2014 the full gate is this path's coverage, not a targeted suite. Full gate ./scripts/gate.sh exit 0. No CI: .github/workflows/ci.yml is untracked, so the push triggers nothing. Fix proven against fixtures only; no live Fedora GNOME verification of a real resolution switch during GEOM. Filed #58 for the same defect in area_x/area_y, then closed it as a duplicate of #57, which already existed.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "0"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}
