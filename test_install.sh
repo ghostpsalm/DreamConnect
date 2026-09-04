@@ -5039,6 +5039,212 @@ test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up() {
     "error wiring: install.sh:$waited swallows a wait_for_user_bus failure"
 }
 
+# --- issue #29: a probe that cannot RUN is not a bus that is not UP -----------
+#
+# WHY THIS SLICE EXISTS (issue #29, found reviewing #24 slice 2): the connect
+# probe above shells out to python3. If python3 is absent or broken when
+# wait_for_user_bus runs — reachable with DREAMCONNECT_SKIP_DEPS=1, or on an
+# unrecognised package manager where install.sh leaves DEPS=() — every probe
+# attempt fails in exactly the way a not-yet-started bus does. A perfectly
+# healthy, LISTENING bus then burns the whole timeout and the install aborts
+# with "timed out ... is user@<uid>.service running?", sending whoever debugs it
+# after a user manager that was never the problem.
+#
+# CONTRACT UNDER TEST (issue #29's "Suggested fix", and this slice's plan —
+# stated before any implementation of it existed):
+#   * bus_socket_is_live keeps returning python3's status verbatim:
+#       0 = connected · 1 = refused, i.e. not up yet · anything else = the probe
+#       could not run at all.
+#   * When `[ -S <bus> ]` is true and the probe returns a status other than 0 or
+#     1, wait_for_user_bus stops polling AT ONCE and returns 1 after writing a
+#     distinct diagnosis to stderr: one that names python3 and
+#     DREAMCONNECT_SKIP_DEPS, names the uid, and does not claim a timeout it
+#     never served.
+#   * Status 1 is unchanged — it still polls out to the existing timeout message.
+#
+# WHERE THE EXPECTED VALUES COME FROM: the contract above for what must happen,
+# and MEASUREMENT for the statuses it turns on. Measured on this box against
+# install-lib.sh as it stands, calling bus_socket_is_live directly at a real
+# listening socket:
+#     python3 absent from PATH           -> 127  (the shell's command-not-found
+#                                                 status; its MESSAGE is eaten by
+#                                                 the probe's own 2>/dev/null, so
+#                                                 stderr carries nothing at all)
+#     python3 present, not executable    -> 126
+#     python3 present, exits 127 itself  -> 127  (a broken interpreter — e.g. one
+#                                                 that cannot load a shared lib)
+# and end to end today, live bus + no python3, timeout_seconds=2:
+#     exit 1 after 2060ms, "error: timed out after 2s waiting for the user bus of
+#     uid 1000 (<root>/1000/bus); is user@1000.service running?"
+# — the misdiagnosis this slice removes.
+#
+# NOT A SHIM, for the absent case: PATH is narrowed to a directory holding
+# nothing but symlinks to what wait_for_user_bus itself shells out to, so python3
+# is GENUINELY missing rather than faked by an exit code. Emptying PATH entirely
+# was ruled out — it takes date and sleep with it, and the function would then
+# fail for a reason that has nothing to do with the probe.
+
+# The bin directory that child shell runs inside. date and sleep are what the
+# poll loop shells out to and bash is what runs it; <python3_kind> decides what
+# the probe finds: absent, unexecutable, or broken-but-executable.
+make_probe_bin() {  # dir python3_kind
+  local tool src
+  mkdir -p "$1"
+  for tool in date sleep bash; do
+    src="$(command -v "$tool")" || { fail "probe fixture: no $tool on PATH"; return 1; }
+    ln -sf "$src" "$1/$tool"
+  done
+  case "$2" in
+    absent) ;;
+    unexecutable) printf '#!/bin/sh\nexit 0\n' > "$1/python3"; chmod 000 "$1/python3" ;;
+    broken)       printf '#!/bin/sh\nexit 127\n' > "$1/python3"; chmod 755 "$1/python3" ;;
+    *) fail "probe fixture: unknown python3 kind '$2'"; return 1 ;;
+  esac
+  # Prove the fixture rather than assume it. `hash -r` first: a path this shell
+  # already hashed for python3 would let the child run an interpreter the
+  # narrowed PATH does not contain, and the test would prove nothing.
+  if [ "$2" = absent ] && ( PATH="$1"; hash -r; command -v python3 >/dev/null ); then
+    fail "probe fixture: python3 is still reachable under the narrowed PATH"
+    return 1
+  fi
+  return 0
+}
+
+# Like run_wait_bus, but in a child shell whose PATH is <bin>, and watchdogged:
+# what this asserts is that the wait ENDS, and the behaviour it is written
+# against sits out the full timeout.
+run_wait_bus_on_path() {  # bin runtime_root uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  BUS_ERR="$(DC_RUNTIME_DIR_ROOT="$2" DC_BUS_POLL_INTERVAL="$5" \
+             timeout "$6" env PATH="$1" "$1/bash" -c \
+               'set -uo pipefail; hash -r; . "$1"; wait_for_user_bus "$2" "$3"' \
+             _ "$LIB" "$3" "$4" 2>&1 >/dev/null)"; BUS_RC=$?
+  end="$(date +%s%3N)"
+  BUS_MS=$((end - start))
+  return 0
+}
+
+# The diagnosis, asserted by its two load-bearing markers instead of its wording
+# — the sentence is the builder's to write. DREAMCONNECT_SKIP_DEPS is the marker
+# that cannot appear by accident: were the probe's 2>/dev/null ever dropped, the
+# shell's own "python3: command not found" would satisfy a bare python3 match.
+assert_bus_probe_unrunnable() {  # label uid
+  [ "$BUS_RC" -ne 124 ] || {
+    fail "$1: still polling when the watchdog fired — a probe that cannot run will not start running"
+    return 0; }
+  assert_eq "$BUS_RC" "1" "$1: fails with the same status any other unusable bus gives (stderr: $BUS_ERR)"
+  [ "$BUS_MS" -lt 1000 ] || \
+    fail "$1: took ${BUS_MS}ms — waiting cannot fix an unrunnable probe, so the wait must end at once rather than at the timeout"
+  # The fixture directories deliberately do not spell "python3": the existing
+  # timeout line quotes the bus PATH, so a fixture root named bus-nopython3
+  # satisfied this assertion on its own the first time it was run. Every
+  # temporary path under this block is named bus-probe-* / bin-probe-* for that
+  # reason — rename them back and this assertion stops testing anything.
+  assert_contains "$BUS_ERR" "python3" "$1: stderr names python3 as what could not run"
+  assert_contains "$BUS_ERR" "DREAMCONNECT_SKIP_DEPS" \
+    "$1: stderr names the way out — install python3, or re-run without DREAMCONNECT_SKIP_DEPS=1"
+  assert_contains "$BUS_ERR" "$2" "$1: stderr names the uid it was waiting for"
+  assert_not_contains "$BUS_ERR" "timed out" \
+    "$1: reported a timeout it never served — the bus was bound and listening; the probe failed, not the bus"
+}
+
+# (m) python3 genuinely absent: the DREAMCONNECT_SKIP_DEPS=1 host. The socket is
+# bound, listening and healthy, so "the user bus never came up" is a lie about
+# the one component that is working.
+test_wait_for_user_bus_reports_a_missing_python3_instead_of_a_timeout() {
+  local root bin
+  require_wait_for_user_bus "python3 absent" || return 0
+  command -v python3 >/dev/null || { fail "python3 absent: python3 is required to bind the fixture bus"; return 0; }
+  root="$TMP/bus-probe-absent"; bin="$TMP/bin-probe-absent"
+  make_probe_bin "$bin" absent || return 0
+  bind_bus_socket "$root/1000/bus" 0 10
+  await_bus_socket "$root/1000/bus" || {
+    fail "precondition: no socket was bound — a dead bus would fail for the ordinary reason and prove nothing"
+    reap_bus_binders; return 0; }
+
+  run_wait_bus_on_path "$bin" "$root" 1000 2 0.05 6
+  assert_bus_probe_unrunnable "python3 absent" 1000
+  reap_bus_binders
+}
+
+# (n) python3 present but not executable — status 126, not 127. Asserted
+# separately because "not 0 and not 1" is the contract; an implementation that
+# hard-codes 127 leaves a permission-broken interpreter still burning the
+# timeout. (This suite refuses to run as root, test_install.sh:18, so chmod 000
+# genuinely denies here.)
+test_wait_for_user_bus_reports_an_unrunnable_python3_instead_of_a_timeout() {
+  local root bin
+  require_wait_for_user_bus "python3 not executable" || return 0
+  command -v python3 >/dev/null || { fail "python3 not executable: python3 is required to bind the fixture bus"; return 0; }
+  root="$TMP/bus-probe-unexec"; bin="$TMP/bin-probe-unexec"
+  make_probe_bin "$bin" unexecutable || return 0
+  bind_bus_socket "$root/1000/bus" 0 10
+  await_bus_socket "$root/1000/bus" || {
+    fail "precondition: no socket was bound"; reap_bus_binders; return 0; }
+
+  run_wait_bus_on_path "$bin" "$root" 1000 2 0.05 6
+  assert_bus_probe_unrunnable "python3 not executable" 1000
+  reap_bus_binders
+}
+
+# (o) python3 on PATH, executable, and broken — it runs and exits 127 itself,
+# which is what a missing shared library looks like. This is the case that pins
+# the contract to the PROBE'S STATUS rather than to the interpreter's presence:
+# a `command -v python3` guard at the top of wait_for_user_bus satisfies (m) and
+# (n) and still burns the full timeout here, because python3 is right there.
+test_wait_for_user_bus_reports_a_broken_python3_instead_of_a_timeout() {
+  local root bin
+  require_wait_for_user_bus "python3 broken" || return 0
+  command -v python3 >/dev/null || { fail "python3 broken: python3 is required to bind the fixture bus"; return 0; }
+  root="$TMP/bus-probe-broken"; bin="$TMP/bin-probe-broken"
+  make_probe_bin "$bin" broken || return 0
+  bind_bus_socket "$root/1000/bus" 0 10
+  await_bus_socket "$root/1000/bus" || {
+    fail "precondition: no socket was bound"; reap_bus_binders; return 0; }
+
+  run_wait_bus_on_path "$bin" "$root" 1000 2 0.05 6
+  assert_bus_probe_unrunnable "python3 broken" 1000
+  reap_bus_binders
+}
+
+# (p) The other side of the split, so it cannot be satisfied by blaming python3
+# for everything. An orphaned inode with a WORKING python3 is a refused connect
+# (status 1; measured in slice 2 above as ConnectionRefusedError/Errno 111) and
+# must keep polling to the ordinary timeout message. Test (f) at the top of this
+# block pins that timing but is blind to the wording — `assert_bus_failed` asks
+# only for non-zero and a non-empty line — so an implementation that printed the
+# python3 diagnosis unconditionally would leave (f) green while telling every
+# operator with a slow user manager to go and install an interpreter they have.
+# This test is that guard, and it passes against today's code by construction.
+#
+# `run_wait_bus_guarded`, NOT `run_wait_bus`, and the difference is not style.
+# test_install.sh:6451 sources runtime/dreamconnect-register.sh into THIS shell,
+# and that script (dreamconnect-register.sh:34) prefers
+# "$INSTALL_DIR/install-lib.sh" — /opt/dreamconnect/install-lib.sh — over the
+# checkout's. On any box where DreamConnect is installed, every parent-shell
+# call after that line therefore runs the INSTALLED library, not $LIB. Measured:
+# with a deliberate change to the checkout's wait_for_user_bus, run_wait_bus
+# behaved as though the change did not exist, while the same fixture in a child
+# shell that sources $LIB saw it. run_wait_bus_guarded sources $LIB explicitly,
+# so it tests the file this slice edits.
+test_wait_for_user_bus_still_blames_the_bus_when_the_probe_ran_and_was_refused() {
+  local root path
+  require_wait_for_user_bus "refused connect keeps its own diagnosis" || return 0
+  command -v python3 >/dev/null || { fail "refused connect keeps its own diagnosis: python3 is required"; return 0; }
+  root="$TMP/bus-refused-wording"; path="$root/1000/bus"
+  orphan_bus_socket "$path"
+  [ -S "$path" ] || { fail "precondition: the orphaned inode is not a socket — the fixture proves nothing"; return 0; }
+
+  run_wait_bus_guarded "$root" 1000 1 0.05 6
+  [ "$BUS_RC" -ne 124 ] || { fail "refused connect keeps its own diagnosis: still running when the watchdog fired"; return 0; }
+  assert_bus_failed "refused connect keeps its own diagnosis"
+  assert_contains "$BUS_ERR" "timed out" \
+    "refused connect keeps its own diagnosis: a bus that is merely not up yet still times out"
+  assert_not_contains "$BUS_ERR" "DREAMCONNECT_SKIP_DEPS" \
+    "refused connect keeps its own diagnosis: python3 ran and answered 'refused' — blaming python3 here is the same misdiagnosis in reverse"
+}
+
 # --- slice 10: backstage (headless) session ----------------------------------
 # Backstage removes the dummy plug and the autologin requirement by running the
 # bridge against `gnome-shell --headless`. The resolution is load-bearing there
@@ -7013,6 +7219,10 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
   test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
+  test_wait_for_user_bus_reports_a_missing_python3_instead_of_a_timeout \
+  test_wait_for_user_bus_reports_an_unrunnable_python3_instead_of_a_timeout \
+  test_wait_for_user_bus_reports_a_broken_python3_instead_of_a_timeout \
+  test_wait_for_user_bus_still_blames_the_bus_when_the_probe_ran_and_was_refused \
   test_library_defines_the_registry_writers \
   test_render_registry_entry_emits_every_key_the_reader_requires \
   test_render_registry_entry_omits_label_when_absent \

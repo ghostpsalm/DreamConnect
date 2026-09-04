@@ -488,8 +488,14 @@ remove_accountsservice_marker() {  # name
 # AF_UNIX does not unlink the inode when the listener dies, so a crashed
 # user@<uid>.service leaves a bus that passes `-S` forever and refuses every
 # connect — precisely the failure this wait exists to prevent. So attempt a real
-# connect. python3 is already installed by the time install.sh reaches the
-# user-service section. A refusal is not an error here, only "not up yet".
+# connect. A refusal is not an error here, only "not up yet".
+#
+# The status is python3's, passed through untouched, and the caller reads all
+# three cases: 0 connected · 1 refused · anything else the probe never ran (no
+# python3, or one that cannot start). Do not collapse those into a boolean —
+# DREAMCONNECT_SKIP_DEPS=1 and an unrecognised package manager both leave a host
+# without python3, and the third case is the only thing that distinguishes it
+# from a bus that is genuinely slow to appear.
 bus_socket_is_live() {  # path
   python3 -c '
 import socket, sys
@@ -505,7 +511,7 @@ finally:
 
 wait_for_user_bus() {  # uid [timeout_seconds]
   local uid="${1:-}" timeout="${2:-30}" interval="${DC_BUS_POLL_INTERVAL:-0.2}"
-  local bus deadline
+  local bus deadline probe
 
   # timeout_seconds is input, and a bad one must be refused in this function's
   # own voice rather than reaching the arithmetic below, where a non-numeric
@@ -536,7 +542,29 @@ wait_for_user_bus() {  # uid [timeout_seconds]
   # whole-second deadline could expire a few ms after the wait began.
   deadline=$(( $(date +%s%3N) + timeout * 1000 ))
   while :; do
-    [ -S "$bus" ] && bus_socket_is_live "$bus" && return 0
+    if [ -S "$bus" ]; then
+      # `probe=0; ... || probe=$?`, not `bus_socket_is_live; probe=$?`: install.sh
+      # runs under `set -e`, where the unguarded call aborts the whole install on
+      # the refusal that just means "not up yet", before $? can be read at all.
+      probe=0; bus_socket_is_live "$bus" || probe=$?
+      case "$probe" in
+        0) return 0 ;;
+        1) ;;  # connect refused: the user manager is still starting, keep polling
+        # Anything else is the probe failing to RUN — 127 when python3 is absent
+        # from PATH or the interpreter itself cannot load, 126 when it is there
+        # but not executable. Waiting cannot fix that, and the timeout message
+        # below would blame user@<uid>.service for a bus that may be listening
+        # perfectly well, so stop here and say what actually broke. Split on the
+        # STATUS rather than a `command -v python3` pre-check: a python3 that is
+        # on PATH and exits 127 for its own reasons is the same dead end, and a
+        # presence check waves it through into the full timeout.
+        *) echo "error: cannot verify the user bus of uid $uid ($bus): the python3" \
+                "connect probe exited $probe without running. Install python3, or" \
+                "re-run without DREAMCONNECT_SKIP_DEPS=1 so it gets installed;" \
+                "the bus itself was not tested." >&2
+           return 1 ;;
+      esac
+    fi
     [ "$(date +%s%3N)" -lt "$deadline" ] || break
     sleep "$interval"
   done
