@@ -18,6 +18,18 @@ python3 -m unittest -v "$HERE/runtime/test_daemon.py" 2>&1 | tail -20 \
   || python3 "$HERE/runtime/test_daemon.py"
 
 echo
+echo "== Python session-discovery tests =="
+python3 "$HERE/runtime/test_discovery.py" 2>&1 | tail -6
+
+echo
+echo "== Python supervisor tests =="
+python3 "$HERE/runtime/test_sessiond.py" 2>&1 | tail -6
+
+echo
+echo "== Python greeter tests =="
+python3 "$HERE/runtime/test_greeter.py" 2>&1 | tail -6
+
+echo
 echo "== Installer shell tests =="
 bash "$HERE/test_install.sh"
 

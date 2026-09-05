@@ -602,5 +602,48 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          % stopped)
 
 
+
+
+class TestHeadlessCaptureFallback(unittest.TestCase):
+    """A session with no monitors can only be captured virtually.
+
+    RecordArea over a zero-monitor desktop and RecordMonitor against a connector
+    that is not there both fail on the Mutter call, which is what made session
+    discovery crash the moment it attached to a headless session -- and every
+    remote-login and backstage session is headless.
+    """
+
+    def _session(self, has_monitors, virtual=None):
+        s = d.Session.__new__(d.Session)
+        s.virtual = virtual
+        s.all_monitors = True
+        s.monitor = "HDMI-2"
+        s._has_monitors = lambda: has_monitors
+        return s
+
+    @staticmethod
+    def _choose(s):
+        """The decision _start_stream makes before it calls Mutter."""
+        if not s.virtual and not s._has_monitors():
+            s.virtual = d.DEFAULT_VIRTUAL_SIZE
+        return s.virtual
+
+    def test_no_monitors_switches_to_virtual(self):
+        self.assertEqual(self._choose(self._session(False)), d.DEFAULT_VIRTUAL_SIZE)
+
+    def test_monitors_present_leaves_capture_alone(self):
+        self.assertIsNone(self._choose(self._session(True)))
+
+    def test_an_explicit_virtual_size_is_never_overridden(self):
+        s = self._session(False, virtual=(1280, 800))
+        self.assertEqual(self._choose(s), (1280, 800))
+
+    def test_the_default_is_a_sane_resolution(self):
+        w, h = d.DEFAULT_VIRTUAL_SIZE
+        self.assertGreater(w, 0)
+        self.assertGreater(h, 0)
+        self.assertLessEqual(max(w, h), d.MAX_DIMENSION)
+
+
 if __name__ == "__main__":
     unittest.main()

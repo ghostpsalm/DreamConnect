@@ -1,0 +1,43 @@
+[Unit]
+Description=dreamconnect: serve session %i's desktop to the agent
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# %i is the uid. The daemon talks to that session's Mutter over its own session
+# bus, which does not exist before the account's manager is up.
+After=user@%i.service
+# BindsTo, not Wants: this daemon holds a Mutter session belonging to a login,
+# and must die WITH it. Wants/After propagate a start but never a stop, so a
+# session ended by `loginctl terminate-user`, a crashed shell, or the manager
+# failing would leave the daemon running against a session that no longer
+# exists -- still serving its last frame to whoever attaches. The supervisor
+# also stops this explicitly, but the cleanup must not depend on the supervisor
+# being alive to do it.
+BindsTo=user@%i.service
+
+[Service]
+Type=simple
+User=%i
+# The daemon resolves Mutter through the session bus; without these it would
+# find root's bus, or none, and fail in a way that looks like a capture bug.
+Environment=XDG_RUNTIME_DIR=/run/user/%i
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus
+# --all-monitors, not a named connector: a discovered session is somebody
+# else's desktop and we do not know what outputs it has. RecordArea captures the
+# whole logical desktop, which is right for one monitor and for six.
+#
+# The shm path and socket are per-uid because several sessions can be served at
+# once and each agent must find the frame belonging to the session it was sent
+# to. The .%i suffix matches the convention already on disk.
+ExecStart=@INSTALL_DIR@/runtime/dreamconnect_daemon.py \
+    --all-monitors \
+    --shm /dev/shm/dreamconnect.frame.%i \
+    --socket /run/user/%i/dreamconnect.sock
+Restart=on-failure
+RestartSec=2
+# A session whose Mutter refuses us is not going to start succeeding; give up
+# rather than spin. The supervisor retries on its next reconcile.
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Install]
+# Started by dreamconnect-sessiond, not enabled per account: which uids exist is
+# not knowable at install time, and that is the whole point of discovery.

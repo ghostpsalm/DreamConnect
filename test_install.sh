@@ -6345,6 +6345,29 @@ test_register_session_refuses_when_no_display_was_published() {
   assert_file_absent "$dir/1000" "and still nothing is written"
 }
 
+test_register_session_falls_back_to_the_user_managers_display() {
+  local dir rc
+  local DC_STATE_FILE="$TMP/register-fallback/install.state"
+  local DC_PASSWD_DB="$TMP/register-fallback/passwd"
+  require_register_script "register_session manager fallback" || return 0
+  mkdir -p "$TMP/register-fallback"
+  printf 'HOST_ACCOUNT=dreamconnect-host\nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  printf 'kogies:x:1000:1000::/home/kogies:/bin/bash\n' > "$DC_PASSWD_DB"
+  dir="$TMP/register-fallback/sessions"
+
+  # Only backstage writes the envfile. A person who simply logged in has none,
+  # and that is the whole population discovery exists to reach -- so the display
+  # has to come from their user manager instead, or every discovered session is
+  # refused and nothing is ever reachable.
+  manager_display() { printf ':7\n'; }
+  register_session 1000 "$dir" "$TMP/register-fallback/absent.env" 1 >/dev/null 2>&1; rc=$?
+  unset -f manager_display
+  [ "$rc" -eq 0 ] || fail "register_session with no envfile but a manager display: expected 0, got $rc"
+  assert_file_present "$dir/1000" "an entry is written from the manager's display"
+  grep -qx 'display=:7' "$dir/1000" \
+    || fail "the entry should carry the manager's display, got: $(grep '^display=' "$dir/1000")"
+}
+
 # The state file is how the script knows which account is backstage. Without it
 # every session would be labelled by name, including backstage — the picker
 # entry operators are told to look for silently disappears.
@@ -7034,6 +7057,7 @@ for CURRENT in \
   test_register_script_can_call_the_registry_writers_at_runtime \
   test_register_label_marks_the_backstage_account_and_names_everyone_else \
   test_register_session_refuses_when_no_display_was_published \
+  test_register_session_falls_back_to_the_user_managers_display \
   test_register_session_refuses_when_the_install_state_names_no_account \
   test_register_session_writes_an_entry_the_reader_accepts \
   test_deregister_session_removes_that_entry_only \
