@@ -488,8 +488,12 @@ remove_accountsservice_marker() {  # name
 # AF_UNIX does not unlink the inode when the listener dies, so a crashed
 # user@<uid>.service leaves a bus that passes `-S` forever and refuses every
 # connect — precisely the failure this wait exists to prevent. So attempt a real
-# connect. python3 is already installed by the time install.sh reaches the
-# user-service section. A refusal is not an error here, only "not up yet".
+# connect. A refusal is not an error here, only "not up yet" — but a missing
+# python3 is, and the caller separates the two by status: the shell answers 127
+# when it cannot find the interpreter, the probe answers 1 when the connect was
+# refused. python3 is normally installed well before install.sh reaches the
+# user-service section; DREAMCONNECT_SKIP_DEPS=1, or a package manager detect_pm
+# does not recognise, are what leave it absent.
 bus_socket_is_live() {  # path
   python3 -c '
 import socket, sys
@@ -505,7 +509,7 @@ finally:
 
 wait_for_user_bus() {  # uid [timeout_seconds]
   local uid="${1:-}" timeout="${2:-30}" interval="${DC_BUS_POLL_INTERVAL:-0.2}"
-  local bus deadline
+  local bus deadline probe
 
   # timeout_seconds is input, and a bad one must be refused in this function's
   # own voice rather than reaching the arithmetic below, where a non-numeric
@@ -536,7 +540,27 @@ wait_for_user_bus() {  # uid [timeout_seconds]
   # whole-second deadline could expire a few ms after the wait began.
   deadline=$(( $(date +%s%3N) + timeout * 1000 ))
   while :; do
-    [ -S "$bus" ] && bus_socket_is_live "$bus" && return 0
+    if [ -S "$bus" ]; then
+      # Keep the probe's status instead of folding it into the `&&`: a refused
+      # connect (1) is only "not up yet" and earns another lap, but 127 is the
+      # shell saying there is no python3 to run at all, and an interpreter does
+      # not appear by polling for it. Waiting out the clock and then blaming the
+      # bus would send whoever reads that message after a user manager that was
+      # healthy the entire time, so name the real fault and stop now.
+      #
+      # `|| probe=$?` rather than a bare call: install.sh runs under `set -e`,
+      # where a simple command that fails on its own line aborts the shell before
+      # the status can be read. The right-hand side of `||` sees the left's
+      # status and is exempt from `set -e` besides.
+      probe=0; bus_socket_is_live "$bus" || probe=$?
+      if [ "$probe" -eq 0 ]; then
+        return 0
+      elif [ "$probe" -eq 127 ]; then
+        echo "error: python3 is required to verify the user bus of uid $uid ($bus);" \
+             "install python3, or re-run without DREAMCONNECT_SKIP_DEPS=1" >&2
+        return 1
+      fi
+    fi
     [ "$(date +%s%3N)" -lt "$deadline" ] || break
     sleep "$interval"
   done

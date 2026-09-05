@@ -4967,6 +4967,125 @@ test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap() {
   assert_bus_arg_refused_cleanly "timeout just past the cap" "90000"
 }
 
+# --- issue #29: a missing python3 is not a bus that never came up -------------
+#
+# WHY THIS SLICE EXISTS (issue #29, found reviewing #24's slice 2):
+#   bus_socket_is_live (install-lib.sh:493) proves the socket ACCEPTS a connect by
+#   shelling out to python3. With DREAMCONNECT_SKIP_DEPS=1, or on a host whose
+#   package manager detect_pm does not recognise (DEPS=() and nothing is
+#   installed), the installer reaches the user-service section with no python3 at
+#   all. Every probe then fails identically to a not-yet-ready bus, so a
+#   PERFECTLY HEALTHY bus burns the whole timeout and the operator is told
+#       "timed out after 30s ... is user@<uid>.service running?"
+#   which install.sh turns into "the user bus never came up". They then spend
+#   their debugging on a user manager that was up the entire time.
+#
+# CONTRACT UNDER TEST — quoted from the issue, NOT read off the implementation:
+#   "Distinguish 'python3 not found' (typically exit 127) from 'connect refused'
+#    (exit 1) in bus_socket_is_live's caller, and surface a distinct, accurate
+#    error (e.g. 'python3 is required to verify the user bus; install it or run
+#    without DREAMCONNECT_SKIP_DEPS=1') instead of the generic timeout message."
+#
+# WHERE THE EXPECTED VALUES COME FROM: that paragraph, and nothing else. Unlike
+# the slices above, the code being changed already exists and can be read, so
+# each assertion is tied back to a phrase rather than to what the function does:
+#   * non-zero            — it is "an error". A probe that could not run has not
+#                           proved the bus is live, and returning 0 would hand
+#                           `systemctl --user` the exact failure #24 prevents.
+#   * fast                — "INSTEAD OF the generic timeout message": the issue's
+#                           complaint is that a healthy bus "would burn the full
+#                           30s timeout". An interpreter does not appear by
+#                           polling for it, so waiting out the clock IS the bug —
+#                           not merely the wording that follows it.
+#   * stderr names python3 — "accurate": the missing interpreter is the fault
+#                           being reported. The remedy sentence is deliberately
+#                           NOT asserted; the issue offers it only as an "e.g.".
+#   * stderr never says "timed out" — "distinct", verbatim. No timeout was
+#                           served, so reporting one is a false diagnosis.
+#
+# The fixture makes python3 GENUINELY ABSENT — a PATH carrying only the externals
+# the wait itself uses — rather than faking a probe result. That is the
+# operator's real situation, and it leaves the test indifferent to HOW the
+# absence is noticed (a `command -v` guard, an exit-127 check on the probe, a
+# DC_PYTHON override): every one of those must reach the same diagnosis.
+
+# A PATH holding date and sleep and no python3. Symlinks to the real binaries,
+# because the two externals wait_for_user_bus itself uses must go on working
+# normally — if date disappeared too, the function would fail for a reason that
+# has nothing to do with this issue and the test would prove nothing. The caller
+# asserts that, rather than assuming it.
+python_free_path() {  # dir -> populates dir with date+sleep only
+  local tool src
+  mkdir -p "$1"
+  for tool in date sleep; do
+    src="$(command -v "$tool")" || return 1
+    ln -sf "$src" "$1/$tool" || return 1
+  done
+}
+
+# Like run_wait_bus_guarded, but the child shell has no python3 on its PATH.
+#
+# PATH is assigned INSIDE the child, not as a `PATH=... timeout ...` prefix:
+# bash applies an assignment prefix BEFORE it searches for the command word, so
+# that spelling cannot find `timeout` itself and the test would be measuring its
+# own harness. Sourcing the library first is safe under the scrubbed PATH —
+# test_sourcing_is_side_effect_free pins that it runs nothing.
+#
+# Watchdogged for the same reason slice 2 is: the behaviour under test today is
+# "sit out the entire timeout", and a change that made it unbounded must fail
+# this test rather than stall the suite.
+run_wait_bus_without_python() {  # runtime_root uid timeout poll_interval bin watchdog
+  local start end
+  start="$(date +%s%3N)"
+  BUS_ERR="$(DC_RUNTIME_DIR_ROOT="$1" DC_BUS_POLL_INTERVAL="$4" \
+             timeout "$6" bash -c 'PATH="$4"; set -uo pipefail; . "$1"; wait_for_user_bus "$2" "$3"' \
+             _ "$LIB" "$2" "$3" "$5" 2>&1 >/dev/null)"; BUS_RC=$?
+  end="$(date +%s%3N)"
+  BUS_MS=$((end - start))
+  return 0
+}
+
+# (i) No interpreter, healthy bus. timeout_seconds is 5, so a run that still
+# takes ~5s has waited out the clock and a run that returns promptly has not.
+test_wait_for_user_bus_blames_the_missing_python3_not_the_bus() {
+  local root path bin
+  require_wait_for_user_bus "python3 absent" || return 0
+  command -v python3 >/dev/null || \
+    { fail "python3 absent: python3 is required to BIND the fixture socket"; return 0; }
+  root="$TMP/bus-no-python"; path="$root/1000/bus"; bin="$TMP/bus-no-python-bin"
+  python_free_path "$bin" || \
+    { fail "python3 absent: could not build a date/sleep-only PATH"; return 0; }
+
+  # The bus here is HEALTHY — bound, listening, accepting connects. Nothing is
+  # wrong with it, which is precisely why blaming it misdirects the operator.
+  bind_bus_socket "$path" 0 20
+  await_bus_socket "$path" || \
+    { fail "precondition: no socket was bound"; reap_bus_binders; return 0; }
+
+  # Prove the fixture is the fixture before trusting anything it produces.
+  ( PATH="$bin"; command -v python3 >/dev/null 2>&1 ) && \
+    { fail "precondition: python3 is still reachable on the scrubbed PATH — the interpreter was never absent"; reap_bus_binders; return 0; }
+  ( PATH="$bin"; command -v date >/dev/null 2>&1 && command -v sleep >/dev/null 2>&1 ) || \
+    { fail "precondition: date/sleep are missing from the scrubbed PATH — a failure would say nothing about python3"; reap_bus_binders; return 0; }
+
+  run_wait_bus_without_python "$root" 1000 5 0.05 "$bin" 20
+  reap_bus_binders
+
+  [ "$BUS_RC" -ne 124 ] || \
+    { fail "python3 absent: still running after the watchdog fired — the wait is unbounded"; return 0; }
+  [ "$BUS_RC" -ne 0 ] || \
+    fail "python3 absent: returned 0 — no connect was ever attempted, so nothing proved the bus was live"
+  [ "$BUS_MS" -lt 2000 ] || \
+    fail "python3 absent: took ${BUS_MS}ms of a 5s timeout — an absent interpreter does not appear by polling for it, and burning the clock is what makes a healthy bus read as a dead one"
+  [ -n "$BUS_ERR" ] || fail "python3 absent: expected an informative stderr line, got none"
+  assert_contains "$BUS_ERR" "python3" \
+    "python3 absent: stderr must name the missing interpreter — that is the actual fault"
+  assert_not_contains "$BUS_ERR" "timed out" \
+    "python3 absent: served the generic timeout message the issue says to replace, about a bus that was up the whole time"
+  assert_not_contains "$BUS_ERR" "command not found" \
+    "python3 absent: the diagnosis must be the function's own, not the shell reporting it could not run python3"
+}
+
 # (e) The wiring. Everything above can be green with the helper orphaned, in
 # which case issue #24 is not fixed at all — so this asserts the call site in
 # install.sh itself, by line ordering.
@@ -7011,6 +7130,7 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_not_valid_octal \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
+  test_wait_for_user_bus_blames_the_missing_python3_not_the_bus \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
   test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
   test_library_defines_the_registry_writers \

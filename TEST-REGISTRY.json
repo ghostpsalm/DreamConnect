@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "generated_by": "hand-written and hand-maintained. DreamConnect has no registry generator: its suites are three fixed files, not a scripts/test_*.{sh,py} tree a sweep could discover, so a generator would be more machinery than the thing it generates. Add the entry when a suite is added; run-tests.sh is the list that must agree with this one.",
+  "notes": [
+    "Granularity is the containing FILE, not the individual case, and that is not a shortcut. test_install.sh's runner is a hardcoded list of test_* function names with no name filter, and sourcing the file runs every one of them; runtime/test_daemon.py is executed as a script. Nothing here can run a single case in isolation, so recording per-case line spans would be precision this repository cannot honour.",
+    "NOT REGISTERED, deliberately: the Java boot tests (agent/boot/*.java asserted by agent/test/dreamconnect/**, class dreamconnect.boot.BootTests). They need a javac/java invocation with --add-exports, which no `bash <file>`/`python3 <file>` command can express, and inventing an entry that cannot be executed would read as coverage where there is none. run-tests.sh runs them; targeted selection cannot. A change under agent/ therefore has no targeted mapping, and should say so rather than borrow one.",
+    "NOT REGISTERED, deliberately: runtime/test_client.py. Despite the name it is a live validation harness — it connects to a running daemon's unix socket and reads its shm frame — so it fails on a box with no daemon. run-tests.sh does not run it either.",
+    "covered_components are matched as whole tokens against a changed path's stem, so 'install-lib' is what maps install-lib.sh here, and 'install' inside it is what maps install.sh."
+  ],
+  "entries": [
+    {
+      "test_id": "testinstall.suite-installer-shell-tests",
+      "name": "installer shell tests: install-lib.sh's functions driven against tmp fixtures",
+      "file": "test_install.sh",
+      "language": "shell",
+      "line_start": 1,
+      "line_end": 7187,
+      "covered_components": [
+        "install-lib",
+        "install-lib.sh",
+        "install.sh",
+        "dreamconnect-install.sh",
+        "dreamconnect-register.sh",
+        "dreamconnect-session"
+      ],
+      "covered_symbols": [
+        "wait_for_user_bus",
+        "bus_socket_is_live",
+        "render_registry_entry",
+        "write_registry_entry",
+        "remove_registry_entry"
+      ],
+      "covered_invariants": [],
+      "risk_tags": ["permission", "remove"],
+      "execution_command": "bash test_install.sh",
+      "execution_tier": "containing-file",
+      "execution_tier_reason": "the runner at the foot of the file walks a hardcoded list of test_* functions and the file executes them on being run; there is no name filter, so one case is not separately addressable",
+      "coverage_caveat": "install.sh itself is asserted by reading its text, not by executing it — install.sh demands root and does top-level work before anything is callable (CLAUDE.md, Seams). A path through install.sh that this suite proves is a path proven against fixtures."
+    },
+    {
+      "test_id": "testdaemon.suite-daemon-unit-tests",
+      "name": "daemon control-protocol parser (ControlServer.handle) and backstage virtual-monitor capture wiring",
+      "file": "runtime/test_daemon.py",
+      "language": "python",
+      "line_start": 1,
+      "line_end": 606,
+      "covered_components": [
+        "dreamconnect_daemon"
+      ],
+      "covered_symbols": [],
+      "covered_invariants": [],
+      "risk_tags": [],
+      "execution_command": "python3 runtime/test_daemon.py",
+      "execution_tier": "containing-file",
+      "execution_tier_reason": "unittest could address one case, but the registry's executor runs the file for every id it is handed, so claiming a finer tier would describe an execution that never happens",
+      "coverage_caveat": "a stub session records the calls handle() makes; no live Wayland, D-Bus or PipeWire is touched, so this proves the parser and the argument construction, not the compositor conversation."
+    },
+    {
+      "test_id": "gate.suite-authoritative-gate",
+      "name": "the gate entry point itself: scripts/gate.sh delegating to run-tests.sh, which runs every suite",
+      "file": "scripts/gate.sh",
+      "language": "shell",
+      "line_start": 1,
+      "line_end": 16,
+      "covered_components": [
+        "run-tests.sh",
+        "gate"
+      ],
+      "covered_symbols": [],
+      "covered_invariants": [],
+      "risk_tags": ["gate"],
+      "execution_command": "bash scripts/gate.sh",
+      "execution_tier": "containing-file",
+      "execution_tier_reason": "this entry's subject IS the file executed. No recursion: scripts/gate.sh execs run-tests.sh, which runs the Java, Python and installer suites and no gate of its own.",
+      "coverage_caveat": "STATED PLAINLY: scripts/gate.sh has no test of its own in this repository, and this entry does not pretend otherwise. It records the only check that can move on a change to the gate entry point — running it, which proves it still reaches run-tests.sh and that every delegated suite passes. It does NOT prove the delegator's other properties, notably that a suite's failure propagates out as a non-zero status; that would need a fixture tree with a stubbed run-tests.sh, and no such test exists."
+    }
+  ]
+}
