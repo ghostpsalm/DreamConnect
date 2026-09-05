@@ -11,6 +11,7 @@ import pwd
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +23,7 @@ SOCK = "/tmp/dreamconnect-test-unused.sock"  # never bound: we only call handle(
 class StubSession:
     def __init__(self):
         self.calls = []
-        self.width, self.height, self.node_id = 1920, 1080, 66
+        self.geometry, self.node_id = (1920, 1080), 66
 
     def motion_abs(self, x, y): self.calls.append(("M", x, y))
     def button(self, b, s): self.calls.append(("B", b, s))
@@ -600,6 +601,131 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          "so the next start stops nothing — there is no session to "
                          "stop, and aiming a Stop at %s would be aiming at a corpse"
                          % stopped)
+
+
+class _NullFrameBuffer:
+    """Stands in for FrameBuffer. This slice is about the geometry the capture
+    path publishes, not the shm copy, so the pixels go nowhere."""
+
+    def write(self, data, width, height, stride):
+        pass
+
+
+class _FakeAppsink:
+    """The GStreamer side of _on_sample, faked at exactly the API it consumes:
+    sink.emit("pull-sample") -> sample.get_buffer() / .get_caps(), caps
+    .get_structure(0).get_value("width"|"height"), buffer .map()/.unmap() with
+    mapinfo .size/.data. One object plays all four roles because none of them
+    holds state worth separating — it only replays the shape set on it, so the
+    geometry under test comes from this test, never from the daemon."""
+
+    def __init__(self, shape=(0, 0)):
+        self.shape = shape
+
+    def emit(self, _signal):        # Gst appsink "pull-sample"
+        return self
+
+    def get_buffer(self):           # Gst.Sample
+        return self
+
+    def get_caps(self):             # Gst.Sample
+        return self
+
+    def get_structure(self, _index):  # Gst.Caps
+        return self
+
+    def get_value(self, key):       # Gst.Structure
+        return {"width": self.shape[0], "height": self.shape[1]}[key]
+
+    def map(self, _flags):          # Gst.Buffer -> (ok, mapinfo)
+        return True, self
+
+    def unmap(self, _mapinfo):      # Gst.Buffer
+        pass
+
+    @property
+    def size(self):                 # Gst.MapInfo; BGRx, 4 bytes per pixel
+        return self.shape[0] * self.shape[1] * 4
+
+    @property
+    def data(self):                 # Gst.MapInfo; _NullFrameBuffer drops it
+        return b""
+
+
+class _ObservedSession(d.Session):
+    """A Session that lets the test stand where the socket thread stands: every
+    state change the capture path makes is followed by the read a concurrent
+    GEOM would perform. It hooks __setattr__ rather than named fields on
+    purpose — the test must assume nothing about how geometry is stored, only
+    that no reader can ever see half an update."""
+
+    def __setattr__(self, name, value):
+        object.__setattr__(self, name, value)
+        observe = self.__dict__.get("_observe")  # unset during __init__
+        if observe is not None:
+            observe()
+
+
+def _geom_now(cs, timeout=0.25):
+    """The reply a socket thread would get for GEOM at this instant, or None if
+    that read would block. Blocking counts as no observation rather than as a
+    failure: a reader held off until the writer has finished cannot see half an
+    update, which is the whole point of guarding the pair with a lock."""
+    got = []
+    reader = threading.Thread(target=lambda: got.append(cs.handle("GEOM")), daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return got[0] if got else None
+
+
+class TestGeometryIsPublishedAtomically(unittest.TestCase):
+    """Issue #44: 'a GEOM issued during the single frame a resolution change
+    lands can return the new width with the old height (or vice-versa)' — the
+    capture thread writes the pair, the socket thread reads it.
+
+    Why not two racing threads: CPython switches threads only at eval-breaker
+    checkpoints and there is none between two adjacent attribute stores, so a
+    race probe on this interpreter (3.14, sys.setswitchinterval(1e-6)) did not
+    interleave them once in 1.27M GEOM reads over 10 x 2s trials. Such a test
+    would sit green while the defect stands. The interleaving is therefore made
+    deterministic instead: the writer is stepped through the real _on_sample
+    path and every state change it makes is sampled through the real
+    ControlServer.handle("GEOM").
+
+    Expected values come from outside the daemon: the shapes are the ones this
+    test hands the writer, (0, 0) is the documented geometry before the first
+    frame, and the reply format '<w> <h>' is runtime/README.md:56.
+    """
+
+    SHAPES = ((1920, 1080), (2560, 1440))
+
+    def test_geom_never_observes_half_a_resolution_change(self):
+        session = _ObservedSession(bus=None, monitor=None, frame=_NullFrameBuffer())
+        cs = d.ControlServer(SOCK, session)
+        # _on_sample skips the map+copy when no client is attached, and with it
+        # the geometry publish; an operator issuing GEOM is an attached client.
+        session.active_clients = 1
+        seen = []
+        session._observe = lambda: seen.append(_geom_now(cs))
+
+        sink = _FakeAppsink()
+        for shape in self.SHAPES:
+            sink.shape = shape
+            session._on_sample(sink)
+
+        legal = {"0 0"} | {"%d %d" % shape for shape in self.SHAPES}
+        torn = [reply for reply in seen if reply is not None and reply not in legal]
+        self.assertEqual(
+            torn, [],
+            "GEOM answered with a width and height from different frames while "
+            "the resolution changed; every reply must be a pair that was "
+            "actually published, one of %s" % sorted(legal))
+        # Guards against a vacuous pass: the probe has to have watched something.
+        self.assertGreaterEqual(len(seen), 2,
+                                "the probe observed no state change at all, so it "
+                                "proved nothing about the update window")
+        self.assertEqual(cs.handle("GEOM"), "%d %d" % self.SHAPES[-1],
+                         "and after the change settles GEOM reports the new shape")
 
 
 if __name__ == "__main__":

@@ -194,7 +194,14 @@ class Session:
         self.sc_path = None
         self.stream_path = None
         self.node_id = None
-        self.width = self.height = 0
+        # One tuple, not two ints: the capture thread publishes the stream size
+        # and the socket thread reads it for GEOM, so a pair of stores would let
+        # a reader land between them and answer with the new width beside the old
+        # height across a resolution change (#44). Rebinding one attribute is a
+        # single store, which no reader can catch half-done. A lock would do too,
+        # but self._lock serialises blocking D-Bus input calls — GEOM would then
+        # queue behind key injection, and the capture thread behind both.
+        self.geometry = (0, 0)
         self.pipeline = None
         self._sub_ids = []          # D-Bus signal subscriptions, cleared on restart
         self._restarting = False    # guards against overlapping session restarts
@@ -601,8 +608,8 @@ class Session:
                 self.frame.write(mapinfo.data, w, h, stride)
             finally:
                 buf.unmap(mapinfo)
-            if (w, h) != (self.width, self.height):
-                self.width, self.height = w, h
+            if (w, h) != self.geometry:
+                self.geometry = (w, h)
                 log(f"stream geometry {w}x{h}")
         return Gst.FlowReturn.OK
 
@@ -772,7 +779,8 @@ class ControlServer(threading.Thread):
         if cmd == "PING":
             return "PONG"
         if cmd == "GEOM":
-            return f"{s.width} {s.height}"
+            w, h = s.geometry  # one read of the pair; see Session.geometry
+            return f"{w} {h}"
         if cmd == "NODE":
             return str(s.node_id)
         if cmd == "WHO":
