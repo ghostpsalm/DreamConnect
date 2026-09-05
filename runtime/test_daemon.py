@@ -22,7 +22,7 @@ SOCK = "/tmp/dreamconnect-test-unused.sock"  # never bound: we only call handle(
 class StubSession:
     def __init__(self):
         self.calls = []
-        self.width, self.height, self.node_id = 1920, 1080, 66
+        self.geometry, self.node_id = (1920, 1080), 66
 
     def motion_abs(self, x, y): self.calls.append(("M", x, y))
     def button(self, b, s): self.calls.append(("B", b, s))
@@ -600,6 +600,67 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          "so the next start stops nothing — there is no session to "
                          "stop, and aiming a Stop at %s would be aiming at a corpse"
                          % stopped)
+
+
+class TestGeomIsOnePublication(unittest.TestCase):
+    """Issue #44: geometry is written from the capture thread and read by GEOM
+    from the socket thread, so 'a GEOM issued during the single frame a
+    resolution change lands can return the new width with the old height (or
+    vice-versa)'.
+
+    A real race is not deterministically observable, so SwitchingSession stands
+    in for the capture thread: every read of a geometry attribute lands the
+    *next* published mode, which is precisely what a frame arriving between the
+    reader's two loads does. A reader that takes one value gets a mode the guest
+    really had; a reader that takes two gets a mode that never existed.
+    """
+
+    # Two real display modes — what a guest switches between. Both dimensions
+    # differ, so a tear shows up whichever half is the stale one.
+    BEFORE = (1920, 1080)
+    AFTER = (1280, 720)
+    PUBLISHED = {"1920 1080", "1280 720"}
+
+    class SwitchingSession:
+        def __init__(self, modes):
+            self._modes = list(modes)
+            self._reads = 0
+            self.node_id = 66
+
+        def _publication(self):
+            # Read N sees mode N, clamped at the last: the resolution change
+            # lands between any two reads, never during one.
+            mode = self._modes[min(self._reads, len(self._modes) - 1)]
+            self._reads += 1
+            return mode
+
+        @property
+        def geometry(self):
+            return self._publication()
+
+        @property
+        def width(self):
+            return self._publication()[0]
+
+        @property
+        def height(self):
+            return self._publication()[1]
+
+    def test_geom_never_replies_a_pair_that_was_never_published(self):
+        s = self.SwitchingSession([self.BEFORE, self.AFTER])
+        cs = d.ControlServer(SOCK, s)
+        self.assertIn(
+            cs.handle("GEOM"), self.PUBLISHED,
+            "both numbers must come from one publication of the geometry; "
+            "'1920 720' and '1280 1080' are modes the guest never had")
+
+    def test_geom_before_the_first_frame_still_replies_a_well_formed_pair(self):
+        # Must survive the change: a session that has captured no frame yet has
+        # a published geometry to answer with. Losing the initial publication
+        # turns GEOM into an exception instead of a reply, and the agent parses
+        # "W H" and nothing else.
+        cs = d.ControlServer(SOCK, d.Session(None, "HDMI-2", None))
+        self.assertEqual(cs.handle("GEOM"), "0 0")
 
 
 if __name__ == "__main__":
