@@ -11,6 +11,7 @@ import pwd
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +23,7 @@ SOCK = "/tmp/dreamconnect-test-unused.sock"  # never bound: we only call handle(
 class StubSession:
     def __init__(self):
         self.calls = []
-        self.width, self.height, self.node_id = 1920, 1080, 66
+        self.geometry, self.node_id = (1920, 1080), 66
 
     def motion_abs(self, x, y): self.calls.append(("M", x, y))
     def button(self, b, s): self.calls.append(("B", b, s))
@@ -600,6 +601,91 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          "so the next start stops nothing — there is no session to "
                          "stop, and aiming a Stop at %s would be aiming at a corpse"
                          % stopped)
+
+
+class ResolutionSwitchesMidRead:
+    """A session whose guest changes resolution the instant the reader lets the
+    capture thread in.
+
+    The switch is one-shot and lands *after* the first read it is allowed to
+    interleave with has returned. That is precisely the interleaving issue #44
+    describes: a reader taking two independent loads gets BEFORE's width and
+    AFTER's height — a size that was never on screen.
+
+    It fires only while `_lock` is free, and that is deliberate rather than
+    incidental. The issue offers two remedies and this stub must not pick one:
+    holding `_lock` across the read keeps the capture thread out, and reading
+    the pair as one attribute (`geometry`) leaves it nothing to interleave
+    with; both hand back a whole pair. A stub that switched on *every* read
+    would also have failed the lock remedy, which would have dictated the fix
+    instead of testing the behaviour.
+    """
+
+    def __init__(self, before, after):
+        self._geometry = before
+        self._pending = after   # None once the switch has landed: it happens once
+        self._lock = threading.Lock()
+        self.node_id = 66
+
+    def _capture_thread_may_land_a_switch(self):
+        if self._pending is None:
+            return
+        # Non-blocking: a reader already holding the lock is one the real
+        # capture thread could not have interleaved with, so nothing changes.
+        if self._lock.acquire(blocking=False):
+            try:
+                self._geometry, self._pending = self._pending, None
+            finally:
+                self._lock.release()
+
+    @property
+    def geometry(self):
+        pair = self._geometry
+        self._capture_thread_may_land_a_switch()
+        return pair
+
+    @property
+    def width(self):
+        return self.geometry[0]
+
+    @property
+    def height(self):
+        return self.geometry[1]
+
+
+class TestGeomIsNeverTorn(unittest.TestCase):
+    """Issue #44: GEOM must never report a size the stream never had.
+
+    `runtime/README.md:56` fixes the reply as `<w> <h>` — *the* stream size,
+    one pair. Geometry is published by the PipeWire/GStreamer capture thread
+    and read by the socket thread, so a resolution change landing between two
+    reads produces a new width beside an old height.
+    """
+
+    # Two sizes the stream really had, in the order the capture thread
+    # published them. The reply has to be one of these two, whole.
+    BEFORE = (1920, 1080)
+    AFTER = (1280, 720)
+
+    def test_geom_reply_is_a_size_the_stream_actually_had(self):
+        s = ResolutionSwitchesMidRead(self.BEFORE, self.AFTER)
+        reply = d.ControlServer(SOCK, s).handle("GEOM")
+        whole = {"%d %d" % self.BEFORE, "%d %d" % self.AFTER}
+        self.assertIn(reply, whole,
+                      f"GEOM replied {reply!r}; the stream was "
+                      f"{self.BEFORE[0]}x{self.BEFORE[1]} and then "
+                      f"{self.AFTER[0]}x{self.AFTER[1]}, so a width from one "
+                      f"beside a height from the other is a size the operator's "
+                      f"client is told about but that never existed")
+
+    def test_the_stub_tears_when_geometry_is_read_as_two_loads(self):
+        # Guards the assertion above against passing vacuously. If this stub
+        # ever stopped presenting a resolution change mid-read, a torn reader
+        # would satisfy it too and the test would detect nothing.
+        s = ResolutionSwitchesMidRead(self.BEFORE, self.AFTER)
+        self.assertEqual((s.width, s.height), (self.BEFORE[0], self.AFTER[1]),
+                         "two independent loads must straddle the switch, or "
+                         "this fixture cannot catch a reader that takes two")
 
 
 if __name__ == "__main__":
