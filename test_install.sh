@@ -26,6 +26,20 @@ CURRENT="<none>"
 
 fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 
+# A mistyped helper is a missing assertion, not a passing test: the shell prints
+# "command not found", the test keeps going and the suite still reports PASS.
+# assert_file_present survived that way for a whole slice. Record every unknown
+# command so the summary can fail on it.
+#
+# bash runs this handler in a subshell, so bumping FAILURES here would be lost.
+# A file survives that -- and also catches a typo inside a command substitution,
+# where the counter could never have survived either.
+command_not_found_handle() {
+  echo "  FAIL: $CURRENT: unknown command [$1] - a typo, or a test that emptied PATH"
+  [ -n "${NOT_FOUND_LOG:-}" ] && printf '%s: %s\n' "$CURRENT" "$1" >> "$NOT_FOUND_LOG"
+  return 127
+}
+
 assert_eq() {  # actual expected label
   [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"
 }
@@ -48,6 +62,7 @@ assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+NOT_FOUND_LOG="$TMP/unknown-commands"
 
 # --- the seam ----------------------------------------------------------------
 [ -f "$LIB" ] || { echo "FAIL: install-lib.sh not found at $LIB"; exit 1; }
@@ -5137,7 +5152,8 @@ test_backstage_ceiling_matches_the_daemon_max_dimension() {
 # backstage unit crash-loops forever and the only symptom is "no capture".
 test_backstage_supported_follows_gnome_shell_presence() {
   local rc
-  ( PATH="$TMP/empty-path"; mkdir -p "$PATH"; backstage_supported ) && rc=0 || rc=1
+  mkdir -p "$TMP/empty-path"
+  ( PATH="$TMP/empty-path"; backstage_supported ) && rc=0 || rc=1
   assert_eq "$rc" "1" "backstage_supported is false with no gnome-shell on PATH"
 
   mkdir -p "$TMP/fake-path"
@@ -6363,7 +6379,7 @@ test_register_session_falls_back_to_the_user_managers_display() {
   register_session 1000 "$dir" "$TMP/register-fallback/absent.env" 1 >/dev/null 2>&1; rc=$?
   unset -f manager_display
   [ "$rc" -eq 0 ] || fail "register_session with no envfile but a manager display: expected 0, got $rc"
-  assert_file_present "$dir/1000" "an entry is written from the manager's display"
+  assert_file_exists "$dir/1000" "an entry is written from the manager's display"
   grep -qx 'display=:7' "$dir/1000" \
     || fail "the entry should carry the manager's display, got: $(grep '^display=' "$dir/1000")"
 }
@@ -7083,6 +7099,12 @@ done
 
 [ "${SKIPPED:-0}" -eq 0 ] \
   || echo "$SKIPPED skipped check(s) — that coverage was NOT exercised on this box"
+
+if [ -s "$NOT_FOUND_LOG" ]; then
+  echo "unknown command(s) - these assertions never ran:"
+  sed 's/^/  /' "$NOT_FOUND_LOG"
+  FAILURES=$((FAILURES + $(wc -l < "$NOT_FOUND_LOG")))
+fi
 
 if [ "$FAILURES" -ne 0 ]; then
   echo "$FAILURES assertion failure(s)"
