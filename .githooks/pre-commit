@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# The gate runs before the commit, not after. This repo has no remote CI, so
+# this hook is the only thing between a broken tree and main.
+#
+# It runs the gate against the WORKING TREE, not against the staged index --
+# stashing to isolate the index risks losing work in a worktree, and this repo
+# is normally committed with a clean tree anyway. If you stage only a subset,
+# the green tick covers what is on disk, not only what is staged.
+#
+# Bypass:  git commit --no-verify        (records an ungated commit -- say so)
+# Skip:    DREAMCONNECT_SKIP_GATE=1 git commit ...
+set -uo pipefail
+
+if [ "${DREAMCONNECT_SKIP_GATE:-0}" = "1" ]; then
+  echo "pre-commit: gate SKIPPED by DREAMCONNECT_SKIP_GATE=1 -- this commit is unverified" >&2
+  exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+GATE="$ROOT/scripts/gate.sh"
+[ -x "$GATE" ] || GATE="$ROOT/run-tests.sh"
+
+if [ ! -x "$GATE" ]; then
+  echo "pre-commit: no gate found ($ROOT/scripts/gate.sh or $ROOT/run-tests.sh)" >&2
+  exit 1
+fi
+
+log="$(mktemp)"
+echo "pre-commit: running the gate ($GATE) -- about 30s" >&2
+if "$GATE" > "$log" 2>&1; then
+  rm "$log"
+  echo "pre-commit: gate green" >&2
+  exit 0
+fi
+
+echo "pre-commit: GATE RED -- commit refused. Last 40 lines:" >&2
+tail -40 "$log" >&2
+echo "pre-commit: full output kept at $log" >&2
+exit 1
