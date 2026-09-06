@@ -77,5 +77,14 @@ has since answered #56 a different way. `runtime/dreamconnect_discovery.py` plus
 including accounts the installer never touched, and both are in the gate.
 
 The two designs overlap: run both and two mechanisms race to write one registry
-entry per uid. Which one #56 ships with is an open decision on that issue, not
-something this file settles.
+entry per uid. **Owner decision, 2026-09-07: the supervisor ships**, because it
+reaches accounts the installer never touched — which is what #56's own opening
+line asks for. The install-time wiring is retired, kept as the tag above.
+
+The line's own run state — controller state, findings, ledgers, 78 files — is
+archived at `~/.factory/archive/dreamconnect-multi-session-picker-20260907/`,
+outside the repo, because it is machine-local telemetry for a run that ended.
+
+#56 itself stays open. Its acceptance is a live check on a real box — a human
+logs in at the console and appears in the operator's picker by name — and that
+has not been run. Everything claimed here is read from code and a green gate.
