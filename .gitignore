@@ -28,3 +28,7 @@ CODE_REVIEW_*.md
 # factory loop run state — local only, never committed. runs/ and hazards/
 # are tracked deliberately (see /submit): don't broaden this back to /factory/.
 /factory/CHECKPOINT.md
+# Line lifecycle state: absolute worktree paths on THIS machine and a live
+# RUNNING/READY status per line. Local for the same reason CHECKPOINT.md is —
+# it describes this box, not the repo, and every parallel line would rewrite it.
+/factory/lifecycle/
