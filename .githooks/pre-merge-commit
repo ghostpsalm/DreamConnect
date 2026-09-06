@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# git runs pre-commit for a hand-resolved merge but pre-merge-commit for one it
+# completed by itself, so without this file every clean merge lands ungated --
+# and a merge is exactly where two separately-green branches stop being green.
+set -uo pipefail
+exec "$(dirname "$0")/pre-commit" "$@"
