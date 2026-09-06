@@ -37,6 +37,9 @@ One seam, every Robot method rerouted, X11 never touched.
 Produces `target/dist/dreamconnect-agent.jar` — self-contained (ByteBuddy shaded
 in, boot jar embedded). Requires a JDK (built/tested on JDK 25).
 
+The ByteBuddy jar is verified against a SHA-256 pinned in `build.sh` on every
+build, cached copies included; a mismatch aborts before anything is compiled.
+
 ## Agent options
 
 Passed after the jar path: `-javaagent:dreamconnect-agent.jar=shm=…,socket=…,debug=true`

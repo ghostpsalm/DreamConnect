@@ -34,4 +34,8 @@ echo "== Installer shell tests =="
 bash "$HERE/test_install.sh"
 
 echo
+echo "== Agent build shell tests =="
+bash "$HERE/agent/test_build.sh"
+
+echo
 echo "ALL TESTS PASSED"

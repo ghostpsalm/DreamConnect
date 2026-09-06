@@ -6,6 +6,10 @@
 set -euo pipefail
 
 BYTEBUDDY_VERSION="1.18.11"
+# Pinned SHA-256 of byte-buddy-$BYTEBUDDY_VERSION.jar, from Maven Central's own
+# .sha256 sidecar. The jar is shaded into an agent that runs as root inside
+# ScreenConnect's JVM, so it is verified on every build -- a cached copy too.
+BB_SHA256="e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435cbdd180f6ffdb821"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LIB="$HERE/lib"
 BUILD="$HERE/target"
@@ -21,6 +25,25 @@ EXPORTS=(
 echo ">> fetch ByteBuddy $BYTEBUDDY_VERSION"
 mkdir -p "$LIB"
 [ -f "$BB_JAR" ] || curl -fsSL "$BB_URL" -o "$BB_JAR"
+
+echo ">> verify ByteBuddy against pinned hash"
+# Check the verifier itself first. Without this, a missing sha256sum (minimal
+# container, mangled PATH, macOS) exits non-zero from the pipeline below and is
+# indistinguishable from a real mismatch -- so a perfectly good cached jar gets
+# deleted and reported as rejected, when in truth nothing was ever checked.
+if ! command -v sha256sum >/dev/null 2>&1; then
+  echo "sha256sum not found, cannot verify $BB_JAR" >&2
+  exit 1
+fi
+
+# On mismatch, drop the rejected jar as well as failing: the cache is keyed on
+# the file merely existing, so leaving a truncated or poisoned copy in lib/
+# would make every later run reject that same stale file forever.
+if ! echo "$BB_SHA256  $BB_JAR" | sha256sum -c -; then
+  rm -f "$BB_JAR"
+  echo "removed the rejected jar; re-run to fetch it again" >&2
+  exit 1
+fi
 
 rm -rf "$BUILD"
 mkdir -p "$BUILD/boot" "$BUILD/agent" "$DIST"
