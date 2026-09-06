@@ -1,26 +1,26 @@
 ---
 progress: 80
-updated: 2026-09-04
+updated: 2026-09-06
 stage: Active
 status: building
-next: Work down the install/uninstall hardening issues (#22, #25, #26, #28, #30, #32-#34) on the install seam.
+next: Work down the daemon/installer hardening backlog; #57 (torn area_x/area_y) is next on the daemon seam, #30/#32-#34 on the install seam.
 flags:
   - Verified end to end on exactly one configuration — Fedora, GNOME 49+, one live ScreenConnect session. Other distros and desktops are untested, and KDE/wlroots are out of scope by design.
-  - There is no CI. `.github/workflows/` holds nothing tracked, so a push triggers nothing; `./scripts/gate.sh` is the only check that exists.
-  - `.gitignore` ignores only `/factory/CHECKPOINT.md`, so every other `/implement` run-state file under `factory/` shows up as untracked and must be left unstaged by hand.
+  - There is no remote CI. `.github/workflows/ci.yml` exists in the working tree but is untracked and on no branch, so a push to GitHub still triggers nothing. Verification is local only: `.githooks/pre-commit` runs `./scripts/gate.sh` before every commit and every merge, and refuses the commit when it is red.
+  - `core.hooksPath` is local git config, so a fresh clone is ungated until somebody runs `./scripts/install-hooks.sh`.
+  - The physical GDM login screen cannot be bridged (mutter inhibits capture and input at the greeter). Autologin or grd Remote Login are the only reboot-reachability options.
 ---
 
-The bridge itself is done and works: headless capture and input over
-`org.gnome.Mutter.{RemoteDesktop,ScreenCast}`, no consent dialog, the operator
-command set, the installer, and the backstage headless session. That path has
-been driven live through the real ScreenConnect client.
+The bridge itself is done and works: unmodified ScreenConnect drives a Wayland
+GNOME desktop through Mutter's capture and input D-Bus API, in both attended and
+backstage (headless, no-login) modes. Capture, mouse, keyboard, clipboard and the
+operator command set are shipped and proven against a real operator session.
 
-What is left is hardening, not features. 31 open issues, and they are edge
-cases around the working path rather than gaps in it — installer failure
-modes, uninstall cleanup, torn reads in the daemon, keyboard table coverage,
-and build-script supply-chain checks. `progress: 80` is that split: the
-product works, the edges do not all fail cleanly yet.
+What is left is hardening, not capability. The open issues are almost entirely
+robustness defects found by review rather than missing features — non-atomic
+reads across threads, installer failure paths that were never executed against a
+real `useradd`, build-script verification gaps. None of them block normal use;
+each of them is a way the thing can misbehave at the edges.
 
-Most recent work: #29, on the `install/bus-probe-diagnostic-2` branch — the
-user-bus wait now names a missing `python3` instead of blaming the user
-manager.
+The 80 is that split: feature-complete and live-verified on one machine, with a
+long defect backlog and no remote CI to catch regressions.
