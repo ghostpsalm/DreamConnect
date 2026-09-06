@@ -1,0 +1,96 @@
+{
+  "recorded_at": "2026-07-31T12:15:34Z",
+  "repo": "runtime-refs",
+  "branch": "docs/runtime-refs",
+  "base": "fd474176ac2f707c6fdae00c24e1531f5f1c6b3a",
+  "window_start": "2026-07-31T21:21:10+10:00",
+  "head": "670f58f84307668f0f04eefcb5ed67c0c4749029",
+  "issue": {
+    "number": 37,
+    "state": "OPEN",
+    "title": "Stale references in runtime/ docs and smoke script",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/37"
+  },
+  "commits": [
+    {
+      "sha": "670f58f84307668f0f04eefcb5ed67c0c4749029",
+      "subject": "Runtime: fix stale evdev/keymap references in smoke script and README (#37)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "2 files changed, 5 insertions(+), 4 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 122,
+      "output_tokens": 38885,
+      "cache_read_input_tokens": 4040889,
+      "cache_creation_input_tokens": 342588
+    },
+    "subagents": {
+      "input_tokens": 4,
+      "output_tokens": 3302,
+      "cache_read_input_tokens": 45581,
+      "cache_creation_input_tokens": 2682
+    },
+    "subagent_spawns": 2,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 1898,
+        "cache_read_input_tokens": 23915,
+        "total_tokens": 26490,
+        "duration_ms": 45218,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 1404,
+        "cache_read_input_tokens": 21666,
+        "total_tokens": 25079,
+        "duration_ms": 48334,
+        "models": [
+          "claude-opus-5"
+        ]
+      }
+    },
+    "usage_blocks": 62,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "fb60a6fc-3e41-4d5b-b21f-4e2377678ee3.jsonl",
+        "usage_blocks": 62
+      }
+    ],
+    "agent_wall_clock_ms": 93552,
+    "first_activity": "2026-07-31T11:59:45.460000+00:00",
+    "last_activity": "2026-07-31T12:15:28.273000+00:00",
+    "notification_tokens": 0,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 37",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 236,
+    "ask: This edits a version number.": 134,
+    "ask: This would publish a GitHub release, which ships to real devices.": 43,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 43,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 43,
+    "block: editing the deployed factory directly": 301,
+    "block: writing to a file the harness owns": 43,
+    "block: touching a secret/credential file": 220,
+    "block: force push (never rewrite published history)": 43,
+    "block: editing an existing migration": 43,
+    "block: hard reset discards work": 48
+  },
+  "status": "done",
+  "note": "Doc/comment/string-literal only, no logic; breaker and reviewer skipped per the loop's mechanical-change exception. No CI beyond local gate (no .github/workflows in this repo).",
+  "outcome": {}
+}
