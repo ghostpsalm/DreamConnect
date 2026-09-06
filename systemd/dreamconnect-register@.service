@@ -6,6 +6,11 @@ Documentation=https://github.com/ghostpsalm/DreamConnect
 # script waits for the display itself, which covers the gap between the manager
 # starting and the session's Xwayland actually publishing one.
 After=user@%i.service
+# No start rate limit. This unit legitimately fails fast — register_label
+# returns in well under 100ms when the install state names no account — and five
+# such failures would take the PATH UNIT that triggers it to `failed`, losing
+# the login trigger permanently until someone reset it by hand.
+StartLimitIntervalSec=0
 # BindsTo, not Wants: the entry promises that session can be attached to, so it
 # must die WITH the session. Wants/After propagate a start, never a stop — a
 # session ended by `loginctl terminate-user`, a crashed shell, or the manager

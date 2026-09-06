@@ -1,0 +1,25 @@
+[Unit]
+Description=dreamconnect: publish this session's display so it can be registered
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# A console session's X display number is decided by its own Xwayland and does
+# not exist until the session is up, so this can only run once it is.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Deliberately NOT dreamconnect-backstage.service: that unit starts a headless
+# desktop and only publishes the display as an ExecStartPost, so installing it
+# into a human's account would bring up a second desktop session inside their
+# own. Only the publishing half belongs here.
+ExecStart=@INSTALL_DIR@/runtime/dreamconnect-backstage-env.sh
+# Un-publish on the way out. A logout must genuinely retract this session's
+# display: leaving the file behind keeps the registry advertising a session
+# whose daemon has stopped, and stops the watching path unit ever firing again
+# (PathExists cannot re-trigger while the file it waits for still exists).
+ExecStop=/bin/rm -f %t/dreamconnect-display.env
+
+[Install]
+# Pulled in when the human logs in — the only moment their display exists.
+WantedBy=graphical-session.target

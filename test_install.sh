@@ -6161,27 +6161,6 @@ test_session_cli_starts_the_daemon_with_display_and_label() {
     "the daemon must be given --label, or the picker names the session after the account"
 }
 
-# Ordering, install side: the display env only exists once the backstage session
-# is actually running, so registration has to come after the units are started.
-test_install_sh_starts_registration_after_its_session_is_running() {
-  local sh started reg
-  sh="$HERE/install.sh"
-  assert_file_exists "$sh" "install.sh is present"
-  [ -f "$sh" ] || return 0
-
-  # `restart`, not `enable`: enabling only wires the unit for boot, and
-  # install.sh deliberately restarts to apply this run's changes. The restart is
-  # the line after which a session is actually running and has published a
-  # display.
-  started="$(first_code_line "$sh" 'systemctl --user restart')"
-  [ -n "$started" ] || { fail "call site: install.sh no longer starts the user units"; return 0; }
-  reg="$(first_code_line "$sh" 'write_registry_entry')"
-  [ -n "$reg" ] || { fail "call site: install.sh never calls write_registry_entry"; return 0; }
-
-  [ "$started" -lt "$reg" ] || \
-    fail "call site: write_registry_entry (line $reg) must come AFTER the session units are started (line $started) — before that there is no published display to register"
-}
-
 # Uninstall already removes /run/dreamconnect wholesale. That still covers the
 # registry — but only while the registry lives under it.
 #
@@ -6827,6 +6806,931 @@ test_register_label_survives_a_crlf_state_file() {
     "and still names everyone else after themselves"
 }
 
+# --- issue #56: wire the attended (console) session too ----------------------
+#
+# #52 made the registry the sole source of offerable sessions, and #53 made
+# registration a unit that waits for /run/user/<uid>/dreamconnect-display.env.
+# Only the headless machinery writes that file, and only the configured account
+# gets a capture daemon — so on a backstage box the human at the console has no
+# daemon, no published display and no register instance, and curation drops
+# their session from the picker entirely. It appears on the live box only
+# because the env file was hand-written and the register script run by hand.
+#
+# Owner decision, recorded in the spec's Consent model note: attended capture is
+# wired BY DEFAULT, no per-session prompt. So a backstage install also wires the
+# detected desktop user.
+#
+# SHAPE CHOSEN (say so if you would rather do it differently, since you
+# implement to these):
+#   attended_identity <installed_account> <detected_user>
+#       -> "NAME UID HOME SOCKET" on stdout, exit 0        (wire this account)
+#       -> nothing on stdout, non-zero                     (nothing to wire)
+# Same output contract as resolve_host_identity, which this suite already
+# tests, so callers and tests read the same way.
+#
+# DECISION — detected user IS the installed/backstage account: SKIP, do not
+# refuse. Refusing would fail an install that is otherwise fine and is simply a
+# classic install spelled backstage; double-wiring one uid would put two daemons
+# on one uid-scoped socket and shm, which is worse than either. The account is
+# already wired as the configured session, so there is nothing left to do.
+
+test_library_defines_attended_identity() {
+  declare -F attended_identity >/dev/null \
+    || fail "install-lib.sh defines attended_identity(): not defined"
+}
+
+require_attended_identity() {  # label
+  declare -F attended_identity >/dev/null && return 0
+  fail "$1: attended_identity() is not defined — the assertions below would pass vacuously"
+  return 1
+}
+
+# The ordinary backstage box: a service account runs the headless session, a
+# human logs in at the console. The human is who we must wire.
+test_attended_identity_resolves_the_detected_desktop_user() {
+  local out rc name uid home sock
+  local DC_PASSWD_DB="$TMP/attended/passwd"
+  require_attended_identity "attended_identity resolves the desktop user" || return 0
+  mkdir -p "$TMP/attended"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  out="$(attended_identity dreamconnect-host kogies 2>/dev/null)"; rc=$?
+  assert_eq "$rc" "0" "attended_identity succeeds when a desktop user exists"
+  read -r name uid home sock <<<"$out"
+  assert_eq "$name" "kogies" "it names the console user, not the account the daemon installs under"
+  assert_eq "$uid"  "1000"   "with the console user's uid"
+  assert_eq "$home" "/home/kogies" "and their home"
+}
+
+# shm and socket are uid-scoped, which is exactly what lets the two sessions
+# coexist. Wiring the attended daemon onto the service account's paths would put
+# two daemons on one socket and one frame — the collision this asserts against.
+test_attended_identity_socket_is_the_humans_own_uid_scoped_path() {
+  local out sock
+  local DC_PASSWD_DB="$TMP/attended-paths/passwd"
+  require_attended_identity "attended_identity paths" || return 0
+  mkdir -p "$TMP/attended-paths"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  out="$(attended_identity dreamconnect-host kogies 2>/dev/null)"
+  sock="$(echo "$out" | awk '{print $4}')"
+  assert_eq "$sock" "/run/user/1000/dreamconnect.sock" \
+    "the attended socket is the HUMAN's uid-scoped path — the service account's would be two daemons on one socket"
+  assert_not_contains "$sock" "992" "and carries nothing of the backstage account's uid"
+}
+
+# The collapse case, and why it is a skip rather than a refusal.
+test_attended_identity_skips_when_the_desktop_user_is_the_installed_account() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/attended-same/passwd"
+  require_attended_identity "attended_identity collapse" || return 0
+  mkdir -p "$TMP/attended-same"
+  printf 'kogies:x:1000:1000::/home/kogies:/bin/bash\n' > "$DC_PASSWD_DB"
+
+  out="$(attended_identity kogies kogies 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "attended_identity must not offer to wire the account already installed under: expected non-zero, got 0"
+  assert_eq "$out" "" "and prints nothing, so a caller cannot wire the same uid twice"
+}
+
+# A headless server nobody ever logs into: detect_user finds nothing. Attended
+# wiring is skipped cleanly — it must not fail the install.
+test_attended_identity_skips_when_no_desktop_user_was_detected() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/attended-none/passwd"
+  require_attended_identity "attended_identity no desktop user" || return 0
+  mkdir -p "$TMP/attended-none"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\n' > "$DC_PASSWD_DB"
+
+  out="$(attended_identity dreamconnect-host "" 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "no detected desktop user: expected non-zero, got 0"
+  assert_eq "$out" "" "and nothing on stdout"
+
+  out="$(attended_identity dreamconnect-host ghost-user 2>/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a detected user with no passwd entry: expected non-zero, got 0"
+  assert_eq "$out" "" "and nothing on stdout for an account that does not exist"
+}
+
+# The publisher must be a DIFFERENT unit from the backstage one.
+# dreamconnect-backstage.service's ExecStart is `gnome-shell --headless`, with
+# the env publisher only as its ExecStartPost — installing that into a human's
+# account would start a second GNOME shell inside their session. Asserted
+# filename-agnostically: what matters is that SOME shipped user unit publishes
+# the display env on login without starting a shell.
+test_attended_publisher_unit_publishes_without_starting_a_shell() {
+  local unit found="" body
+  for unit in "$HERE"/systemd/*.service; do
+    [ -f "$unit" ] || continue
+    body="$(cat "$unit" 2>/dev/null || true)"
+    case "$body" in
+      *graphical-session.target*) ;;
+      *) continue ;;
+    esac
+    case "$body" in
+      *dreamconnect-backstage-env.sh*|*dreamconnect-attended-env.sh*) found="$unit" ;;
+    esac
+  done
+  [ -n "$found" ] || {
+    fail "no shipped user unit publishes the display env WantedBy=graphical-session.target — without it a console login writes no /run/user/<uid>/dreamconnect-display.env, the register instance waits forever, and curation drops that session from the picker"
+    return 0; }
+
+  body="$(cat "$found" 2>/dev/null || true)"
+  assert_not_contains "$body" "gnome-shell" \
+    "the attended publisher must not start a shell: $(basename "$found") would run a second GNOME session inside the human's own"
+  assert_contains "$(unit_directive Install WantedBy "$found")" "graphical-session.target" \
+    "it is pulled in when the human logs in, which is the only moment their display exists"
+  assert_contains "$(unit_directive Service ExecStart "$found")" "env" \
+    "and its ExecStart is the display-env publisher"
+}
+
+# The install-side wiring, all three parts, and all inside the backstage branch:
+# a classic install IS the attended case and must not do any of it twice.
+test_backstage_install_also_wires_the_detected_desktop_user() {
+  local sh line seen_publisher="" seen_daemon="" seen_register=""
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  # attended_wiring subsumes attended_identity (round 2): either satisfies the
+  # property, which is that the decision comes from the library rather than
+  # being re-derived here.
+  [ -n "$(first_code_line "$sh" 'attended_identity|attended_wiring')" ] || {
+    fail "call site: install.sh never resolves an attended identity, so a console login is never wired and #52 drops it from the picker"
+    return 0; }
+
+  seen_publisher="$(first_code_line "$sh" 'ATTENDED.*(env|publisher)|(env|publisher).*ATTENDED')"
+  [ -n "$seen_publisher" ] || \
+    fail "call site: install.sh installs no display-env publisher into the attended account"
+
+  seen_register="$(first_code_line "$sh" 'systemctl[[:space:]]+enable[[:space:]]+.*dreamconnect-register@[$]ATTENDED')"
+  [ -n "$seen_register" ] || \
+    fail "call site: install.sh never enables dreamconnect-register@ for the attended uid — their session would re-register only if someone ran it by hand"
+  [ -n "$(first_code_line "$sh" 'systemctl[[:space:]]+(start|restart)[[:space:]]+.*dreamconnect-register@[$]ATTENDED')" ] || \
+    fail "call site: install.sh enables the attended register instance but never starts it, so a user already logged in at install time stays invisible until they log out and back in"
+
+  # uninstall() legitimately touches the attended account outside any backstage
+  # branch — that is teardown, not wiring — so it is excluded, exactly as the
+  # register-instance guard in #53 does.
+  local range ustart uend
+  range="$(func_range "$sh" uninstall)"
+  ustart="${range% *}"; uend="${range#* }"
+  [ -n "$range" ] || { ustart=0; uend=0; }
+  for line in $(awk -v us="$ustart" -v ue="$uend" \
+      '/ATTENDED/ && $0 !~ /^[[:space:]]*#/ && !(NR > us && NR < ue) { print NR }' "$sh"); do
+    assert_eq "$(guarded_by_backstage "$sh" "$line")" "yes" \
+      "install.sh:$line wires the attended session outside the backstage branch — a classic install already IS that session, and wiring it again would put two daemons on one uid"
+  done
+}
+
+# The attended daemon captures the physical screen as the human, on the human's
+# own uid-scoped paths.
+test_attended_daemon_is_rendered_for_the_humans_uid() {
+  local sh line stmt
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  line="$(first_code_line "$sh" 'ATTENDED_SHM|dreamconnect\.frame\.[$]ATTENDED_UID')"
+  [ -n "$line" ] || {
+    fail "call site: install.sh never builds a uid-scoped frame path for the attended account — sharing the backstage frame would have two daemons writing one buffer"
+    return 0; }
+  stmt="$(logical_statement_at "$sh" "$line")"
+  assert_contains "$stmt" 'ATTENDED_UID' "the attended frame is scoped by the HUMAN's uid"
+  assert_not_contains "$stmt" 'USER_UID' "and not by the account the daemon was installed under"
+
+  line="$(first_code_line "$sh" 'ATTENDED_DAEMON_ARGS|DAEMON_ARGS=.*--monitor.*ATTENDED')"
+  [ -n "$line" ] || {
+    fail "call site: install.sh renders no capture daemon for the attended account"
+    return 0; }
+  stmt="$(logical_statement_at "$sh" "$line")"
+  assert_contains "$stmt" "--monitor" \
+    "the attended daemon captures the physical screen (--monitor), not a virtual one"
+  assert_contains "$stmt" "--label" "and carries a label for the picker"
+}
+
+# A box where no desktop user can be detected must still install. Attended
+# wiring is a bonus, not a precondition.
+test_attended_wiring_is_skipped_cleanly_when_there_is_no_desktop_user() {
+  local sh line stmt
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  line="$(first_code_line "$sh" 'attended_identity|attended_wiring')"
+  [ -n "$line" ] || { fail "call site: install.sh never calls attended_identity/attended_wiring"; return 0; }
+  stmt="$(logical_statement_at "$sh" "$line")"
+  assert_not_contains "$stmt" "die" \
+    "a headless server with nobody logged in must not fail its install because there is no console user to wire: [$stmt]"
+  case "$stmt" in
+    *"||"*|*"if "*) ;;
+    *) fail "call site: install.sh:$line does not handle attended_identity failing — with 'set -e' a box with no desktop user would abort the install: [$stmt]" ;;
+  esac
+}
+
+# #53's uninstall gap was found by review rather than by a test. This is the
+# same class of gap one slice later: an enabled register instance for the human,
+# --- issue #56 round 2: the wiring decision, made executable -----------------
+#
+# Both reviewers found the whole feature was DEAD CODE: a backstage install sets
+# MONITOR="" (backstage captures a virtual monitor, so there is no connector),
+# and the attended block then bailed on `[ -z "$MONITOR" ]` — on the only mode
+# it targets. Nothing wired, nothing recorded, no register instance.
+#
+# WHY MY ROUND-1 TESTS MISSED IT, which is the part worth fixing rather than
+# patching: every install.sh assertion I wrote is a grep over source text
+# (first_code_line / guarded_by_backstage / logical_statement_at). Text can show
+# that a line EXISTS and where it sits; it cannot show that the branch never
+# executes. Worse, my own round-1 test is what moved the block inside the
+# backstage branch, which is what invalidated a guard that had been correct at
+# top level.
+#
+# So the decision moves out of install.sh and into a function this suite can
+# CALL:
+#   attended_wiring <backstage_flag> <installed_account> <detected_user> <monitor_override>
+#       -> "NAME UID HOME SOCKET MONITOR" on stdout, exit 0   (wire this)
+#       -> nothing, non-zero                                  (skip, cleanly)
+# The capture source is part of the answer precisely because that is where the
+# dead code lived: the attended daemon captures a PHYSICAL screen, so it needs a
+# connector of its own, and it must never inherit the emptiness that backstage's
+# own MONITOR carries by design.
+
+require_attended_wiring() {  # label
+  declare -F attended_wiring >/dev/null && return 0
+  fail "$1: attended_wiring() is not defined — the assertions below would pass vacuously"
+  return 1
+}
+
+# Save/restore around a stubbed detect_monitor: bash function definitions are
+# global, and leaving a stub behind would quietly change every later test.
+_saved_detect_monitor=""
+stub_detect_monitor() {  # output
+  _saved_detect_monitor="$(declare -f detect_monitor || true)"
+  eval "detect_monitor() { [ -n '$1' ] && printf '%s\n' '$1'; }"
+}
+restore_detect_monitor() {
+  unset -f detect_monitor 2>/dev/null || true
+  [ -n "$_saved_detect_monitor" ] && eval "$_saved_detect_monitor"
+  _saved_detect_monitor=""
+}
+
+test_library_defines_attended_wiring() {
+  declare -F attended_wiring >/dev/null \
+    || fail "install-lib.sh defines attended_wiring(): not defined"
+}
+
+# THE dead-code test. Executed, not grepped: backstage mode, no monitor override
+# — exactly the state install.sh is in at that point — must still produce a
+
+# A classic install already IS the attended session.
+test_attended_wiring_skips_a_classic_install() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/aw-classic/passwd"
+  require_attended_wiring "attended_wiring classic" || return 0
+  mkdir -p "$TMP/aw-classic"
+  printf 'kogies:x:1000:1000::/home/kogies:/bin/bash\nsomeone-else:x:1005:1005::/home/someone-else:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  # A DIFFERENT account than the one installed under, so the only thing that can
+  # decide this is the classic/backstage flag itself — with installed==detected
+  # the collapse rule would decide it and the flag would go unexercised.
+  stub_detect_monitor "HDMI-2"
+  out="$(attended_wiring 0 kogies someone-else "" 2>/dev/null)"; rc=$?
+  restore_detect_monitor
+  [ "$rc" -ne 0 ] || fail "classic install: expected non-zero — a classic install already IS the attended session, whoever else may be logged in; got 0"
+  assert_eq "$out" "" "and nothing to wire a second time"
+}
+
+# The account name is interpolated into a sed REPLACEMENT and into a unit file.
+# Demonstrated: `a&b` renders `--label 'a@DAEMON_ARGS@b'` — a session shown under
+# the WRONG NAME, the one failure the spec says must never happen; `DOMAIN\nick`
+# (a real winbind NSS format) expands the \n into an unloadable unit while the
+# register instance still publishes the entry, i.e. a registered session with no
+# daemon; `x#y` aborts the install with `sed: unknown option to 's'`.
+#
+# REQUIRED: REFUSED, not escaped. install-lib already has valid_account_name as
+# the rail for the host account, and a name it rejects is a name we cannot put
+# safely in a unit file, a sed replacement OR a picker label. Escaping would
+# have to be correct in three grammars at once. The cost is real and belongs in
+# the release note: an AD/winbind box whose console user is `DOMAIN\nick` gets
+# no attended capture until the name is mapped.
+test_attended_wiring_refuses_an_account_name_it_cannot_render_safely() {
+  local out rc bad
+  local DC_PASSWD_DB="$TMP/aw-hostile/passwd"
+  require_attended_wiring "attended_wiring hostile names" || return 0
+  mkdir -p "$TMP/aw-hostile"
+  {
+    printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\n'
+    printf 'a&b:x:1001:1001::/home/ab:/bin/bash\n'
+    printf 'DOMAIN\\nick:x:1002:1002::/home/nick:/bin/bash\n'
+    printf 'x#y:x:1003:1003::/home/xy:/bin/bash\n'
+    printf 'a/b:x:1004:1004::/home/ab2:/bin/bash\n'
+  } > "$DC_PASSWD_DB"
+
+  stub_detect_monitor "HDMI-2"
+  for bad in 'a&b' 'DOMAIN\nick' 'x#y' 'a/b'; do
+    out="$(attended_wiring 1 dreamconnect-host "$bad" "" 2>/dev/null)"; rc=$?
+    [ "$rc" -ne 0 ] || fail "hostile account name [$bad]: expected non-zero, got 0 — it reaches a sed replacement and a unit file"
+    assert_eq "$out" "" "hostile account name [$bad]: nothing on stdout"
+  done
+  restore_detect_monitor
+}
+
+# The collision that matters is over UIDs, not names: shm and socket are
+# uid-scoped, so two passwd entries sharing a uid would put both daemons on one
+# frame and one socket. Unlikely, cheap to rule out.
+test_attended_wiring_skips_a_uid_collision_not_just_a_name_match() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/aw-uid/passwd"
+  require_attended_wiring "attended_wiring uid collision" || return 0
+  mkdir -p "$TMP/aw-uid"
+  printf 'dreamconnect-host:x:1000:1000::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  stub_detect_monitor "HDMI-2"
+  out="$(attended_wiring 1 dreamconnect-host kogies "" 2>/dev/null)"; rc=$?
+  restore_detect_monitor
+  [ "$rc" -ne 0 ] || fail "two accounts sharing uid 1000: expected non-zero, got 0 — both daemons would write one shm and bind one socket"
+  assert_eq "$out" "" "and nothing on stdout"
+}
+
+# A re-run with a different console user must surrender the previous one, or the
+# old register instance stays enabled and the old home units stay behind — the
+# same gap review caught in #53's uninstall.
+test_attended_state_round_trips_and_yields_the_previous_account() {
+  local DC_ATTENDED_STATE_FILE="$TMP/att-state/attended.state"
+  local ATTENDED_ACCOUNT ATTENDED_UID
+  declare -F write_attended_state >/dev/null && declare -F read_attended_state >/dev/null || {
+    fail "install-lib.sh defines write_attended_state()/read_attended_state(): not defined"
+    return 0; }
+  mkdir -p "$TMP/att-state"
+
+  write_attended_state kogies 1000
+  read_attended_state
+  assert_eq "$ATTENDED_ACCOUNT" "kogies" "the recorded attended account round-trips"
+  assert_eq "$ATTENDED_UID" "1000" "and its uid"
+
+  # The next install wires someone else: the reader must still report the OLD
+  # one until the new one is written, so the caller can tear it down first.
+  read_attended_state
+  assert_eq "$ATTENDED_UID" "1000" "reading before writing yields the account still wired"
+  write_attended_state someone-else 1001
+  read_attended_state
+  assert_eq "$ATTENDED_ACCOUNT" "someone-else" "and the new one replaces it"
+  assert_eq "$ATTENDED_UID" "1001" "with its uid"
+
+  ATTENDED_ACCOUNT="stale"; ATTENDED_UID="stale"
+  rm -f "$DC_ATTENDED_STATE_FILE"
+  read_attended_state
+  assert_eq "$ATTENDED_ACCOUNT" "" "no state file -> no account recorded, not a stale value"
+  assert_eq "$ATTENDED_UID" "" "nor a stale uid"
+}
+
+# --- call sites, round 2 -----------------------------------------------------
+
+# The gate must be the executable decision, not a re-derivation from backstage's
+# own (deliberately empty) MONITOR.
+test_install_sh_gates_attended_wiring_on_the_executable_decision() {
+  local sh line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  [ -n "$(first_code_line "$sh" 'attended_wiring')" ] || {
+    fail "call site: install.sh does not use attended_wiring — the decision stays inferred from text nobody can execute, which is how it came to be dead code"
+    return 0; }
+  for line in $(awk '/ATTENDED_NAME=""|ATTENDED_NAME=$/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    :
+  done
+  line="$(first_code_line "$sh" '\[ -z "[$]MONITOR" \]')"
+  if [ -n "$line" ]; then
+    local range ustart uend
+    range="$(func_range "$sh" uninstall)"
+    ustart="${range% *}"; uend="${range#* }"
+    [ -n "$range" ] || { ustart=0; uend=0; }
+    if [ "$(guarded_by_backstage "$sh" "$line")" = "yes" ]; then
+      fail "call site: install.sh:$line still gates on an empty \$MONITOR inside the backstage branch, where MONITOR is ALWAYS empty — that is the dead code both reviewers demonstrated"
+    fi
+  fi
+}
+
+# No user manager means no bus: the three `systemctl --user` calls fail silently
+# behind `2>/dev/null || true`, yet the state is recorded and register@<uid>
+# enabled. At the user's next login there is no publisher and no daemon. The
+# backstage path already solves this with enable-linger + wait_for_user_bus.
+test_install_sh_waits_for_the_attended_user_bus_before_touching_their_units() {
+  local sh first_user_call waited lingered
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  first_user_call="$(first_code_line "$sh" 'ATTENDED_RUN_USER|sudo -u "[$]ATTENDED_NAME".*systemctl --user|systemctl --user.*ATTENDED')"
+  [ -n "$first_user_call" ] || {
+    fail "call site: install.sh never runs a systemctl --user for the attended account, so its publisher and daemon are never enabled in that account"
+    return 0; }
+  waited="$(first_code_line "$sh" 'wait_for_user_bus "[$]ATTENDED_UID"|wait_for_user_bus [$]ATTENDED_UID')"
+  [ -n "$waited" ] || {
+    fail "call site: install.sh never waits for the attended user's bus before its systemctl --user calls — with nobody logged in they fail silently and the install records success anyway (line $first_user_call)"
+    return 0; }
+  [ "$waited" -lt "$first_user_call" ] || \
+    fail "call site: wait_for_user_bus for the attended account (line $waited) must come BEFORE the first systemctl --user for it (line $first_user_call)"
+  # REVISED, round 4 — this used to REQUIRE enable-linger here, and that was
+  # wrong: see test_attended_account_never_gets_linger. Without linger the bus
+  # exists only while the person is logged in, which is exactly when wiring
+  # should happen, so the wait stays and the linger goes.
+}
+
+# REVISED, round 2. The previous version passed on a mutant that dropped the
+# `disable --now`, because one line satisfied two assertions. Three distinct
+# lines are now required, because they are three distinct failures: a daemon
+# left CAPTURING A HUMAN'S SCREEN after the software is uninstalled; dangling
+# symlinks in graphical-session.target.wants; and a uid-scoped frame left in
+# sticky /dev/shm, which is the EACCES failure #27 already cost this project.
+test_uninstall_reverses_the_attended_wiring() {
+  local sh range start end stopped removed shm
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  range="$(func_range "$sh" uninstall)"
+  [ -n "$range" ] || { fail "install.sh has no uninstall() to scope this to"; return 0; }
+  start="${range% *}"; end="${range#* }"
+
+  # Must name the ATTENDED account: uninstall already stops the INSTALLED
+  # account's units, and that line would otherwise satisfy this assertion while
+  # the human's daemon kept running.
+  stopped="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ \
+       && /systemctl --user/ && /disable --now/ && /ATTENDED|attended/ { print NR; exit }' "$sh")"
+  [ -n "$stopped" ] || \
+    fail "uninstall: nothing runs 'systemctl --user disable --now' for the attended account — its daemon KEEPS CAPTURING that person's screen until they log out, and this feature captures without prompting"
+
+  removed="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ \
+       && /ATTENDED|attended/ && /\.config\/systemd\/user/ { print NR; exit }' "$sh")"
+  [ -n "$removed" ] || \
+    fail "uninstall: the attended account's user units are never removed from their home"
+
+  shm="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ \
+       && /dreamconnect\.frame/ && /ATTENDED|attended/ { print NR; exit }' "$sh")"
+  [ -n "$shm" ] || \
+    fail "uninstall: /dev/shm/dreamconnect.frame.<attended-uid> is never removed — /dev/shm is sticky, so a later install under another account cannot unlink it and every write fails with EACCES (#27)"
+
+  [ -n "$stopped" ] && [ -n "$removed" ] && [ "$stopped" != "$removed" ] \
+    || fail "uninstall: stopping the units and removing them must be two different lines — one line satisfying both is how the previous version of this test passed on a mutant that never stopped anything"
+}
+
+# --- issue #56 round 3 --------------------------------------------------------
+#
+# Two of the breaker's six defects were invisible because every call-site test
+# is a grep: text can show a line exists, not that enabling a unit whose target
+# is already active starts nothing. Where a property can be executed, it is.
+
+# A suite where a function is defined twice keeps the LAST definition and
+# silently drops the first — which is what happened to
+# test_uninstall_reverses_the_attended_wiring between rounds 1 and 2: the
+# round-1 version sat there looking like coverage and never ran. This is the
+# alarm for that, over the whole file.
+# logical_statement_at joins a line with the continuations BELOW it. When the
+# interesting text is a prefix on the lines ABOVE (a `sudo -u "$ACCOUNT" env … \`
+# ahead of the systemctl it runs), the statement has to be found from its start.
+logical_statement_containing() {  # file line -> the whole statement that line belongs to
+  local file="$1" line="$2" start
+  start="$(awk -v target="$line" '
+    NR < target { cont = ($0 ~ /\\[[:space:]]*$/); if (!cont) last = NR + 1 }
+    NR == target { print (last ? last : 1); exit }' "$file")"
+  logical_statement_at "$file" "${start:-$line}"
+}
+
+test_no_test_function_is_defined_twice() {
+  local dupes
+  dupes="$(grep -o '^test_[a-z0-9_]*()' "$0" | sort | uniq -d | tr '\n' ' ')"
+  assert_eq "$dupes" "" \
+    "these test functions are defined more than once, so only the last definition of each runs and the earlier ones are dead coverage:"
+}
+
+# DEFECT 1a. `graphical-session.target` is already active for someone logged in,
+# so `systemctl --user enable` starts nothing, and register@<uid> then polls 60s
+# for a display env file nobody is writing. The installer prints "registers at
+# next login", which is false: register@ is WantedBy=multi-user.target, and
+# BindsTo propagates a STOP, not a start — so its only other chance is boot,
+# with nobody logged in.
+#
+# The systemd idiom for "when this appears, act" is a path unit.
+#
+# CONDITION CHOSEN: PathExists, not PathChanged. PathExists is exactly the
+# question being asked — has this session published a display — and it activates
+# once per appearance, which is what registration needs. PathChanged would ALSO
+# fire when the publisher rewrites the file with a new display number, which is
+# #54's case (stale display after an Xwayland restart); that is a real
+# improvement and deliberately NOT folded in here, because #54 needs its own
+# decision about re-registration rather than arriving as a side effect.
+test_register_watch_path_unit_triggers_registration_on_login() {
+  local u body
+  u="$HERE/systemd/dreamconnect-register-watch@.path"
+  [ -f "$u" ] || {
+    fail "systemd/dreamconnect-register-watch@.path does not exist — nothing triggers registration when a human logs in AFTER boot, which is the normal case"
+    return 0; }
+  body="$(cat "$u" 2>/dev/null || true)"
+
+  assert_contains "$(unit_directive Path PathExists "$u")" "/run/user/%i/dreamconnect-display.env" \
+    "the path watched is the display env of THAT uid's session"
+  assert_contains "$(unit_directive Path Unit "$u")" "dreamconnect-register@%i.service" \
+    "and what it starts is that uid's register instance"
+  assert_not_contains "$body" "PathChanged" \
+    "PathChanged is #54's answer (re-register when the display number changes), not this one — flagged rather than folded in"
+  [ -n "$(unit_directive Install WantedBy "$u")" ] || \
+    fail "the path unit has no [Install] WantedBy, so it cannot be enabled and never watches anything"
+}
+
+test_install_sh_enables_and_starts_the_register_watch() {
+  local sh enabled started
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  enabled="$(first_code_line "$sh" 'systemctl[[:space:]]+enable[[:space:]]+.*dreamconnect-register-watch@')"
+  [ -n "$enabled" ] || {
+    fail "call site: install.sh never enables dreamconnect-register-watch@<uid>.path — a login after boot then triggers nothing and the session never registers"
+    return 0; }
+  started="$(first_code_line "$sh" 'systemctl[[:space:]]+(start|restart)[[:space:]]+.*dreamconnect-register-watch@')"
+  [ -n "$started" ] || \
+    fail "call site: install.sh enables the watch but never starts it, so it only begins watching after the next reboot"
+  assert_contains "$(logical_statement_at "$sh" "$enabled")" 'ATTENDED_UID' \
+    "the watch is instanced on the attended uid"
+}
+
+# DEFECT 1b. Enabling a unit whose target is already reached starts nothing. The
+# session is up NOW — that is why we are wiring it — so the publisher and the
+# daemon must be started, exactly as the register instance already is.
+test_install_sh_starts_the_attended_units_not_just_enables_them() {
+  local sh line found_pub="" found_daemon=""
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  for line in $(awk '/systemctl --user/ && /(start|restart)/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    case "$(logical_statement_at "$sh" "$line")" in
+      *ATTENDED_RUN_USER*attended-env*|*attended-env*ATTENDED_RUN_USER*) found_pub="$line" ;;
+    esac
+    case "$(logical_statement_at "$sh" "$line")" in
+      *ATTENDED_RUN_USER*dreamconnect-daemon*|*dreamconnect-daemon*ATTENDED_RUN_USER*) found_daemon="$line" ;;
+    esac
+  done
+  [ -n "$found_pub" ] || \
+    fail "call site: install.sh only ENABLES the attended display publisher; graphical-session.target is already active for a logged-in user, so nothing starts and register@ polls 60s for a file nobody writes"
+  [ -n "$found_daemon" ] || \
+    fail "call site: install.sh only ENABLES the attended capture daemon, so the session it registers has nothing serving it until the user logs out and back in"
+}
+
+# DEFECT 2, executable. detect_monitor runs the probe through RUN_USER, which
+# install.sh has already repointed at the BACKSTAGE service account — a headless
+# session that reports no monitors — and its `|| echo "HDMI-2"` fallback then
+# wins. Demonstrated on a laptop whose console is eDP-1: the human's daemon was
+# rendered `--monitor HDMI-2` and Mutter errored on the unknown connector.
+#
+# SEAM SPECIFIED: detect_monitor_as <account>, which probes AS that account and
+# prints nothing when it cannot. The stub records who it was asked about, so the
+# assertion is about the account probed, not about text near the call.
+_saved_detect_monitor_as=""
+stub_detect_monitor_as() {  # output_connector
+  _saved_detect_monitor_as="$(declare -f detect_monitor_as || true)"
+  eval "detect_monitor_as() { echo \"\$1\" > '$TMP/probed-account'; [ -n '$1x' ] && [ -n '${1:+x}' ]; [ -n '$1' ] && printf '%s\n' '$1'; return 0; }"
+  eval "detect_monitor_as() { printf '%s' \"\$1\" > '$TMP/probed-account'; [ -n '$1' ] && printf '%s\n' '$1'; return 0; }"
+}
+restore_detect_monitor_as() {
+  unset -f detect_monitor_as 2>/dev/null || true
+  [ -n "$_saved_detect_monitor_as" ] && eval "$_saved_detect_monitor_as"
+  _saved_detect_monitor_as=""
+}
+
+test_attended_wiring_probes_the_connector_as_the_console_user() {
+  local out mon probed
+  local DC_PASSWD_DB="$TMP/aw-probe/passwd"
+  require_attended_wiring "attended_wiring probes as the console user" || return 0
+  declare -F detect_monitor_as >/dev/null || {
+    fail "install-lib.sh defines detect_monitor_as(): not defined — the connector must be probed as a named account, or it is probed as whoever RUN_USER currently points at (the backstage service account)"
+    return 0; }
+  mkdir -p "$TMP/aw-probe"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+  : > "$TMP/probed-account"
+
+  stub_detect_monitor_as "eDP-1"
+  out="$(attended_wiring 1 dreamconnect-host kogies "" 2>/dev/null)"
+  restore_detect_monitor_as
+  probed="$(cat "$TMP/probed-account" 2>/dev/null || true)"
+  mon="$(echo "$out" | awk '{print $5}')"
+
+  assert_eq "$probed" "kogies" \
+    "the connector is probed as the CONSOLE user, not as the backstage service account whose headless session reports no monitors"
+  assert_eq "$mon" "eDP-1" "and the connector it reports is what the daemon is given"
+}
+
+# REVISED, round 3. The breaker is right that this arm was only reachable
+# through my stub: detect_monitor ends with `|| echo "HDMI-2"`, so in production
+# it never prints empty. The honest contract is that the ATTENDED path must not
+# inherit that fallback — a daemon pointed at a connector that does not exist
+# fails at Mutter and leaves a registered session with no picture, which is
+# worse than no attended session at all.
+test_attended_wiring_skips_when_no_capture_source_exists() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/aw-nomon/passwd"
+  require_attended_wiring "attended_wiring without a connector" || return 0
+  declare -F detect_monitor_as >/dev/null || {
+    fail "attended_wiring without a connector: detect_monitor_as() is not defined"
+    return 0; }
+  mkdir -p "$TMP/aw-nomon"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nkogies:x:1000:1000::/home/kogies:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  stub_detect_monitor_as ""
+  out="$(attended_wiring 1 dreamconnect-host kogies "" 2>/dev/null)"; rc=$?
+  restore_detect_monitor_as
+  [ "$rc" -ne 0 ] || fail "a probe that reports no connector: expected non-zero, got 0"
+  assert_eq "$out" "" "and nothing on stdout, so nothing is wired"
+
+  # And the fallback must not be smuggled back in: a hardcoded connector in the
+  # attended path is the defect above wearing a different hat.
+  local body
+  body="$(sed -n '/^attended_wiring()/,/^}/p' "$LIB" 2>/dev/null || true)"
+  assert_not_contains "$body" "HDMI-2" \
+    "attended_wiring must not hardcode a connector — that is how a laptop's eDP-1 console became --monitor HDMI-2"
+}
+
+# DEFECT 6. The home directory is pasted into a unit path and read back with
+# `read -r`; one containing a space shifts every later field, and the overflow
+# lands in the connector that goes into ExecStart. resolve_host_identity
+# documents the underlying gap, but the consequence here is a malformed unit in
+# someone else's account, so it is refused at this boundary rather than
+# deferred.
+test_attended_wiring_refuses_a_home_with_whitespace() {
+  local out rc
+  local DC_PASSWD_DB="$TMP/aw-space/passwd"
+  require_attended_wiring "attended_wiring spaced home" || return 0
+  mkdir -p "$TMP/aw-space"
+  printf 'dreamconnect-host:x:992:992::/home/dreamconnect-host:/bin/bash\nspacey:x:1006:1006::/home/spacey user:/bin/bash\n' \
+    > "$DC_PASSWD_DB"
+
+  declare -F detect_monitor_as >/dev/null && stub_detect_monitor_as "eDP-1" || stub_detect_monitor "eDP-1"
+  out="$(attended_wiring 1 dreamconnect-host spacey "" 2>/dev/null)"; rc=$?
+  declare -F restore_detect_monitor_as >/dev/null && restore_detect_monitor_as || restore_detect_monitor
+  [ "$rc" -ne 0 ] || fail "a home containing a space: expected non-zero, got 0 — the field shift puts the home's tail into the daemon's --monitor"
+  assert_eq "$out" "" "and nothing on stdout"
+}
+
+# DEFECT 3. Re-wiring to a different console user unlinks the previous account's
+# units but never stops their daemon, so that person's screen keeps being
+# captured until they log out. Same defect this suite already asserts against in
+# uninstall; the surrender path needs its own assertion because the register
+# disable alone satisfied the old one.
+test_install_sh_surrenders_a_previous_attended_account() {
+  local sh read_line disable_line stop_line wrote line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  read_line="$(first_code_line "$sh" 'read_attended_state')"
+  [ -n "$read_line" ] || {
+    fail "call site: install.sh never reads the previously recorded attended account, so a re-run under a different console user leaves the old wiring behind"
+    return 0; }
+  disable_line="$(awk '/dreamconnect-register@/ && /PREV|OLD|previous/ && $0 !~ /^[[:space:]]*#/ { print NR; exit }' "$sh")"
+  [ -n "$disable_line" ] || \
+    fail "call site: install.sh reads the previous attended account but never disables its register instance"
+
+  # Read as logical statements: the account being torn down is usually named on
+  # a continuation line (the sudo -u prefix), not on the systemctl line itself.
+  stop_line=""
+  for line in $(awk '/systemctl --user/ && /disable --now|stop/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    case "$(logical_statement_containing "$sh" "$line")" in
+      *PREV*|*previous*|*OLD*) stop_line="$line"; break ;;
+    esac
+  done
+  [ -n "$stop_line" ] || \
+    fail "call site: the previous attended account's daemon is never stopped when wiring moves to someone else — that person's screen keeps being captured until they log out, and this feature captures without prompting"
+
+  wrote="$(first_code_line "$sh" 'write_attended_state')"
+  [ -n "$wrote" ] || {
+    fail "call site: install.sh never records the attended account it wired"
+    return 0; }
+  [ "$read_line" -lt "$wrote" ] || \
+    fail "call site: the previous attended account must be READ (line $read_line) before this run's is WRITTEN (line $wrote)"
+}
+
+# DEFECT 4. Under `set -euo pipefail`, an unguarded loginctl/systemctl between
+# the teardown and the record aborts the install with attended.state still
+# naming the account just torn down: the new one is live and unrecorded, so
+# uninstall reverses nothing and its daemon runs on.
+test_install_sh_records_the_attended_account_before_the_steps_that_can_abort() {
+  local sh wrote first_risky line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  wrote="$(first_code_line "$sh" 'write_attended_state')"
+  [ -n "$wrote" ] || { fail "call site: install.sh never records the attended account"; return 0; }
+
+  first_risky=""
+  for line in $(awk '/ATTENDED/ && /loginctl|systemctl/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    case "$(logical_statement_at "$sh" "$line")" in
+      *"|| true"*|*"|| echo"*|*"2>/dev/null"*|*PREV*|*previous*) continue ;;
+    esac
+    first_risky="$line"; break
+  done
+  if [ -n "$first_risky" ]; then
+    [ "$wrote" -lt "$first_risky" ] || \
+      fail "call site: install.sh:$first_risky can abort under 'set -e' before write_attended_state (line $wrote) — the new attended account would then be live and unrecorded, and uninstall would reverse nothing"
+  fi
+}
+
+# REVISED, round 4 — inverted. Round 3 asserted that uninstall takes linger
+# back; round 4's root cause is that a human's account must never have had it.
+# Reverting it unconditionally is its own defect: a console user who enabled
+# linger themselves — standard for rootless podman — silently loses it, and
+# nothing records that they had it. So uninstall must leave it alone.
+test_uninstall_does_not_touch_the_attended_accounts_linger() {
+  local sh range start end line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  range="$(func_range "$sh" uninstall)"
+  [ -n "$range" ] || { fail "install.sh has no uninstall() to scope this to"; return 0; }
+  start="${range% *}"; end="${range#* }"
+
+  line="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ \
+       && /disable-linger/ && /ATTENDED|attended/ { print NR; exit }' "$sh")"
+  [ -z "$line" ] || \
+    fail "uninstall:$line disables linger on the attended account. We never enable it there (round 4), and a console user who enabled it themselves — rootless podman does — loses it silently, with no record that they had it"
+}
+
+# --- issue #56 round 4 --------------------------------------------------------
+#
+# WHAT THIS SEAM CAN AND CANNOT PROVE, said plainly because the last two rounds'
+# defects were both invisible to text assertions: nothing here runs systemd. It
+# can prove that units carry the directives the lifecycle depends on, that
+# install.sh orders its calls correctly, and that the pure functions behave. It
+# CANNOT prove that a logout deregisters, that a second login re-registers, or
+# that uninstall leaves no entry. Those are live checks, and after this round
+# they are the acceptance test for #56.
+
+# THE ROOT CAUSE. Linger exists so a BACKSTAGE account's manager runs with
+# nobody logged in. On a human's account it destroys the signal the design
+# depends on: user@<uid>.service stopping at logout is what makes BindsTo
+# deregister the session. With linger on it never stops, so register@ stays
+# active with RemainAfterExit, holding an entry whose daemon
+# (PartOf=graphical-session.target) has already gone — the operator is offered
+# that person by name with nothing behind it.
+test_attended_account_never_gets_linger() {
+  local sh line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  for line in $(awk '/enable-linger/ && $0 !~ /disable-linger/ && $0 !~ /^[[:space:]]*#/ { print NR }' "$sh"); do
+    case "$(logical_statement_containing "$sh" "$line")" in
+      *ATTENDED*)
+        fail "call site: install.sh:$line enables linger for the attended account. That keeps their user manager alive after logout, so BindsTo=user@%i never fires, register@ never stops, and the registry keeps offering a session whose daemon is gone" ;;
+    esac
+  done
+}
+
+# For PathExists to fire again on the NEXT login, the file has to go away at
+# logout. The publisher has no ExecStop today, so the display env outlives the
+# session — and with the triggered unit still active, deleting and recreating
+# the file produced ZERO further triggers.
+test_attended_publisher_unpublishes_its_display_on_stop() {
+  local u stop unit
+  local unit
+  u=""
+  for unit in "$HERE"/systemd/*.service; do
+    [ -f "$unit" ] || continue
+    case "$(unit_directive Install WantedBy "$unit")" in
+      *graphical-session.target*) ;;
+      *) continue ;;
+    esac
+    case "$(unit_directive Service ExecStart "$unit")" in
+      *env*) u="$unit" ;;
+    esac
+  done
+  [ -n "$u" ] || { fail "no attended publisher unit to check"; return 0; }
+
+  stop="$(unit_directive Service ExecStopPost "$u")$(unit_directive Service ExecStop "$u")"
+  assert_contains "$stop" "dreamconnect-display.env" \
+    "the publisher must REMOVE the display env when it stops: a logout that leaves the file behind means PathExists never fires again, so the next login is never registered"
+}
+
+# A fast-failing register instance (register_label returns non-zero in under
+# 100ms when install.state names no account) trips systemd's default start
+# limit after five tries — and takes the PATH UNIT to failed with it, losing the
+# login trigger permanently. The daemon unit already carries this for the same
+# reason.
+test_register_unit_survives_a_fast_failing_instance() {
+  local u
+  u="$HERE/systemd/dreamconnect-register@.service"
+  [ -f "$u" ] || { fail "systemd/dreamconnect-register@.service does not exist"; return 0; }
+  assert_eq "$(unit_directive Unit StartLimitIntervalSec "$u" | tr -d ' ')" "0" \
+    "register@ needs StartLimitIntervalSec=0: five fast failures otherwise take the path unit to failed, and the login trigger is gone until someone resets it by hand"
+}
+
+# Uninstall stopped register@ BEFORE the path unit, so the path unit instantly
+# restarted it ("Stopping … but its triggering units are still active"), and
+# install.sh then deleted dreamconnect-register@.service — destroying the
+# ExecStop that was the only thing that could deregister. The entry survives
+# until reboot.
+test_uninstall_stops_the_trigger_before_the_registration() {
+  local sh range start end watch reg
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+  range="$(func_range "$sh" uninstall)"
+  [ -n "$range" ] || { fail "install.sh has no uninstall() to scope this to"; return 0; }
+  start="${range% *}"; end="${range#* }"
+
+  watch="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ && /dreamconnect-register-watch@/ { print NR; exit }' "$sh")"
+  reg="$(awk -v s="$start" -v e="$end" \
+    'NR > s && NR < e && $0 !~ /^[[:space:]]*#/ && /dreamconnect-register@/ && /disable|stop/ \
+       && /ATTENDED|attended/ { print NR; exit }' "$sh")"
+  [ -n "$watch" ] || { fail "uninstall: the register-watch path unit is never stopped, so it re-triggers registration during the uninstall"; return 0; }
+  [ -n "$reg" ] || { fail "uninstall: the register instance is never stopped"; return 0; }
+  [ "$watch" -lt "$reg" ] || \
+    fail "uninstall: the path unit (line $watch) must be stopped BEFORE the register instance (line $reg) — otherwise the trigger restarts it, and the unit file is deleted next, taking the ExecStop that was the only way to deregister"
+}
+
+# Same ordering in the re-run teardown, for the same reason.
+test_rerun_teardown_stops_the_previous_trigger_before_its_registration() {
+  local sh watch reg
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  watch="$(first_code_line "$sh" 'dreamconnect-register-watch@[$]PREV')"
+  reg="$(first_code_line "$sh" 'dreamconnect-register@[$]PREV')"
+  [ -n "$watch" ] || { fail "re-run: the previous account's register-watch path unit is never stopped, so it re-registers the account being replaced"; return 0; }
+  [ -n "$reg" ] || { fail "re-run: the previous account's register instance is never stopped"; return 0; }
+  [ "$watch" -lt "$reg" ] || \
+    fail "re-run: the previous path unit (line $watch) must be stopped BEFORE its register instance (line $reg)"
+}
+
+# write_install_state was given mktemp+rename for exactly this, and has a test.
+# A torn attended.state leaves ATTENDED_UID="" — and uninstall gates BOTH the
+# deregistration and the watch-path disable on it being non-empty, so an
+# interrupted write means the login trigger survives an uninstall.
+test_write_attended_state_survives_a_write_killed_part_way_through() {
+  local state before after rc
+  local DC_ATTENDED_STATE_FILE="$TMP/att-interrupted/attended.state"
+  local ATTENDED_ACCOUNT ATTENDED_UID
+  declare -F write_attended_state >/dev/null || {
+    fail "install-lib.sh defines write_attended_state(): not defined"; return 0; }
+  state="$DC_ATTENDED_STATE_FILE"
+  mkdir -p "$(dirname "$state")"
+  printf 'ATTENDED_ACCOUNT=kogies\nATTENDED_UID=1000\n' > "$state"
+  before="$(cat "$state")"
+
+  rc="$(bash -c '
+    exec 2>/dev/null
+    ulimit -c 0; ulimit -f 0
+    . "$1"
+    ( DC_ATTENDED_STATE_FILE="$2" write_attended_state someone-else 1001 >/dev/null 2>&1 )
+    echo "$?"
+  ' _ "$LIB" "$state")"
+  [ "${rc:-0}" -gt 128 ] || fail "precondition: the writer was not killed mid-write (rc=$rc)"
+
+  after="$(cat "$state" 2>/dev/null || true)"
+  assert_eq "$after" "$before" \
+    "an interrupted write leaves the previous attended.state byte-for-byte intact — a truncated one has ATTENDED_UID empty, and uninstall then skips both the deregistration and the watch disable, leaving the login trigger behind"
+  read_attended_state
+  assert_eq "$ATTENDED_UID" "1000" "and the reader still sees the recorded uid, not nothing"
+}
+
+# A probe that fails — missing gi, an X11/KDE console, a wedged bus — yields "no
+# attended session" with no message at all, because the wiring branch has no
+# else. The operator cannot tell the feature was skipped, let alone why.
+test_install_sh_says_why_attended_wiring_was_skipped() {
+  local sh line stmt seen=""
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  line="$(first_code_line "$sh" 'ATTENDED_WIRING=')"
+  [ -n "$line" ] || { fail "call site: install.sh does not call attended_wiring"; return 0; }
+  # An else/skip message must exist within the statement's own block.
+  seen="$(awk -v s="$line" 'NR > s && NR < s + 40 && /echo/ && /attend|console|skip|not wir/ { print NR; exit }' "$sh")"
+  [ -n "$seen" ] || \
+    fail "call site: install.sh never says that attended wiring was skipped or why — a failed connector probe, a missing gi or an X11 console all produce silence, and the operator has no way to know the feature is not there"
+}
+
+# REVISED, round 4. The 4th parameter was unreachable from production:
+# install.sh forces MONITOR="" whenever BACKSTAGE=1, which is the only case
+# attended wiring runs in, so the override could never be non-empty.
+#
+# DECISION: make it REACHABLE rather than delete it. The probe takes
+# monitors[0] blindly, and a two-head console is exactly where that is wrong;
+# an operator needs a way to say which connector is the one a human sits at.
+# So install.sh must pass an operator-settable override — not the $MONITOR it
+# has already emptied.
+test_attended_monitor_override_is_reachable_from_install_sh() {
+  local sh stmt line
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
+
+  line="$(first_code_line "$sh" 'attended_wiring')"
+  [ -n "$line" ] || { fail "call site: install.sh does not call attended_wiring"; return 0; }
+  stmt="$(logical_statement_containing "$sh" "$line")"
+  case "$stmt" in
+    *DREAMCONNECT_ATTENDED_MONITOR*) ;;
+    *'"${MONITOR:-}"'*|*'"$MONITOR"'*)
+      fail "call site: install.sh passes \$MONITOR as the attended connector override, which it has already forced empty for every backstage install — the parameter is unreachable, so a two-head console cannot be corrected: [$stmt]" ;;
+    *) fail "call site: install.sh passes no operator-settable connector override for the attended session: [$stmt]" ;;
+  esac
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -7050,7 +7954,43 @@ for CURRENT in \
   test_classic_install_needs_no_registry_at_all \
   test_uninstall_disables_and_removes_the_register_unit \
   test_register_label_agrees_with_the_state_reader_on_a_duplicated_key \
-  test_register_label_survives_a_crlf_state_file
+  test_register_label_survives_a_crlf_state_file \
+  test_library_defines_attended_identity \
+  test_attended_identity_resolves_the_detected_desktop_user \
+  test_attended_identity_socket_is_the_humans_own_uid_scoped_path \
+  test_attended_identity_skips_when_the_desktop_user_is_the_installed_account \
+  test_attended_identity_skips_when_no_desktop_user_was_detected \
+  test_attended_publisher_unit_publishes_without_starting_a_shell \
+  test_backstage_install_also_wires_the_detected_desktop_user \
+  test_attended_daemon_is_rendered_for_the_humans_uid \
+  test_attended_wiring_is_skipped_cleanly_when_there_is_no_desktop_user \
+  test_uninstall_reverses_the_attended_wiring \
+  test_library_defines_attended_wiring \
+  test_attended_wiring_is_decided_for_a_backstage_install \
+  test_attended_wiring_skips_when_no_capture_source_exists \
+  test_attended_wiring_skips_a_classic_install \
+  test_attended_wiring_refuses_an_account_name_it_cannot_render_safely \
+  test_attended_wiring_skips_a_uid_collision_not_just_a_name_match \
+  test_attended_state_round_trips_and_yields_the_previous_account \
+  test_install_sh_gates_attended_wiring_on_the_executable_decision \
+  test_install_sh_waits_for_the_attended_user_bus_before_touching_their_units \
+  test_install_sh_surrenders_a_previous_attended_account \
+  test_no_test_function_is_defined_twice \
+  test_register_watch_path_unit_triggers_registration_on_login \
+  test_install_sh_enables_and_starts_the_register_watch \
+  test_install_sh_starts_the_attended_units_not_just_enables_them \
+  test_attended_wiring_probes_the_connector_as_the_console_user \
+  test_attended_wiring_refuses_a_home_with_whitespace \
+  test_install_sh_records_the_attended_account_before_the_steps_that_can_abort \
+  test_uninstall_does_not_touch_the_attended_accounts_linger \
+  test_attended_account_never_gets_linger \
+  test_attended_publisher_unpublishes_its_display_on_stop \
+  test_register_unit_survives_a_fast_failing_instance \
+  test_uninstall_stops_the_trigger_before_the_registration \
+  test_rerun_teardown_stops_the_previous_trigger_before_its_registration \
+  test_write_attended_state_survives_a_write_killed_part_way_through \
+  test_install_sh_says_why_attended_wiring_was_skipped \
+  test_attended_monitor_override_is_reachable_from_install_sh
 do
   before=$FAILURES
   "$CURRENT"

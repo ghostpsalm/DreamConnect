@@ -20,6 +20,16 @@ Run one daemon per session (already supported — shm/socket are uid-scoped) and
 make the agent resolve *which* daemon per selection instead of being hard-wired
 to one.
 
+**Consent model (owner decision, 2026-08-18).** An attended session is captured
+without asking the person sitting at it, and attended capture is wired by
+default rather than opt-in. DreamConnect is an IT-managed remote-support agent:
+authorisation comes from whoever administers the fleet, once, exactly as it does
+for ScreenConnect, TeamViewer and comparable agents on Windows. Recorded here
+because "captures a human's screen with no prompt" is a policy choice, not an
+implementation detail, and the next person to read this code should find the
+decision rather than infer it. What the operator must never get is a session
+shown under the *wrong* name — hence the fail-closed rules below.
+
 The spike (2026-08-14, this box) proved ScreenConnect's selection model does
 the hard part for us:
 

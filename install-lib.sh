@@ -546,6 +546,34 @@ wait_for_user_bus() {  # uid [timeout_seconds]
 }
 
 # --- detect the capture monitor ---------------------------------------------
+# detect_monitor_as <account> -> that account's first connector, or NOTHING.
+#
+# detect_monitor probes via RUN_USER, which install.sh has already re-pointed at
+# the account it installs under. On a backstage box that is the service account,
+# whose headless session reports no monitors — so the probe failed and its
+# "HDMI-2" fallback won, and the console user's daemon was rendered for a
+# connector that does not exist on, say, a laptop running eDP-1.
+#
+# No fallback here, deliberately. A daemon aimed at a connector Mutter cannot
+# serve leaves a REGISTERED session that resolves to nothing, and the operator
+# gets black under that person's name. Printing nothing means "no attended
+# session", which is the honest outcome.
+detect_monitor_as() {
+  local account="${1:-}" uid
+  [ -n "$account" ] || return 1
+  uid="$(passwd_entry "$account" | cut -d: -f3)"
+  [ -n "$uid" ] || return 1
+  sudo -u "$account" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+       "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" python3 - <<'PY' 2>/dev/null
+from gi.repository import Gio, GLib
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+r = bus.call_sync('org.gnome.Mutter.DisplayConfig','/org/gnome/Mutter/DisplayConfig',
+    'org.gnome.Mutter.DisplayConfig','GetCurrentState',None,None,Gio.DBusCallFlags.NONE,-1,None)
+_, monitors, *_ = r.unpack()
+print(monitors[0][0][0])  # first monitor's connector name
+PY
+}
+
 detect_monitor() {
   if [ -n "${MONITOR:-}" ]; then echo "$MONITOR"; return; fi
   "${RUN_USER[@]}" python3 - <<'PY' 2>/dev/null || echo "HDMI-2"
@@ -967,6 +995,109 @@ uninstall_host_account() {  # name protected_user
   # userdel IS the deletion: its status is ours, so a failed removal is never
   # reported to the caller as a completed one. No `return 0` after it.
   run userdel -r "$name"
+}
+
+# attended_identity <installed_account> <detected_user> -> NAME UID HOME SOCKET
+#
+# The console user whose real session should also be captured, or nothing at all
+# when there is no such session to wire. Same output contract as
+# resolve_host_identity, so callers read both the same way.
+#
+# Skipping rather than failing is deliberate in both cases:
+#   * no detected desktop user — a headless server nobody logs into is a valid
+#     install, not a broken one;
+#   * the desktop user IS the account already installed under — that is a
+#     classic install spelled backstage. Wiring it twice would put two daemons
+#     on one uid's shm and socket, which is worse than either alone, and
+#     refusing outright would fail an install that is merely redundant.
+attended_identity() {
+  local installed="${1:-}" detected="${2:-}" inst_uid det_uid
+  [ -n "$detected" ] || return 1
+  # Compared as uids, not names: two passwd entries can share a uid, and it is
+  # the uid that owns the shm frame and the socket. Two daemons on one uid is
+  # the collision that matters; two names for it are not.
+  det_uid="$(passwd_entry "$detected" | cut -d: -f3)"
+  inst_uid="$(passwd_entry "$installed" | cut -d: -f3)"
+  [ -n "$det_uid" ] || return 1
+  [ "$det_uid" != "$inst_uid" ] || return 1
+  # Refused rather than escaped. A name reaches a sed replacement, a systemd
+  # unit and the operator's picker label, and it would have to be escaped
+  # correctly for all three grammars at once: `a&b` renders the sed replacement
+  # text into the label — a session shown under the WRONG NAME, the one failure
+  # this whole feature exists to prevent. An AD-style `DOMAIN\nick` is likewise
+  # refused; that console gets no attended capture until the name is mapped.
+  valid_account_name "$detected" || return 1
+  # A home containing whitespace shifts the caller's `read -r name uid home …`,
+  # and the overflow lands in the connector that gets pasted into a unit's
+  # ExecStart. resolve_host_identity documents the underlying gap; refusing is
+  # one line and keeps a malformed identity out of a systemd unit entirely.
+  local home
+  home="$(passwd_entry "$detected" | cut -d: -f6)"
+  case "$home" in *[[:space:]]*) return 1 ;; esac
+  resolve_host_identity "$detected" 2>/dev/null || return 1
+}
+
+# attended_wiring <backstage_flag> <installed_account> <detected_user> <monitor_override>
+#   -> NAME UID HOME SOCKET MONITOR, or nothing and non-zero.
+#
+# The whole decision, in one callable place. It used to be spread across
+# install.sh as conditions no test could execute — and that is exactly how it
+# came to be dead code: a backstage install sets MONITOR="" by design (it
+# captures a virtual monitor), and the wiring inherited that emptiness and
+# skipped itself on every box it was meant to serve. The capture source is part
+# of the ANSWER here, resolved independently, because the attended daemon
+# captures a physical screen and must never inherit backstage's blank.
+attended_wiring() {
+  local backstage="${1:-0}" installed="${2:-}" detected="${3:-}" override="${4:-}"
+  local identity mon
+  # A classic install already IS the attended session — its daemon captures the
+  # console user's own screen — whoever else happens to be logged in.
+  [ "$backstage" = "1" ] || return 1
+  identity="$(attended_identity "$installed" "$detected")" || return 1
+  mon="$override"
+  # Probed as the CONSOLE user, not via RUN_USER — which by now points at the
+  # account being installed under, whose headless session has no monitors at all.
+  [ -n "$mon" ] || mon="$(detect_monitor_as "$detected" 2>/dev/null || true)"
+  [ -n "$mon" ] || return 1        # nothing to capture: not a session we can serve
+  echo "$identity $mon"
+}
+
+# --- attended state -----------------------------------------------------------
+# Which console session the install wired, recorded so uninstall reverses that
+# one and a re-run can tear down its predecessor. Re-detecting instead would
+# disable a stranger's instance on a box whose desktop user has since changed.
+attended_state_file() { echo "${DC_ATTENDED_STATE_FILE:-/etc/dreamconnect/attended.state}"; }
+
+# Written whole or not at all, exactly as write_install_state is. A torn write
+# leaves ATTENDED_UID empty, and uninstall gates BOTH the deregistration and the
+# login trigger's removal on that being non-empty — so a half-written record
+# means an uninstall that leaves this session registering itself forever.
+write_attended_state() {  # account uid
+  local f dir tmp
+  f="$(attended_state_file)"; dir="$(dirname "$f")"
+  install -d -m 0755 "$dir" || return 1
+  tmp="$(mktemp "$dir/.attended.state.XXXXXX")" || return 1
+  printf 'ATTENDED_ACCOUNT=%s\nATTENDED_UID=%s\n' "${1:-}" "${2:-}" > "$tmp" \
+    || { rm -f "$tmp"; return 1; }
+  chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
+}
+
+# Sets ATTENDED_ACCOUNT / ATTENDED_UID, empty when nothing is recorded — never
+# a stale value from a previous read.
+read_attended_state() {
+  local f line key value
+  f="$(attended_state_file)"
+  ATTENDED_ACCOUNT=""; ATTENDED_UID=""
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    key="${line%%=*}"; value="${line#*=}"
+    value="${value%$'\r'}"
+    case "$key" in
+      ATTENDED_ACCOUNT) ATTENDED_ACCOUNT="$value" ;;
+      ATTENDED_UID)     ATTENDED_UID="$value" ;;
+    esac
+  done < "$f"
 }
 
 # --- session registry writers -------------------------------------------------

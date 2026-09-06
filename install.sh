@@ -148,6 +148,45 @@ uninstall() {
   if [ -n "$target_uid" ]; then
     systemctl disable --now "dreamconnect-register@$target_uid.service" 2>/dev/null || true
   fi
+  # The attended session, read from what the install RECORDED rather than
+  # re-detected: on a box whose console user has changed since, re-detection
+  # would disable a stranger's instance and orphan the real one.
+  read_attended_state
+  if [ -n "$ATTENDED_UID" ]; then
+    # The TRIGGER first, then what it triggers. Stopping the register instance
+    # while its path unit is still armed just makes the path unit start it
+    # straight back up — and the register unit file is deleted below, taking
+    # its ExecStop with it, so the registry entry could then never be removed
+    # at all until reboot.
+    systemctl disable --now "dreamconnect-register-watch@$ATTENDED_UID.path" 2>/dev/null || true
+    systemctl disable --now "dreamconnect-register@$ATTENDED_UID.service" 2>/dev/null || true
+  fi
+  if [ -n "$ATTENDED_ACCOUNT" ]; then
+    local attended_run=(sudo -u "$ATTENDED_ACCOUNT" env "XDG_RUNTIME_DIR=/run/user/$ATTENDED_UID" \
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$ATTENDED_UID/bus")
+    # STOPPED, not merely unlinked. Deleting the unit file leaves a running
+    # daemon running: it would keep capturing that person's screen until they
+    # happened to log out, after the software was supposedly removed. This
+    # feature captures without prompting, so uninstall has to actually stop it.
+    "${attended_run[@]}" systemctl --user disable --now dreamconnect-daemon.service 2>/dev/null || true
+    "${attended_run[@]}" systemctl --user disable --now dreamconnect-attended-env.service 2>/dev/null || true
+    attended_home="$(passwd_entry "$ATTENDED_ACCOUNT" | cut -d: -f6)"
+    if valid_home_dir "$attended_home"; then
+      rm -f "$attended_home/.config/systemd/user/dreamconnect-attended-env.service" \
+            "$attended_home/.config/systemd/user/dreamconnect-daemon.service"
+    else
+      echo "!! skipping unit removal for $ATTENDED_ACCOUNT: unusable home '$attended_home' — continuing"
+    fi
+    # /dev/shm is sticky: a frame left by this account cannot be unlinked by a
+    # later install under a different one, and every write then fails with
+    # EACCES (#27) — a failure this project has already paid for once.
+    rm -f "/dev/shm/dreamconnect.frame.$ATTENDED_UID"
+    # Linger is deliberately NOT touched. We never enable it for this account
+    # (see the wiring block), so any linger it has is the person's own — for
+    # rootless podman, say — and disabling it here would break something we
+    # never set up.
+  fi
+  rm -f "$(attended_state_file)"
   rm -f /etc/systemd/system/dreamconnect-register@.service
   systemctl daemon-reload 2>/dev/null || true
   # Undo the linger install always enables — previously never reverted here,
@@ -477,6 +516,10 @@ echo ">> installing session registration unit"
 sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
     "$HERE/systemd/dreamconnect-register@.service" \
     > /etc/systemd/system/dreamconnect-register@.service
+# The login trigger. Enabling a register instance does not arm it — the path
+# unit is what notices a session publishing its display and pulls it in.
+install -m 0644 "$HERE/systemd/dreamconnect-register-watch@.path" \
+    /etc/systemd/system/dreamconnect-register-watch@.path
 systemctl daemon-reload
 
 if [ "$BACKSTAGE" -eq 1 ]; then
@@ -527,6 +570,141 @@ if [ "$BACKSTAGE" -eq 1 ]; then
   systemctl enable "dreamconnect-register@$USER_UID.service"
   systemctl restart "dreamconnect-register@$USER_UID.service" \
     || echo "!! registration failed; ScreenConnect will not offer this session yet"
+fi
+
+# --- attended session --------------------------------------------------------
+# The console user's own session, captured alongside backstage so the operator
+# can watch the person actually at the machine (#56). No prompt: authorisation
+# is organisational, granted once by whoever runs the fleet, as it is for every
+# comparable remote-support agent — see the consent model in
+# docs/specs/multi-session-picker.md.
+#
+# Skipped rather than fatal when there is nobody to wire: a headless server that
+# nobody logs into is a valid install, and a desktop user who IS the installed
+# account is a classic install spelled backstage, where wiring twice would put
+# two daemons on one uid's shm and socket.
+#
+# The decision — backstage-only, who, and on which connector — is
+# attended_wiring's, so it can be exercised by a test rather than inferred from
+# how this file reads. It was inferred once, and the wiring was dead on every
+# box it existed for: MONITOR is empty on a backstage install by design, and the
+# condition here silently skipped itself. attended_wiring resolves the capture
+# source itself for exactly that reason.
+if [ "$BACKSTAGE" -eq 1 ]; then
+# Read what a previous install wired BEFORE deciding the new one: the reader
+# sets ATTENDED_ACCOUNT/ATTENDED_UID, so doing it afterwards would overwrite the
+# identity just resolved.
+read_attended_state
+PREV_ATTENDED_ACCOUNT="$ATTENDED_ACCOUNT"
+PREV_ATTENDED_UID="$ATTENDED_UID"
+
+ATTENDED_NAME=""; ATTENDED_UID=""; ATTENDED_HOME=""; ATTENDED_MONITOR=""
+# DREAMCONNECT_ATTENDED_MONITOR, not MONITOR: backstage forces MONITOR empty by
+# design, so it can never carry an override here. The probe takes the console's
+# first monitor blindly, which a two-head desk may need corrected.
+if ATTENDED_WIRING="$(attended_wiring "$BACKSTAGE" "$USER_NAME" "$PROTECTED_USER" \
+                      "${DREAMCONNECT_ATTENDED_MONITOR:-}")"; then
+  read -r ATTENDED_NAME ATTENDED_UID ATTENDED_HOME _ ATTENDED_MONITOR <<<"$ATTENDED_WIRING"
+fi
+if [ -n "$ATTENDED_NAME" ]; then
+  # A previous install may have wired somebody else. Tear that one down first,
+  # or its register instance stays enabled, its units stay in its home, and the
+  # uninstall that follows reverses only the newer account.
+  if [ -n "$PREV_ATTENDED_UID" ] && [ "$PREV_ATTENDED_UID" != "$ATTENDED_UID" ]; then
+    echo ">> replacing the previously wired session for ${PREV_ATTENDED_ACCOUNT:-uid $PREV_ATTENDED_UID}"
+    # Trigger before the thing it triggers, for the same reason uninstall does:
+    # stopping the register instance under an armed path unit just restarts it.
+    systemctl disable --now "dreamconnect-register-watch@$PREV_ATTENDED_UID.path" 2>/dev/null || true
+    systemctl disable --now "dreamconnect-register@$PREV_ATTENDED_UID.service" 2>/dev/null || true
+    # STOPPED, not just unlinked. Deleting the unit file leaves their daemon
+    # running: it would keep capturing that person's screen until they happened
+    # to log out, after we stopped claiming to serve them.
+    PREV_SESSION_RUN_USER=(sudo -u "$PREV_ATTENDED_ACCOUNT" env "XDG_RUNTIME_DIR=/run/user/$PREV_ATTENDED_UID" \
+                   "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$PREV_ATTENDED_UID/bus")
+    "${PREV_SESSION_RUN_USER[@]}" systemctl --user disable --now dreamconnect-daemon.service 2>/dev/null || true
+    "${PREV_SESSION_RUN_USER[@]}" systemctl --user disable --now dreamconnect-attended-env.service 2>/dev/null || true
+    prev_home="$(passwd_entry "$PREV_ATTENDED_ACCOUNT" | cut -d: -f6)"
+    if valid_home_dir "$prev_home"; then
+      rm -f "$prev_home/.config/systemd/user/dreamconnect-attended-env.service" \
+            "$prev_home/.config/systemd/user/dreamconnect-daemon.service"
+    fi
+    rm -f "/dev/shm/dreamconnect.frame.$PREV_ATTENDED_UID"
+  fi
+  echo ">> wiring attended session for $ATTENDED_NAME (uid $ATTENDED_UID, $ATTENDED_MONITOR)"
+  # Recorded FIRST, before anything below that can abort under `set -e`
+  # (enable-linger, systemctl enable). An abort after the teardown but before
+  # the record would leave this account's units and register instance live and
+  # unrecorded, so uninstall would reverse the predecessor and miss them.
+  write_attended_state "$ATTENDED_NAME" "$ATTENDED_UID"
+  install -d -o "$ATTENDED_NAME" "$ATTENDED_HOME/.config/systemd/user"
+  # The publisher, so a console login records the display its Xwayland picked —
+  # without it the register instance waits forever and curation drops the
+  # session from the picker entirely.
+  sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+      "$HERE/systemd/dreamconnect-attended-env.service" \
+      > "$ATTENDED_HOME/.config/systemd/user/dreamconnect-attended-env.service"
+  # Their own capture daemon, on the physical screen, with this account's
+  # uid-scoped frame and socket — never the service account's. --display reads
+  # ${DISPLAY} from the env this session publishes, as backstage's does.
+  ATTENDED_SHM="/dev/shm/dreamconnect.frame.$ATTENDED_UID"
+  # ATTENDED_MONITOR, never MONITOR: the latter is empty on a backstage install
+  # by design, and using it here is what made this whole block dead code.
+  ATTENDED_DAEMON_ARGS="--monitor $ATTENDED_MONITOR --display \${DISPLAY} --label '$ATTENDED_NAME'"
+  sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" \
+      -e "s#@SESSION_UNIT@#graphical-session.target#g" \
+      -e "s#@SHM_PATH@#$ATTENDED_SHM#g" \
+      -e "s#@DAEMON_ARGS@#$ATTENDED_DAEMON_ARGS#g" \
+      "$HERE/systemd/dreamconnect-daemon.service" \
+      > "$ATTENDED_HOME/.config/systemd/user/dreamconnect-daemon.service"
+  chown "$ATTENDED_NAME:" \
+      "$ATTENDED_HOME/.config/systemd/user/dreamconnect-attended-env.service" \
+      "$ATTENDED_HOME/.config/systemd/user/dreamconnect-daemon.service"
+  # Deliberately NO enable-linger here, unlike the backstage path. Linger keeps
+  # an account's user manager running with nobody logged in — right for a
+  # service account, and destructive for a human's: the register instance is
+  # BindsTo=user@%i, so that manager stopping at logout is exactly what
+  # deregisters their session. With linger on it never stops, and the registry
+  # keeps advertising a session whose daemon has gone.
+  #
+  # So their units are wired only while they are actually logged in. If they are
+  # not, the enables are skipped and the login trigger picks them up later.
+  if wait_for_user_bus "$ATTENDED_UID"; then
+    ATTENDED_RUN_USER=(sudo -u "$ATTENDED_NAME" env "XDG_RUNTIME_DIR=/run/user/$ATTENDED_UID" \
+                       "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$ATTENDED_UID/bus")
+    # Enabled for the next login, and STARTED for this one. Enabling is not
+    # starting: graphical-session.target is already active for someone logged
+    # in now, so `enable` alone changes nothing until they next log in — and
+    # the publisher is what writes the display env everything else waits on.
+    # Starting fails harmlessly when nobody is logged in; the enable covers it.
+    "${ATTENDED_RUN_USER[@]}" systemctl --user daemon-reload
+    "${ATTENDED_RUN_USER[@]}" systemctl --user enable dreamconnect-attended-env.service
+    "${ATTENDED_RUN_USER[@]}" systemctl --user enable dreamconnect-daemon.service
+    "${ATTENDED_RUN_USER[@]}" systemctl --user start dreamconnect-attended-env.service \
+      || echo "!! $ATTENDED_NAME has no active session yet; publishing starts at their next login"
+    "${ATTENDED_RUN_USER[@]}" systemctl --user start dreamconnect-daemon.service \
+      || echo "!! $ATTENDED_NAME's capture daemon starts at their next login"
+  else
+    echo ">> $ATTENDED_NAME is not logged in; their units are installed and the"
+    echo "   login trigger will wire them when they are."
+  fi
+  systemctl enable "dreamconnect-register@$ATTENDED_UID.service"
+  # The trigger for every login AFTER this install. Enabling the register
+  # instance does not arm it: it is WantedBy=multi-user.target, so its only
+  # other chance is boot, where nobody is logged in and it fails for good.
+  # The path unit watches for this session publishing a display and pulls the
+  # register instance in whenever that happens — at boot or at any later login.
+  systemctl enable "dreamconnect-register-watch@$ATTENDED_UID.path"
+  # Started now as well as enabled, or it only begins watching after the next
+  # reboot — and a login before then would trigger nothing.
+  systemctl restart "dreamconnect-register-watch@$ATTENDED_UID.path"
+  # And register this session now, if it is already up.
+  systemctl restart "dreamconnect-register@$ATTENDED_UID.service" \
+    || echo "!! $ATTENDED_NAME is not logged in yet; their session registers when they are"
+  # Recorded so uninstall reverses exactly what was wired: re-detecting the
+  # console user later would orphan this instance on a box whose desktop user
+  # has since changed.
+  write_attended_state "$ATTENDED_NAME" "$ATTENDED_UID"
+fi
 fi
 
 # --- ScreenConnect drop-in --------------------------------------------------

@@ -1,0 +1,19 @@
+[Unit]
+Description=dreamconnect: register session %i once it publishes a display
+Documentation=https://github.com/ghostpsalm/DreamConnect
+# %i is the uid. This exists because enabling a unit is not starting one: the
+# register instance is a system unit, the display env is written by a user unit
+# on graphical-session.target, and nothing connected the two. At boot nobody is
+# logged in, so registration had no trigger at all for the normal case — a human
+# logging in some time later.
+
+[Path]
+# Exactly the question worth asking: has this session published a display yet.
+# Watching for CONTENT changes instead would also fire when the publisher
+# rewrites the file with a new display number — that is issue #54's fix, and it
+# wants its own thinking rather than arriving here as a side effect.
+PathExists=/run/user/%i/dreamconnect-display.env
+Unit=dreamconnect-register@%i.service
+
+[Install]
+WantedBy=multi-user.target
