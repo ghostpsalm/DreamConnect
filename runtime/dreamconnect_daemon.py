@@ -133,7 +133,12 @@ class FrameBuffer:
         try:
             os.unlink(self.path)
         except OSError as e:
-            raise OSError(
+            # Re-raise as the SAME class, not a bare OSError. Under /dev/shm's
+            # sticky bit a frame owned by another uid cannot be unlinked at all
+            # (fs/namei.c may_delete), and that is a PermissionError -- a caller
+            # that tells a permission failure apart from a read-only filesystem
+            # is entitled to, and test_daemon.py asserts on exactly that.
+            raise type(e)(
                 f"cannot use the shared-memory frame {self.path}: it is owned by "
                 f"uid {owner}, this process is uid {os.getuid()}, and it could not "
                 f"be removed ({e}). Delete it and restart the daemon."
