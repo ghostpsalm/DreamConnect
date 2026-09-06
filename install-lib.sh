@@ -573,6 +573,71 @@ wait_for_user_bus() {  # uid [timeout_seconds]
   return 1
 }
 
+# --- the user manager, on the way down ---------------------------------------
+# The mirror of wait_for_user_bus, for --uninstall. `loginctl terminate-user` is
+# ASYNCHRONOUS the same way enable-linger is: it signals systemd and returns
+# while the account's processes and its user@<uid>.service are still exiting, so
+# the `userdel -r` that follows can race a live process, fail with "user X is
+# currently used by process N", and leave the account, its home and a stale
+# compiled dconf db behind. So wait for the manager to actually be down.
+#
+# DC_MANAGER_POLL_INTERVAL (falling back to DC_BUS_POLL_INTERVAL) exists so the
+# tests can drive this without sitting out a real timeout.
+wait_for_user_manager_down() {  # uid [timeout_seconds]
+  local uid="${1:-}" timeout="${2:-30}"
+  local interval="${DC_MANAGER_POLL_INTERVAL:-${DC_BUS_POLL_INTERVAL:-0.2}}"
+  local state deadline
+
+  # A blank or non-numeric uid makes "user@$uid.service" a syntactically
+  # invalid unit name. Real systemd prints NOTHING on stdout for that — unlike
+  # a well-formed-but-nonexistent uid, which correctly reports "inactive" on
+  # the first poll — so the `inactive|failed` case below never matches and the
+  # poll burns the full timeout instead of failing fast. Refused here, in this
+  # function's own voice, BEFORE the dry-run short-circuit: `--uninstall
+  # --dry-run` against a corrupted install.state exists precisely so the
+  # operator finds out before the real run, not after it has silently skipped
+  # userdel.
+  if ! [[ "$uid" =~ ^[0-9]+$ ]]; then
+    echo "error: wait_for_user_manager_down: uid '$uid' is not a numeric uid" >&2
+    return 1
+  fi
+
+  # The same guard, for the same reasons, as wait_for_user_bus above: a bad
+  # timeout_seconds is refused in this function's own voice BEFORE it can reach
+  # the arithmetic, where a non-numeric value aborts the shell under `set -u`
+  # (skipping the caller's `||` entirely), a leading zero is read as octal, and
+  # an absurd value overflows the millisecond deadline into an unbounded wait.
+  if ! [[ "$timeout" =~ ^(0|[1-9][0-9]*)$ ]] || [ "${#timeout}" -gt 5 ] || [ "$timeout" -gt 86400 ]; then
+    echo "error: wait_for_user_manager_down: timeout_seconds '$timeout' is not a whole" \
+         "number of seconds in 0..86400" >&2
+    return 1
+  fi
+
+  # A dry run terminates nobody, so the manager never goes anywhere and waiting
+  # for it could only burn the whole timeout on its way to a meaningless failure.
+  [ "${DC_DRY_RUN:-}" = "1" ] && return 0
+
+  deadline=$(( $(date +%s%3N) + timeout * 1000 ))
+  while :; do
+    # The STATE STRING on stdout, never the exit status. `systemctl is-active`
+    # answers "deactivating" — a unit part-way through stopping, MainPID still
+    # alive, holding exactly the files userdel -r is about to remove — with the
+    # SAME exit 3 as the genuinely stopped "inactive", and reports a unit that
+    # does not exist at all as "inactive" with exit 4. Reading "any non-zero
+    # exit" as down would therefore return the instant terminate-user began the
+    # shutdown and reopen the race this wait exists to close.
+    state="$(systemctl is-active "user@$uid.service" 2>/dev/null)" || true
+    case "$state" in
+      inactive|failed) return 0 ;;
+    esac
+    [ "$(date +%s%3N)" -lt "$deadline" ] || break
+    sleep "$interval"
+  done
+  echo "error: timed out after ${timeout}s waiting for user@$uid.service to stop;" \
+       "its last reported state was '$state'" >&2
+  return 1
+}
+
 # --- detect the capture monitor ---------------------------------------------
 detect_monitor() {
   if [ -n "${MONITOR:-}" ]; then echo "$MONITOR"; return; fi
@@ -868,6 +933,71 @@ EOF
   run dconf update
 }
 
+# The drop-in configure_no_idle_lock writes into <home>/.config/environment.d is
+# only ever read by `systemd --user` AT MANAGER START, and install.sh starts that
+# manager (`loginctl enable-linger`) before it writes the file — so on a fresh
+# install the value is correct on disk and absent from the live session, which is
+# issue #26. Push it into the already-running manager as well, from the account's
+# own session, using the same sudo/env form install.sh builds RUN_USER from.
+push_dconf_environment() {  # name uid
+  local name="$1" uid="$2"
+
+  # The same blast radius as configure_no_idle_lock, for the same reason and
+  # before anything is invoked at all: DCONF_PROFILE=user points a live session
+  # at dconf's own default profile, "local" at its conventional system db, and
+  # "root" is the account every rail here exists to protect.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to push DCONF_PROFILE='$name': reserved name" >&2
+      return 1 ;;
+  esac
+
+  # And the other half of that guard: the name is pasted both into the variable
+  # value and into the account sudo switches to, so "./user" reaches exactly what
+  # the case above protects.
+  valid_account_name "$name" || {
+    echo "error: refusing to push DCONF_PROFILE='$name': not a valid account name" >&2
+    return 1; }
+
+  run sudo -u "$name" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      systemctl --user set-environment "DCONF_PROFILE=$name"
+}
+
+# The inverse of the push, and the half --uninstall was missing: remove_no_idle_lock
+# deletes /etc/dconf/profile/<name>, and for a reused pre-existing account the
+# manager holding DCONF_PROFILE=<name> is never stopped (install.sh gates that on
+# CREATED_ACCOUNT=1) — so it is left naming a profile that no longer exists, which
+# drops dconf to its null configuration and costs that account every gsettings read
+# and write until it logs out. Cleared from the live manager the same way it was
+# pushed, from the account's own session.
+unpush_dconf_environment() {  # name uid
+  local name="$1" uid="$2"
+
+  # Same guard as the push, and before anything is invoked: on this side the name
+  # comes off install.state, a file, so a tampered record is what arrives here —
+  # `sudo -u root systemctl --user ...` against root's own manager is exactly the
+  # blast radius the reserved case exists to stop.
+  case "$name" in
+    root|user|local)
+      echo "error: refusing to unset DCONF_PROFILE for '$name': reserved name" >&2
+      return 1 ;;
+  esac
+
+  valid_account_name "$name" || {
+    echo "error: refusing to unset DCONF_PROFILE for '$name': not a valid account name" >&2
+    return 1; }
+
+  # The BARE variable name, per systemctl(1): "If only a variable name is
+  # specified, it will be removed regardless of its value." The value-qualified
+  # form would leave the variable behind whenever the manager holds a
+  # DCONF_PROFILE this run did not push, while the profile file is deleted
+  # unconditionally either way.
+  run sudo -u "$name" env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      systemctl --user unset-environment DCONF_PROFILE
+}
+
 # Undo: everything configure_no_idle_lock wrote, and nothing else. --uninstall
 # also runs on boxes where the opt-in was never used, so every removal tolerates
 # an absent file. The environment.d directory itself is never deleted — it may
@@ -921,7 +1051,16 @@ remove_no_idle_lock() {  # name home
   else
     rm -f "$dir/db/$name.d/00-display-host"
   fi
-  rmdir "$dir/db/$name.d" 2>/dev/null || true
+  # dconf update compiles <name>.d/ into a binary db/<name> beside it, but never
+  # deletes that binary once its source directory is gone — so an outright
+  # removal above (the rmdir here actually succeeding) orphans it forever. Gated
+  # on rmdir's own exit status, not merely "no backup was present": a restored
+  # backup leaves the directory non-empty and the rmdir fails/never applies, and
+  # a foreign fragment left behind by something else does too — both cases the
+  # compiled db is still wanted and must be left alone.
+  if rmdir "$dir/db/$name.d" 2>/dev/null; then
+    rm -f "$dir/db/$name"
+  fi
 
   # The two files inside <home>, each on its own: a backup means the account had
   # that file before configure_no_idle_lock clobbered it and --uninstall owes it
@@ -964,8 +1103,8 @@ remove_no_idle_lock() {  # name home
 # Order matters. Linger has to go before the user is terminated, or systemd
 # brings the account's manager straight back up; the user has to be terminated
 # before userdel, or a still-running session holds its files open.
-uninstall_host_account() {  # name protected_user
-  local name="$1" protected="${2:-}"
+uninstall_host_account() {  # name protected_user uid
+  local name="$1" protected="${2:-}" uid="${3:-}"
 
   # The account issue #21 is about: removed outside this tool before --uninstall
   # ever ran. host_account_removable would refuse it — correctly, for a caller
@@ -992,6 +1131,16 @@ uninstall_host_account() {  # name protected_user
   # normal case on a box rebooted since install, and no reason to abandon the
   # deletion.
   run loginctl terminate-user "$name" || true
+  # terminate-user is asynchronous: it signals systemd and returns while the
+  # account's user@<uid>.service manager (and the processes it holds open) is
+  # still on its way down. Racing userdel -r against that is issue #25 itself,
+  # so wait for the manager to actually be down before attempting it. A
+  # timeout here is NOT fatal to the caller in the die/exit sense — install.sh
+  # runs under `set -euo pipefail` and still has state-file bookkeeping to do
+  # after this call — but userdel IS the deletion, so a wedged manager must
+  # skip it and report the failure through this function's own return, same
+  # as any other failed removal.
+  wait_for_user_manager_down "$uid" || return 1
   # userdel IS the deletion: its status is ours, so a failed removal is never
   # reported to the caller as a completed one. No `return 0` after it.
   run userdel -r "$name"

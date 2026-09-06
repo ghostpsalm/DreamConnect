@@ -1428,6 +1428,425 @@ test_configure_no_idle_lock_survives_a_failing_chown() {
     "failing chown: it did not stop after the first failure"
 }
 
+# --- issue #26, slice 1: push_dconf_environment -------------------------------
+#
+# WHY THIS EXISTS. configure_no_idle_lock's environment.d drop-in above is only
+# ever read by `systemd --user` AT MANAGER START, and install.sh starts that
+# manager earlier and unconditionally (`loginctl enable-linger`, line 327) than
+# it writes the drop-in (configure_no_idle_lock, line 354). So the file is
+# correct on disk and the value never reaches the live manager — issue #26's
+# reported symptom, "DCONF_PROFILE was absent from both the gnome-shell process
+# env and `systemctl --user show-environment`". Not a race: that order holds on
+# every install.
+#
+# CONTRACT UNDER TEST (factory/CHECKPOINT.md, issue #26 seams + slice 1 row):
+#
+#   push_dconf_environment <name> <uid>
+#
+#   * runs `systemctl --user set-environment DCONF_PROFILE=<name>` against the
+#     already-running user manager,
+#   * as the target account, through the same sudo/env invocation form install.sh
+#     already builds for running something in another user's session
+#     (install.sh:239-240 —
+#        sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
+#             "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus"),
+#   * behind the same reserved/valid-name guard as configure_no_idle_lock.
+#
+# Every literal asserted below is read off that contract, not off any
+# implementation: there is none yet.
+#
+# HOW IT IS TESTED. The same PATH-shim technique slice 4 uses for useradd and
+# slice 5 uses for dconf/chown — the suite never runs as root and must never
+# reach the real systemd. `sudo` is shimmed to record its own argv and then run
+# the tail, so the real /usr/bin/env in the middle sets the two variables and
+# execs the SHIMMED systemctl, which records the argv it was actually handed and
+# the two variables that actually reached its environment. That distinction is
+# the point: seeing "DCONF_PROFILE=..." somewhere on sudo's command line does not
+# prove it arrives at systemctl as one argument, and seeing XDG_RUNTIME_DIR as a
+# word in sudo's argv does not prove it is in systemctl's environment.
+make_push_env_shims() {  # dir systemctl_rc -> echoes the call log path
+  local d="$1" rc="$2"
+  mkdir -p "$d"
+
+  # A deliberately thin sudo: record everything, remember who -u named, then run
+  # whatever command followed. Anything else it is handed is recorded and
+  # skipped, so a differently-flagged invocation still shows up in the log
+  # rather than silently doing nothing.
+  cat > "$d/sudo" <<EOF
+#!/usr/bin/env bash
+{ echo "== sudo"; printf '[%s]\n' "\$@"; } >> "$d/calls.log"
+sudo_user=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -u) sudo_user="\$2"; shift 2 ;;
+    -*) shift ;;
+     *) break ;;
+  esac
+done
+echo "sudo-user=\$sudo_user" >> "$d/calls.log"
+[ \$# -gt 0 ] || exit 0
+exec "\$@"
+EOF
+
+  # systemctl records its argv AND the two session variables as they reached its
+  # own environment — empty if they never did.
+  cat > "$d/systemctl" <<EOF
+#!/usr/bin/env bash
+{ echo "== systemctl"; printf '[%s]\n' "\$@"
+  echo "env-XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-}"
+  echo "env-DBUS_SESSION_BUS_ADDRESS=\${DBUS_SESSION_BUS_ADDRESS:-}"
+  echo "env-whoami=\$(id -un)"; } >> "$d/calls.log"
+exit $rc
+EOF
+
+  chmod +x "$d/sudo" "$d/systemctl"
+  : > "$d/calls.log"
+  echo "$d/calls.log"
+}
+
+PUSH_OUT=""
+PUSH_RC=0
+
+run_push_env() {  # shim_dir name uid
+  PUSH_OUT="$(DC_DRY_RUN= PATH="$1:$PATH" push_dconf_environment "$2" "$3" 2>&1)"
+  PUSH_RC=$?
+  return 0
+}
+
+# A missing function exits 127 having run nothing, which would make the guard
+# test's "systemctl was never invoked" assertion pass vacuously.
+require_push_dconf_environment() {  # label
+  declare -F push_dconf_environment >/dev/null && return 0
+  fail "$1: push_dconf_environment() is not defined"
+  return 1
+}
+
+# The whole point of the slice: the value has to reach the RUNNING manager, and
+# it reaches it as `systemctl --user set-environment DCONF_PROFILE=<name>` run in
+# the account's own session. Asserted at systemctl's own argv and environment, so
+# a rewrite that pushes the wrong variable name, the uid instead of the name, the
+# system manager instead of the user one, or loses the bus address on the way
+# fails here.
+#
+# TWO DIFFERENT (name, uid) PAIRS, deliberately (breaker lap 1, CHECKPOINT row 5).
+# With one literal pair this test could not tell `set-environment
+# "DCONF_PROFILE=$1"` from `set-environment DCONF_PROFILE=dreamconnect-host`, nor
+# /run/user/$2 from /run/user/1234 — both mutants matched the single fixture and
+# stayed green. The second pair shares no substring with the first, so every
+# assertion below is now a function of the arguments rather than of one fixture.
+# "dc_host2" is chosen to also exercise the underscore and the trailing digit
+# valid_account_name allows, and 4242 a uid with no digit in common with 1234.
+test_push_dconf_environment_invokes_set_environment_with_the_profile_name() {
+  local shims log calls name uid i pair
+  require_push_dconf_environment "set-environment invocation" || return 0
+
+  i=0
+  for pair in "dreamconnect-host 1234" "dc_host2 4242"; do
+    read -r name uid <<<"$pair"
+    shims="$TMP/shims-push-env-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+
+    run_push_env "$shims" "$name" "$uid"
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "push_dconf_environment ($name/$uid): it ran the shims, not something missing from PATH"
+    assert_eq "$PUSH_RC" "0" \
+      "push_dconf_environment ($name/$uid) exits 0 when set-environment succeeds"
+
+    calls="$(cat "$log" 2>/dev/null || true)"
+    assert_line "$calls" "== systemctl" "systemctl is invoked at all ($name/$uid)"
+    assert_line "$calls" "[--user]" \
+      "the target is the USER manager (--user), the one holding the session's environment ($name/$uid)"
+    assert_not_contains "$calls" "[--system]" \
+      "the system manager is never touched ($name/$uid)"
+    assert_line "$calls" "[set-environment]" \
+      "the verb is set-environment — pushing into the already-running manager ($name/$uid)"
+    assert_line "$calls" "[DCONF_PROFILE=$name]" \
+      "DCONF_PROFILE=<name> reaches systemctl as ONE argument, built from ARGUMENT 1 ($name), not a baked-in account name"
+
+    assert_line "$calls" "sudo-user=$name" \
+      "it runs as the display-host account named by argument 1 ($name), not as the caller"
+    assert_line "$calls" "env-XDG_RUNTIME_DIR=/run/user/$uid" \
+      "XDG_RUNTIME_DIR=/run/user/<uid> is in systemctl's environment, built from ARGUMENT 2 ($uid) — install.sh:239-240 form"
+    assert_line "$calls" "env-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+  done
+}
+
+# THE BLAST-RADIUS GUARD, same one configure_no_idle_lock carries and for the
+# same reason: "user" is dconf's own default profile and "local" its conventional
+# system db, and "root" is the account every rail here exists to protect. Pushing
+# DCONF_PROFILE=user into a live manager would point that session at dconf's
+# default profile. Refuse, and run nothing at all.
+test_push_dconf_environment_refuses_reserved_dconf_names() {
+  local shims log name
+  require_push_dconf_environment "reserved-name guard" || return 0
+
+  for name in root user local; do
+    shims="$TMP/shims-push-reserved-$name"; log="$(make_push_env_shims "$shims" 0)"
+    run_push_env "$shims" "$name" 1234
+    [ "$PUSH_RC" -ne 127 ] || { fail "reserved name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "reserved name '$name': the refusal came from the guard, not the shell"
+    [ "$PUSH_RC" -ne 0 ] || fail "reserved name '$name': expected non-zero exit, got $PUSH_RC"
+    [ -n "$PUSH_OUT" ] || fail "reserved name '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "reserved name '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# The OTHER HALF of that guard, which the reserved-name test above cannot see
+# (breaker lap 1, CHECKPOINT row 5: deleting push_dconf_environment's
+# `valid_account_name` call left the whole suite green). The reserved `case`
+# compares the STRING, so "./user" walks straight past it — and the name is
+# pasted both into the pushed VALUE and into the account `sudo -u` switches to,
+# which is the same asymmetry test_configure_no_idle_lock_refuses_malformed_
+# account_names closes on the write side. Same five names as that test, same
+# assertion style: refuse, non-zero, say why, invoke nothing at all.
+#
+# "1000" matters twice over here: `sudo -u 1000` resolves by UID, not by name, so
+# an unvalidated numeric name would push DCONF_PROFILE=1000 into whichever
+# account owns that uid — typically the human desktop user.
+test_push_dconf_environment_refuses_malformed_account_names() {
+  local shims log name i
+  require_push_dconf_environment "malformed-name guard" || return 0
+
+  i=0
+  for name in ./user .. . 1000 "dc host"; do
+    shims="$TMP/shims-push-malformed-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+    run_push_env "$shims" "$name" 1234
+    [ "$PUSH_RC" -ne 127 ] || { fail "malformed name '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$PUSH_OUT" "command not found" \
+      "malformed name '$name': the refusal came from the guard, not the shell"
+    [ "$PUSH_RC" -ne 0 ] || fail "malformed name '$name': expected non-zero exit, got $PUSH_RC"
+    [ -n "$PUSH_OUT" ] || fail "malformed name '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "malformed name '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# --- issue #26, breaker lap 1: the UNPUSH, unpush_dconf_environment ------------
+#
+# THE DEFECT (factory/CHECKPOINT.md row 4). push_dconf_environment above has no
+# undo. `install.sh --uninstall` deletes /etc/dconf/profile/<name> via
+# remove_no_idle_lock (install.sh:127) but never clears DCONF_PROFILE from the
+# account's live `systemd --user` manager — and for a REUSED account
+# (DREAMCONNECT_HOST_ACCOUNT naming a pre-existing human, CREATED_ACCOUNT=0) that
+# manager is never stopped either: install.sh gates `loginctl terminate-user` /
+# account deletion on CREATED_ACCOUNT=1 (install.sh:139-153), and disable-linger
+# alone does not kill a manager with a live session. So the manager keeps
+# DCONF_PROFILE=<name> pointing at a profile file that has just been deleted.
+#
+# WHERE THE EXPECTED BEHAVIOUR COMES FROM — two independent sources, neither of
+# them any implementation (there is none):
+#
+#   1. dconf's own behaviour, observed on this box (breaker, verbatim):
+#        $ DCONF_PROFILE=dreamconnect-host gsettings set org.gnome.desktop.session idle-delay 42
+#        dconf-WARNING: unable to open named profile (dreamconnect-host): using
+#        the null configuration.
+#        The key is not writable
+#      A DCONF_PROFILE naming an absent profile does not fall back to the default
+#      profile — it falls to the NULL configuration, and every gsettings read and
+#      write in that session fails until the manager is restarted. Uninstalling
+#      this tool must not leave a human's account in that state.
+#
+#   2. systemd's own interface for the inverse of set-environment, systemctl(1):
+#        "unset-environment VARIABLE... — Unset one or more systemd manager
+#         environment variables. If only a variable name is specified, it will be
+#         removed REGARDLESS OF ITS VALUE. If a variable and a value are
+#         specified, the variable is only removed if it has the specified value."
+#      The bare-name form is the one required here, and the distinction is
+#      load-bearing rather than stylistic: remove_no_idle_lock deletes
+#      /etc/dconf/profile/<name> unconditionally, so the clear has to be
+#      unconditional too. `unset-environment DCONF_PROFILE=<name>` would leave the
+#      variable in place whenever the live manager holds a DCONF_PROFILE this
+#      run's push did not write — a re-install under a different account name, or
+#      a value the account's own drop-in set — which is exactly the dangling
+#      state the null-configuration failure above comes from.
+#
+# CONTRACT UNDER TEST:
+#
+#   unpush_dconf_environment <name> <uid>
+#
+#   * runs `systemctl --user unset-environment DCONF_PROFILE` against the
+#     already-running user manager — the bare variable name, one argument;
+#   * as the target account, through the same sudo/env invocation form
+#     push_dconf_environment uses (install.sh:239-240);
+#   * behind the same reserved/valid-name guard as push_dconf_environment,
+#     refusing before anything at all is invoked.
+#
+# WHY A SEPARATE FUNCTION rather than a third `uid` parameter on
+# remove_no_idle_lock (both are wireable — install.sh's uninstall path has
+# $target_uid in scope at line 74): remove_no_idle_lock's contract says "THE
+# DRY-RUN BOUNDARY IS EXACTLY ONE COMMAND. Only `dconf update` goes through
+# run()" (this file, lines 987-994), and its ten existing tests drive it with two
+# arguments through make_dconf_shim, which shims `dconf` and NOT sudo/systemctl.
+# Folding a sudo call into it would send every one of those tests at the real
+# sudo with an empty uid — /run/user//bus — breaking the suite's one safety rail
+# ("never run as root ... must not be able to reach the real system", lines
+# 11-13). The pairing is also the one this diff already established:
+# configure_no_idle_lock/remove_no_idle_lock own the FILES,
+# push_dconf_environment/unpush_dconf_environment own the LIVE MANAGER.
+#
+# Shimmed with make_push_env_shims, exactly as the push tests are: the suite has
+# no root, no second account and no user manager to talk to.
+UNPUSH_OUT=""
+UNPUSH_RC=0
+
+run_unpush_env() {  # shim_dir name uid
+  UNPUSH_OUT="$(DC_DRY_RUN= PATH="$1:$PATH" unpush_dconf_environment "$2" "$3" 2>&1)"
+  UNPUSH_RC=$?
+  return 0
+}
+
+# A missing function exits 127 having run nothing, which would make the guard
+# test's "systemctl was never invoked" assertion pass vacuously.
+require_unpush_dconf_environment() {  # label
+  declare -F unpush_dconf_environment >/dev/null && return 0
+  fail "$1: unpush_dconf_environment() is not defined — --uninstall deletes /etc/dconf/profile/<name> and leaves DCONF_PROFILE=<name> set in the account's live user manager, which puts dconf into the null configuration for that account until it logs out"
+  return 1
+}
+
+# Two (name, uid) pairs for the same reason the push invocation test carries
+# them: one literal pair cannot distinguish "$1"/"$2" from a baked-in fixture.
+test_unpush_dconf_environment_unsets_the_profile_from_the_running_manager() {
+  local shims log calls name uid i pair
+  require_unpush_dconf_environment "unset-environment invocation" || return 0
+
+  i=0
+  for pair in "dreamconnect-host 1234" "dc_host2 4242"; do
+    read -r name uid <<<"$pair"
+    shims="$TMP/shims-unpush-env-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+
+    run_unpush_env "$shims" "$name" "$uid"
+    assert_not_contains "$UNPUSH_OUT" "command not found" \
+      "unpush_dconf_environment ($name/$uid): it ran the shims, not something missing from PATH"
+    assert_eq "$UNPUSH_RC" "0" \
+      "unpush_dconf_environment ($name/$uid) exits 0 when unset-environment succeeds"
+
+    calls="$(cat "$log" 2>/dev/null || true)"
+    assert_line "$calls" "== systemctl" "systemctl is invoked at all ($name/$uid)"
+    assert_line "$calls" "[--user]" \
+      "the target is the USER manager (--user), the one still holding DCONF_PROFILE ($name/$uid)"
+    assert_not_contains "$calls" "[--system]" \
+      "the system manager is never touched ($name/$uid)"
+    assert_line "$calls" "[unset-environment]" \
+      "the verb is unset-environment — the inverse of the push, against the same running manager ($name/$uid)"
+    assert_not_contains "$calls" "[set-environment]" \
+      "unpush must not re-push: set-environment is the verb this function undoes ($name/$uid)"
+    assert_line "$calls" "[DCONF_PROFILE]" \
+      "the BARE variable name reaches systemctl as one argument — systemctl(1): a name alone is removed regardless of its value ($name/$uid)"
+    assert_not_contains "$calls" "[DCONF_PROFILE=" \
+      "never the VALUE-QUALIFIED form: 'unset-environment DCONF_PROFILE=<name>' only removes the variable if the manager happens to hold exactly that value, and remove_no_idle_lock deletes the profile file unconditionally ($name/$uid)"
+
+    assert_line "$calls" "sudo-user=$name" \
+      "it runs against the account named by argument 1 ($name), not the caller's own manager"
+    assert_line "$calls" "env-XDG_RUNTIME_DIR=/run/user/$uid" \
+      "XDG_RUNTIME_DIR=/run/user/<uid> is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+    assert_line "$calls" "env-DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" \
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus is in systemctl's environment, built from ARGUMENT 2 ($uid)"
+  done
+}
+
+# The same blast-radius guard push_dconf_environment carries, and sharper for the
+# same reason remove_no_idle_lock's is sharper than configure_no_idle_lock's: on
+# the removal side <name> comes off install.state, a FILE, so a tampered or
+# truncated record is what reaches this function. Both halves — the reserved
+# `case` and valid_account_name — and nothing invoked at all on a refusal.
+# `sudo -u root systemctl --user unset-environment ...` against root's manager,
+# or `sudo -u 1000 ...` against whoever owns uid 1000, is precisely the blast
+# radius every other rail in this file exists to prevent.
+test_unpush_dconf_environment_refuses_reserved_and_malformed_names() {
+  local shims log name i
+  require_unpush_dconf_environment "unpush name guard" || return 0
+
+  i=0
+  for name in root user local ./user .. . 1000 "dc host"; do
+    shims="$TMP/shims-unpush-guard-$i"; i=$((i + 1))
+    log="$(make_push_env_shims "$shims" 0)"
+    run_unpush_env "$shims" "$name" 1234
+    [ "$UNPUSH_RC" -ne 127 ] || { fail "unpush guard '$name': exit 127, not a refusal"; continue; }
+    assert_not_contains "$UNPUSH_OUT" "command not found" \
+      "unpush guard '$name': the refusal came from the guard, not the shell"
+    [ "$UNPUSH_RC" -ne 0 ] || fail "unpush guard '$name': expected non-zero exit, got $UNPUSH_RC"
+    [ -n "$UNPUSH_OUT" ] || fail "unpush guard '$name': expected a stderr line explaining the refusal"
+    assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+      "unpush guard '$name': neither sudo nor systemctl was run at all"
+  done
+}
+
+# --- reviewer finding 2 (non-blocking): the dry-run boundary for the live pair --
+#
+# THE CONTRACT, quoted, not invented. DC_DRY_RUN=1 means "nothing on this machine
+# changed" — this file states it for the write side already: "DC_DRY_RUN=1 must
+# mean 'nothing on this machine changed', and a bare `> "$dir/$name"` redirect
+# would silently punch through the dry run" (contract D, lines 650-656). run() is
+# the single mechanism that makes it mean that ("Run a command, or announce it
+# when DC_DRY_RUN=1. Lets the destructive steps be exercised by the tests without
+# touching the real system." — install-lib.sh:11-15), and every other
+# state-mutating call in the library goes through it: `run useradd`, `run userdel`,
+# `run loginctl`, `run install -D`, `run dconf update`.
+#
+# push_dconf_environment/unpush_dconf_environment are the two that do not
+# (reviewer aff9b0d603bacaf5f, CHECKPOINT row 7), which is why this test exists.
+#
+# THE WHOLE INVOCATION IS THE BOUNDARY HERE, unlike its sibling
+# test_configure_no_idle_lock_gates_only_dconf_update_behind_run (lines 1292-1318)
+# where only `dconf update` is gated: that function's four writes land in
+# fixture-overridable paths (DC_DCONF_DIR, <home>) that are always safe in a test,
+# and this pair has no fixture equivalent — `sudo -u <name> ... systemctl --user
+# set-environment` reaches a real account's real running manager, exactly like
+# slice 4's useradd/userdel, where every invocation is gated.
+#
+# WHAT IS ASSERTED, and where each expected value comes from:
+#   * exit 0 — run()'s own dry-mode shape, `echo "DRY: $*"` as its last statement,
+#     pinned by test_run_suppresses_execution_when_dry (lines 88-96). A dry run is
+#     not a failure, and install.sh's push call site warns on non-zero.
+#   * an EMPTY shim call log — the only place "the binary did not run" is
+#     observable, and the same assertion the guard tests above use.
+#   * the announcement names the command and what it would have done — contract D
+#     again: "The emitted command must name the destination path, so a dry run is
+#     auditable" (line 655). The model test asserts "DRY: dconf update", not a
+#     bare "DRY:", for the same reason. The verbs and the DCONF_PROFILE forms are
+#     read off the slice 1 / slice 4 contracts above (lines 1386-1397, 1611-1620),
+#     not off any implementation.
+#
+# One (name, uid) pair only, deliberately: argument derivation is already pinned
+# by the two-pair non-dry tests above, and re-pinning it here would duplicate that
+# coverage rather than add any.
+test_push_and_unpush_dconf_environment_gate_the_invocation_behind_run() {
+  local shims log out rc
+  require_push_dconf_environment "push dry-run boundary" || return 0
+  require_unpush_dconf_environment "unpush dry-run boundary" || return 0
+
+  shims="$TMP/shims-push-dry"; log="$(make_push_env_shims "$shims" 0)"
+  out="$(DC_DRY_RUN=1 PATH="$shims:$PATH" \
+         push_dconf_environment dreamconnect-host 1234 2>&1)"; rc=$?
+  assert_not_contains "$out" "command not found" \
+    "dry push: the shims are on PATH, so an empty call log means gated — not missing"
+  assert_eq "$rc" "0" "dry push: exits 0, as run() does when it announces (out: $out)"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "DC_DRY_RUN=1: push_dconf_environment executes neither sudo nor systemctl"
+  assert_contains "$out" "DRY: sudo" \
+    "dry push: the WHOLE invocation is announced, from sudo onwards"
+  assert_contains "$out" "set-environment DCONF_PROFILE=dreamconnect-host" \
+    "dry push: the announcement names what would have been pushed (auditable)"
+
+  shims="$TMP/shims-unpush-dry"; log="$(make_push_env_shims "$shims" 0)"
+  out="$(DC_DRY_RUN=1 PATH="$shims:$PATH" \
+         unpush_dconf_environment dreamconnect-host 1234 2>&1)"; rc=$?
+  assert_not_contains "$out" "command not found" \
+    "dry unpush: the shims are on PATH, so an empty call log means gated — not missing"
+  assert_eq "$rc" "0" "dry unpush: exits 0, as run() does when it announces (out: $out)"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "DC_DRY_RUN=1: unpush_dconf_environment executes neither sudo nor systemctl"
+  assert_contains "$out" "DRY: sudo" \
+    "dry unpush: the WHOLE invocation is announced, from sudo onwards"
+  assert_contains "$out" "unset-environment DCONF_PROFILE" \
+    "dry unpush: the announcement names the variable that would have been cleared (auditable)"
+}
+
 # --- breaker pass 2, defect #1: the two HOME files are clobbered without backup -
 #
 # WHY THESE TESTS EXIST. DREAMCONNECT_HOST_ACCOUNT may name an account that
@@ -1927,6 +2346,148 @@ test_no_idle_lock_backs_up_each_dconf_system_file_independently() {
   assert_file_absent "$prof.dreamconnect.bak" "mixed dconf: no backup residue"
 }
 
+# --- issue #25 slice 3: the COMPILED db is orphaned when its source .d goes ----
+#
+# WHY THESE TESTS EXIST. The three tests above cover the SOURCE side of the dconf
+# db — the keyfile in db/<name>.d and the directory holding it. dconf keeps a
+# second artifact: `dconf update` compiles every db/<name>.d source directory
+# into a binary db at db/<name>, NO .d suffix, BESIDE the directory. That is the
+# file the account's session actually reads; the .d directory is only its input.
+#
+# WHERE THE EXPECTED VALUES COME FROM — measured, not reasoned from the shell:
+#   * the pairing itself, on the real /etc/dconf/db of this target-class box:
+#       -rw-r--r-- 104 local     drwxr-xr-x local.d
+#       -rw-r--r-- 104 site      drwxr-xr-x site.d
+#       -rw-r--r-- 723 distro    drwxr-xr-x distro.d      (also gdm, ibus)
+#     every compiled db is a plain FILE named after its .d directory.
+#   * the orphan: `dconf compile`d a scratch db/probe-host.d into a 276-byte
+#     db/probe-host, removed db/probe-host.d entirely, re-ran `dconf update` on
+#     that DBDIR — exit 0, and db/probe-host was still there with an IDENTICAL
+#     md5 (05c9c66f4767d8d25dd5450956f44d7b before and after). dconf update
+#     never removes, and never even rewrites, a compiled db whose source
+#     directory is gone. So once remove_no_idle_lock takes db/<name>.d away,
+#     nothing on the box will ever clean up db/<name> again: the account's
+#     lock/idle overrides survive --uninstall, silently, forever.
+#
+# CONTRACT UNDER TEST (issue #25 seam 3), and the asymmetry is the whole point:
+#
+#   remove_no_idle_lock <name> <home>
+#     OWNED OUTRIGHT — no db/<name>.d.dreamconnect.bak, so the keyfile was ours,
+#     the .d directory goes, and there will be no source left for dconf update to
+#     compile: the compiled db at $dir/db/<name> must be REMOVED too.
+#
+#     RESTORING A BACKUP — a db/<name>.d.dreamconnect.bak means the box had its
+#     own policy db under this name before the install clobbered it. The keyfile
+#     is moved back in, the .d directory survives, and the trailing
+#     `run dconf update` recompiles db/<name> FROM that restored source. The
+#     compiled db must be LEFT ALONE. Deleting it there is not merely redundant:
+#     between the rm and the recompile the box has no policy db at all, and if
+#     dconf update is dry-run, unavailable or fails, the box is left with a
+#     restored source and NO compiled db — worse off than before the uninstall.
+#
+#     The guards come first, as they already do for every other path this
+#     function touches: /etc/dconf/db/local on this box is a real 104-byte
+#     compiled db, and a tampered install.state saying HOST_ACCOUNT=local must
+#     not reach an rm of it.
+#
+#   These tests can only assert NON-DELETION for the restore branch — the dconf
+#   binary is shimmed away suite-wide (make_dconf_shim), so no recompilation
+#   happens here and "regenerated correctly" is not observable at this seam. That
+#   half is dconf's own behaviour, measured above, not this function's.
+
+# What `dconf update` leaves beside the source directory. The real artifact is a
+# GVDB binary; the bytes are irrelevant to every assertion below (they are all
+# "this path is / is not there"), and a readable sentinel makes "left untouched"
+# provable with cmp.
+plant_compiled_dconf_db() {  # dconf_dir name -> echoes the path it planted
+  local d="$1" name="$2"
+  mkdir -p "$d/db"
+  printf 'compiled-db-sentinel:%s\n' "$name" > "$d/db/$name"
+  echo "$d/db/$name"
+}
+
+# The orphan itself: our own keyfile, no backup, so the .d source directory is
+# removed outright — and the compiled db it produced must go with it, because
+# nothing will ever come back for it.
+test_remove_no_idle_lock_removes_the_compiled_db_it_owned_outright() {
+  local d home shims key compiled
+  require_no_idle_lock "removes the compiled db it owned outright" || return 0
+  read -r d home <<<"$(idle_fixture idle-dcbin-owned)"
+  shims="$TMP/shims-idle-dcbin-owned"; make_dconf_shim "$shims" >/dev/null
+  key="$d/db/dreamconnect-host.d/00-display-host"
+
+  run_configure "$d" dreamconnect-host "$home" "$shims"
+  # What the real `dconf update` at the end of configure_no_idle_lock would have
+  # written; the shim compiles nothing, so the fixture stands in for it.
+  compiled="$(plant_compiled_dconf_db "$d" dreamconnect-host)"
+  assert_file_exists "$key" "precondition: our keyfile is in <name>.d"
+  assert_file_absent "$d/db/dreamconnect-host.d.dreamconnect.bak" \
+    "precondition: no keyfile backup — this is the owned-outright branch"
+  assert_file_exists "$compiled" "precondition: a compiled db is there to be orphaned"
+
+  run_remove "$d" dreamconnect-host "$home" "$shims"
+  assert_eq "$IDLE_RC" "0" "remove with a compiled db present exits 0 (stderr: $IDLE_OUT)"
+  assert_file_absent "$d/db/dreamconnect-host.d" \
+    "precondition: the source directory went with our keyfile"
+  assert_file_absent "$compiled" \
+    "the compiled db db/<name> is removed along with its source db/<name>.d — dconf update never cleans up a compiled db whose .d directory is gone (measured: md5 identical after removing the source and re-running update), so leaving it strands this account's lock/idle overrides on the box permanently"
+}
+
+# The mirror, and the reason the removal cannot be unconditional: the source
+# directory SURVIVES here, holding the box's own restored keyfile, and the
+# trailing dconf update recompiles db/<name> from it. Ours to leave alone.
+test_remove_no_idle_lock_leaves_the_compiled_db_for_dconf_update_when_restoring_a_backup() {
+  local d home shims keybak compiled orig_compiled
+  require_no_idle_lock "leaves the compiled db when restoring a backup" || return 0
+  read -r d home <<<"$(idle_fixture idle-dcbin-restore)"
+  shims="$TMP/shims-idle-dcbin-restore"; make_dconf_shim "$shims" >/dev/null
+  keybak="$d/db/dreamconnect-host.d.dreamconnect.bak"
+  orig_compiled="$TMP/idle-dcbin-restore-compiled-orig"
+
+  # A box that already had a policy db of this name — source directory AND the
+  # compiled db its own `dconf update` produced from it.
+  plant_preexisting_dconf_system_files "$d" dreamconnect-host
+  compiled="$(plant_compiled_dconf_db "$d" dreamconnect-host)"
+  cp "$compiled" "$orig_compiled"
+
+  run_configure "$d" dreamconnect-host "$home" "$shims"
+  assert_file_exists "$keybak" \
+    "precondition: a keyfile backup beside <name>.d — this is the restore branch"
+
+  run_remove "$d" dreamconnect-host "$home" "$shims"
+  assert_eq "$IDLE_RC" "0" "remove over a restored backup exits 0 (stderr: $IDLE_OUT)"
+  assert_file_exists "$d/db/dreamconnect-host.d/00-display-host" \
+    "precondition: the box's own keyfile is back in <name>.d, so a source still exists"
+  assert_file_exists "$compiled" \
+    "the compiled db is LEFT for dconf update to recompile from the restored source — removing it here leaves the box with no policy db at all if that recompile is dry-run, absent or failing"
+  cmp -s "$orig_compiled" "$compiled" \
+    || fail "the compiled db is left byte-for-byte untouched when a backup is restored"
+}
+
+# The blast radius of the new removal, and the one placement mistake it invites:
+# an rm of "$dir/db/$name" hoisted above the guards. /etc/dconf/db/local really
+# is a 104-byte compiled db on this box — the conventional system db, read by
+# every account — and HOST_ACCOUNT off a tampered install.state is exactly how
+# this function is driven. Refuse first, rm never.
+test_remove_no_idle_lock_refuses_reserved_names_before_touching_the_compiled_db() {
+  local d home shims compiled name
+  require_no_idle_lock "reserved names guard the compiled db" || return 0
+  shims="$TMP/shims-idle-dcbin-reserved"; make_dconf_shim "$shims" >/dev/null
+
+  for name in user local; do
+    read -r d home <<<"$(idle_fixture "idle-dcbin-reserved-$name")"
+    mkdir -p "$d/db/$name.d"
+    printf '[org/gnome/desktop/screensaver]\nlock-enabled=true\n' > "$d/db/$name.d/00-display-host"
+    compiled="$(plant_compiled_dconf_db "$d" "$name")"
+
+    run_remove "$d" "$name" "$home" "$shims"
+    [ "$IDLE_RC" -ne 127 ] || { fail "reserved name '$name': exit 127, not a refusal"; continue; }
+    [ "$IDLE_RC" -ne 0 ] || fail "reserved removal '$name': expected non-zero exit, got $IDLE_RC"
+    assert_file_exists "$compiled" \
+      "reserved removal '$name': the shared compiled system db db/$name is NOT deleted — the guard fires before the compiled-db removal, not after"
+  done
+}
+
 # --- slice 6a: uninstall_host_account + the removal-side reserved-name guard ---
 #
 # WHY THIS SLICE EXISTS. Issue #18: "Creating a local account + autologin is
@@ -2007,9 +2568,19 @@ test_no_idle_lock_backs_up_each_dconf_system_file_independently() {
 # which is the one failure the function must survive; userdel_rc (optional,
 # default 0) simulates the deletion itself failing, which is the one it must
 # report. 12 is shadow-utils' "can't remove home directory".
-make_uninstall_shims() {  # dir terminate_rc [userdel_rc] -> echoes the call log path
-  local d="$1" rc="$2" udrc="${3:-0}"
+#
+# manager_states (issue #25 slice 2, optional) is the scripted answer sequence for
+# `systemctl is-active user@<uid>.service`, which is now part of this function's
+# execution path and so is shimmed here for exactly the reason loginctl and userdel
+# are: a test that left it unshimmed would probe THIS box's real user manager and
+# answer from it. The shim is make_manager_shim's, unchanged — same dir, same call
+# log — and the default "inactive:3" is systemd's measured answer for a manager
+# that is already down (slice 1 header above), i.e. the rebooted-since-install case
+# every test here that predates the wait already assumes.
+make_uninstall_shims() {  # dir terminate_rc [userdel_rc] [manager_states] -> echoes the call log path
+  local d="$1" rc="$2" udrc="${3:-0}" states="${4:-inactive:3}"
   mkdir -p "$d"
+  make_manager_shim "$d" "$states" >/dev/null
   cat > "$d/loginctl" <<EOF
 #!/usr/bin/env bash
 { echo "== loginctl"; printf '[%s]\n' "\$@"; } >> "$d/calls.log"
@@ -2034,17 +2605,27 @@ UNINSTALL_OUT=""
 UNINSTALL_RC=0
 
 # Dry run, with the shims on PATH as a safety net: nothing may execute.
-run_uninstall_dry() {  # passwd_db state_file sudo_user shim_dir name protected_user
+run_uninstall_dry() {  # passwd_db state_file sudo_user shim_dir name protected_user [uid]
+  local -a args=("$5" "$6")
+  [ "$#" -lt 7 ] || args+=("$7")
   UNINSTALL_OUT="$(DC_DRY_RUN=1 DC_PASSWD_DB="$1" DC_STATE_FILE="$2" SUDO_USER="$3" \
-                   PATH="$4:$PATH" uninstall_host_account "$5" "$6" 2>&1)"
+                   PATH="$4:$PATH" uninstall_host_account "${args[@]}" 2>&1)"
   UNINSTALL_RC=$?
   return 0
 }
 
-# Real run, with loginctl and userdel shimmed away.
-run_uninstall_shimmed() {  # passwd_db state_file shim_dir name protected_user
+# Real run, with loginctl, userdel and systemctl shimmed away.
+#
+# The optional 6th argument is the uid of the account being removed. Omitted, the
+# call is byte-for-byte the two-argument one every test written before issue #25
+# slice 2 makes. Both poll-interval knobs are exported and NEITHER is asserted:
+# they only keep the suite fast, exactly as in run_wait_manager.
+run_uninstall_shimmed() {  # passwd_db state_file shim_dir name protected_user [uid]
+  local -a args=("$4" "$5")
+  [ "$#" -lt 6 ] || args+=("$6")
   UNINSTALL_OUT="$(DC_DRY_RUN= DC_PASSWD_DB="$1" DC_STATE_FILE="$2" SUDO_USER="" \
-                   PATH="$3:$PATH" uninstall_host_account "$4" "$5" 2>&1)"
+                   DC_MANAGER_POLL_INTERVAL=0.05 DC_BUS_POLL_INTERVAL=0.05 \
+                   PATH="$3:$PATH" uninstall_host_account "${args[@]}" 2>&1)"
   UNINSTALL_RC=$?
   return 0
 }
@@ -2058,6 +2639,15 @@ uninstall_dry_all() {  # every emitted command line, "DRY: " stripped
 # ORDER without freezing the rest of each command line.
 uninstall_op_sequence() {  # call_log
   grep -oE '(disable-linger|terminate-user|== userdel)' "$1" 2>/dev/null | sed 's/^== //'
+}
+
+# The same, plus the operation issue #25 slice 2 adds between terminate-user and
+# userdel: the `systemctl is-active` probe. Consecutive probes collapse to one
+# entry, so the assertion pins WHERE in the sequence the wait happens without
+# freezing how many polls it took to converge.
+uninstall_op_sequence_with_wait() {  # call_log
+  grep -oE '(disable-linger|terminate-user|== systemctl|== userdel)' "$1" 2>/dev/null \
+    | sed -e 's/^== systemctl$/is-active/' -e 's/^== //' | uniq
 }
 
 # A missing function exits 127 having emitted nothing, which would make every
@@ -2083,7 +2673,7 @@ test_uninstall_host_account_removes_a_removable_account() {
   write_state_fixture "$state" dreamconnect-host 987 1 1
   shims="$TMP/shims-uninstall-ok"; log="$(make_uninstall_shims "$shims" 0)"
 
-  run_uninstall_dry "$db" "$state" "" "$shims" dreamconnect-host kogies
+  run_uninstall_dry "$db" "$state" "" "$shims" dreamconnect-host kogies 987
   assert_eq "$UNINSTALL_RC" "0" "a removable account: uninstall_host_account exits 0"
 
   line="$(uninstall_dry_all | grep -- 'disable-linger' || true)"
@@ -2156,7 +2746,7 @@ test_uninstall_host_account_runs_the_commands_in_order() {
   write_state_fixture "$state" dreamconnect-host 987 1 1
   shims="$TMP/shims-uninstall-order"; log="$(make_uninstall_shims "$shims" 0)"
 
-  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies
+  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies 987
   assert_eq "$UNINSTALL_RC" "0" "shimmed removal exits 0"
   assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
 terminate-user
@@ -2173,7 +2763,7 @@ test_uninstall_host_account_deletes_even_when_terminate_user_fails() {
   write_state_fixture "$state" dreamconnect-host 987 1 1
   shims="$TMP/shims-uninstall-noterm"; log="$(make_uninstall_shims "$shims" 1)"
 
-  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies
+  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies 987
   calls="$(cat "$log" 2>/dev/null || true)"
   assert_contains "$calls" "[terminate-user]" \
     "precondition: terminate-user really was attempted and really did fail"
@@ -2202,7 +2792,7 @@ test_uninstall_host_account_reports_a_failing_userdel() {
   write_state_fixture "$state" dreamconnect-host 987 1 1
   shims="$TMP/shims-uninstall-udfail"; log="$(make_uninstall_shims "$shims" 0 12)"
 
-  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies
+  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies 987
   assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
 terminate-user
 userdel" "a failing userdel is still the third of three attempts, in order"
@@ -2216,9 +2806,13 @@ userdel" "a failing userdel is still the third of three attempts, in order"
 # every other call succeeds. make_uninstall_shims above can only fail
 # terminate-user; isolating disable-linger too is what lets the set -e test below
 # prove each suppression separately rather than both at once.
+#
+# Carries the same `systemctl` shim make_uninstall_shims does, and for the same
+# reason: with the wait wired in, the real one would otherwise be probed.
 make_loginctl_failing_shim() {  # dir failing_subcommand -> echoes the call log path
   local d="$1" bad="$2"
   mkdir -p "$d"
+  make_manager_shim "$d" "inactive:3" >/dev/null
   cat > "$d/loginctl" <<EOF
 #!/usr/bin/env bash
 { echo "== loginctl"; printf '[%s]\n' "\$@"; } >> "$d/calls.log"
@@ -2280,7 +2874,7 @@ test_uninstall_host_account_survives_set_e_when_loginctl_fails() {
       set -euo pipefail
       . "$1"
       DC_DRY_RUN= DC_PASSWD_DB="$2" DC_STATE_FILE="$3" SUDO_USER="" PATH="$4:$PATH" \
-        uninstall_host_account dreamconnect-host kogies
+        uninstall_host_account dreamconnect-host kogies 987
       echo "UNINSTALL RETURNED $?"
     ' _ "$LIB" "$db" "$state" "$shims" 2>&1)"; rc=$?
 
@@ -2408,7 +3002,7 @@ test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed() {
 
   # Control: the ONLY difference is that the passwd entry is still there.
   shims="$TMP/shims-uninstall-gone-control"; log="$(make_uninstall_shims "$shims" 0)"
-  run_uninstall_shimmed "$live_db" "$state" "$shims" dreamconnect-host kogies
+  run_uninstall_shimmed "$live_db" "$state" "$shims" dreamconnect-host kogies 987
   assert_eq "$UNINSTALL_RC" "0" "control: an account that IS still there is removed, exit 0"
   assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
 terminate-user
@@ -2455,6 +3049,191 @@ test_uninstall_host_account_still_refuses_an_account_that_is_really_there() {
     assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
       "${labels[$i]}: no account tool was executed"
   done
+}
+
+# --- issue #25, slice 2: the wait_for_user_manager_down CALL SITE -------------
+#
+# Slice 1's fourteen tests (lines 6186+) can all be green with the helper
+# ORPHANED, and today they are: uninstall_host_account still goes
+# disable-linger -> terminate-user -> userdel with nothing in between, so every
+# --uninstall still races the manager `loginctl terminate-user` only ASKED to
+# stop. That race is the whole of issue #25 ("userdel: user dchost is currently
+# used by process ..."), and closing it is this slice.
+#
+# CONTRACT UNDER TEST — factory/CHECKPOINT.md, issue #25 seam 2, verbatim:
+#   "install-lib.sh :: uninstall_host_account — wire the wait in between
+#    `loginctl terminate-user` and `userdel -r`. On timeout: non-fatal, skip
+#    userdel, return non-zero (matches the function's existing
+#    left-in-place-for-retry behavior; NOT a hard `die` — confirmed with owner,
+#    differs from wait_for_user_bus's install-side `|| die` because teardown
+#    shouldn't abort an already-in-progress uninstall)."
+# Both halves are load-bearing and neither is layout preference:
+#   * BETWEEN terminate-user and userdel — before terminate-user the manager has
+#     not even been asked to stop, so the wait would return instantly and mean
+#     nothing; after userdel there is nothing left to protect.
+#   * SKIP userdel on timeout, do not merely report it — attempting a `userdel -r`
+#     against a manager known to still be up is precisely the failing command
+#     this slice exists to prevent, and it would take the account's files with it
+#     as far as it got.
+#   * Return non-zero — install.sh:172-187 branches on this status: 0 prints
+#     ">> removed display-host account X" and `rm -f`s install.state; non-zero
+#     prints "left in place, check manually" and PRESERVES the state file so a
+#     later --uninstall can retry. A timeout reported as 0 would strand exactly
+#     the account issue #21's rails then refuse to touch again.
+#
+# THE UID. uninstall_host_account takes <name> and <protected_user> today; the
+# probe needs `user@<uid>.service`. These tests pass the uid as an optional THIRD
+# argument, which is this library's own convention — install-lib.sh contains no
+# `id -u` at all, resolve_host_identity is its one uid resolver and it HANDS THE
+# UID BACK rather than each function re-deriving it, and every uid consumer here
+# (wait_for_user_bus, wait_for_user_manager_down, push_dconf_environment,
+# unpush_dconf_environment) takes it as an argument. install.sh already has it in
+# scope at the call site as $target_uid (install.sh:74, off install.state's
+# HOST_UID) and already hands it to unpush_dconf_environment "$HOST_ACCOUNT"
+# "$target_uid" two blocks earlier. The ASSERTIONS below are nonetheless blind to
+# where the uid came from — they check the unit that was probed, not the argument
+# list — so an implementation that derives 987 from the passwd entry instead
+# satisfies them too.
+#
+# WHERE THE EXPECTED VALUES COME FROM: the CHECKPOINT clause quoted above, the
+# already-measured `systemctl is-active` output strings in slice 1's header, and
+# install.sh:172-187's caller-side branch. Not from any implementation: none
+# exists at the time these tests were written.
+
+# uninstall_host_account driven with wait_for_user_manager_down STUBBED to report
+# a timeout, in a child shell so the override cannot leak into the rest of the
+# suite. Stubbed rather than starved: the wait's default timeout is 30s and no
+# caller-visible knob shortens it, so making a real one elapse would add half a
+# minute to a 24s suite for an answer slice 1 has already pinned. The systemctl
+# shim is still on PATH and still scripted by the caller, so an implementation
+# that polls inline instead of calling the helper meets a manager that never goes
+# down too — slower, but held to the same contract.
+run_uninstall_with_wait_failing() {  # passwd_db state_file shim_dir name protected_user uid
+  UNINSTALL_OUT="$(DC_DRY_RUN= DC_PASSWD_DB="$1" DC_STATE_FILE="$2" SUDO_USER="" \
+                   DC_MANAGER_POLL_INTERVAL=0.05 DC_BUS_POLL_INTERVAL=0.05 \
+                   PATH="$3:$PATH" bash -c '
+      set -uo pipefail
+      lib="$1"; log="$2"
+      . "$lib"
+      wait_for_user_manager_down() {
+        { echo "== wait_for_user_manager_down"; printf "[%s]\n" "$@"; } >> "$log"
+        echo "error: timed out waiting for user@${1:-}.service to stop" >&2
+        return 1
+      }
+      uninstall_host_account "$3" "$4" "$5"
+    ' _ "$LIB" "$3/calls.log" "$4" "$5" "$6" 2>&1)"
+  UNINSTALL_RC=$?
+  return 0
+}
+
+# The wiring itself, on the path that converges: terminate-user returns while the
+# manager is still up, it goes down two polls later, and only THEN does userdel
+# run. The scripted sequence is the real shutdown (`active` -> `active` ->
+# `inactive`), so the probe count is what proves the deletion waited rather than
+# merely being preceded by one lucky probe.
+test_uninstall_host_account_waits_for_the_user_manager_between_terminate_user_and_userdel() {
+  local db state shims log calls n
+  require_uninstall_host_account "manager wait" || return 0
+  db="$(make_removal_passwd_db)"; state="$TMP/state-uninstall-wait/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  shims="$TMP/shims-uninstall-wait"
+  log="$(make_uninstall_shims "$shims" 0 0 "active:0 active:0 inactive:3")"
+
+  run_uninstall_shimmed "$db" "$state" "$shims" dreamconnect-host kogies 987
+  calls="$(cat "$log" 2>/dev/null || true)"
+
+  assert_eq "$UNINSTALL_RC" "0" \
+    "manager wait: a manager that does go down still ends in a completed removal (out: $UNINSTALL_OUT)"
+  assert_eq "$(uninstall_op_sequence_with_wait "$log")" "disable-linger
+terminate-user
+is-active
+userdel" "manager wait: the manager is waited for AFTER terminate-user and BEFORE userdel -r"
+  assert_line "$calls" "[user@987.service]" \
+    "manager wait: the probe names user@<uid>.service for the account being removed — a probe of any other unit is a wait that cannot see the process userdel is about to race"
+  n="$(manager_probe_count "$log")"
+  [ "$n" -ge 3 ] || fail \
+    "manager wait: probed $n time(s) — it cannot have waited out two 'active' answers, so userdel ran against a manager that was still up"
+}
+
+# The timeout, and the sharp end of the contract: userdel is NOT ATTEMPTED. A
+# wedged session that never lets go is exactly the box issue #25 was reported
+# from, and running `userdel -r` at it reproduces the reported failure verbatim.
+# The two loginctl calls must still have happened — that is what places the wait
+# after terminate-user rather than in front of the whole sequence — and the status
+# must reach the caller, because install.sh:183-187 keys the state file's survival
+# on it.
+test_uninstall_host_account_skips_userdel_when_the_manager_never_goes_down() {
+  local db state shims log calls
+  require_uninstall_host_account "manager wait timeout" || return 0
+  db="$(make_removal_passwd_db)"; state="$TMP/state-uninstall-wait-timeout/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  shims="$TMP/shims-uninstall-wait-timeout"
+  log="$(make_uninstall_shims "$shims" 0 0 "active:0")"
+
+  run_uninstall_with_wait_failing "$db" "$state" "$shims" dreamconnect-host kogies 987
+  calls="$(cat "$log" 2>/dev/null || true)"
+
+  [ "$UNINSTALL_RC" -ne 127 ] || { fail "manager wait timeout: exit 127, not a result"; return 0; }
+  assert_line "$calls" "[disable-linger]" \
+    "manager wait timeout: precondition — linger was still dropped before the wait"
+  assert_line "$calls" "[terminate-user]" \
+    "manager wait timeout: precondition — the user was still terminated before the wait"
+  assert_not_contains "$calls" "== userdel" \
+    "manager wait timeout: userdel -r was attempted against a manager known to be still up — that IS issue #25's failure, and attempting it deletes as much of the home as it gets through before failing"
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "manager wait timeout: returned 0 with the account still on the box — install.sh would print '>> removed display-host account' and delete install.state, leaving the account unremovable by any later run"
+}
+
+# The other half of "NOT a hard `die`", which the test above cannot see: `die`
+# runs `exit 1`, so under the harness's own shell it would exit the child shell
+# non-zero with no userdel in the log — satisfying every assertion above while
+# aborting the whole uninstall at the caller.
+#
+# So this one runs the function inside a real `bash -c 'set -euo pipefail; ...'`
+# — install.sh's production shell options, from install.sh line 22 — shaped like
+# install.sh:172-177's actual call site (`if uninstall_host_account ...; then ...
+# else ... fi`), and asserts the caller's else-branch runs and execution continues
+# past it. Everything after that call site in uninstall() — the state-file branch,
+# the closing summary — is what a `die` here would silently skip.
+test_uninstall_host_account_reports_a_wait_timeout_without_aborting_the_uninstall() {
+  local db state shims log calls out rc
+  require_uninstall_host_account "manager wait non-fatal" || return 0
+  db="$(make_removal_passwd_db)"; state="$TMP/state-uninstall-wait-nonfatal/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  shims="$TMP/shims-uninstall-wait-nonfatal"
+  log="$(make_uninstall_shims "$shims" 0 0 "active:0")"
+
+  # $1=library, $2=call log, $3=passwd db, $4=state file, $5=shim dir.
+  out="$(bash -c '
+    set -euo pipefail
+    lib="$1"; log="$2"
+    . "$lib"
+    wait_for_user_manager_down() {
+      { echo "== wait_for_user_manager_down"; printf "[%s]\n" "$@"; } >> "$log"
+      echo "error: timed out waiting for user@${1:-}.service to stop" >&2
+      return 1
+    }
+    if DC_DRY_RUN= DC_PASSWD_DB="$3" DC_STATE_FILE="$4" SUDO_USER="" \
+       DC_MANAGER_POLL_INTERVAL=0.05 DC_BUS_POLL_INTERVAL=0.05 PATH="$5:$PATH" \
+       uninstall_host_account dreamconnect-host kogies 987; then
+      echo "CALLER-SAW-A-COMPLETED-REMOVAL"
+    else
+      echo "CALLER-HANDLED $?"
+    fi
+    echo "UNINSTALL RETURNED TO ITS CALLER"
+  ' _ "$LIB" "$log" "$db" "$state" "$shims" 2>&1)"; rc=$?
+  calls="$(cat "$log" 2>/dev/null || true)"
+
+  assert_contains "$out" "CALLER-HANDLED" \
+    "manager wait non-fatal: the caller's else-branch must run — a timeout has to arrive as a non-zero RETURN"
+  assert_not_contains "$out" "CALLER-SAW-A-COMPLETED-REMOVAL" \
+    "manager wait non-fatal: a skipped userdel was reported to the caller as a completed removal"
+  assert_contains "$out" "UNINSTALL RETURNED TO ITS CALLER" \
+    "manager wait non-fatal: execution never came back to the caller — a hard die/exit here would skip install.sh's state-file branch and the rest of uninstall()"
+  assert_eq "$rc" "0" \
+    "manager wait non-fatal: the set -euo pipefail shell exits 0, not die's status (out: $out)"
+  assert_not_contains "$calls" "== userdel" \
+    "manager wait non-fatal: userdel -r ran anyway under production shell options"
 }
 
 # The removal-side half of slice 5's blast-radius guard, tightened here.
@@ -3851,6 +4630,385 @@ test_remove_accountsservice_marker_refuses_reserved_account_names() {
 # test above still stands, and no legitimate GDM AutomaticLogin value can carry
 # a backslash, because GDM would receive the escaped form, not the name.
 
+# --- issue #22: disable_autologin's own backup lifecycle ----------------------
+#
+# WHAT IS WRONG TODAY. enable_autologin copies the GDM config to
+# <conf>.dreamconnect.bak before it edits (install-lib.sh:87). disable_autologin
+# reverts by stripping the two keys back out and never touches that backup, so
+# the file survives every uninstall — issue #22, verbatim: "The backup is
+# therefore never cleaned up; it's orphaned on disk after every uninstall."
+# disable_autologin had no tests at all before this pair, which is how a return
+# value that means nothing (it is `rm -f "$tmp"`'s — the awk scratch file's
+# cleanup, install-lib.sh:110) went unnoticed alongside it.
+#
+# WHAT THE FIX IS — factory/CHECKPOINT.md, issue #22 seams, verbatim:
+#
+#   "install-lib.sh :: disable_autologin(conf) — keeps its surgical strip
+#    (custom.conf is a shared, admin-editable file ... wholesale restore risks
+#    eating unrelated admin edits made since install), but now deletes its own
+#    .bak once the strip has actually succeeded, and returns a meaningful exit
+#    code (previously always rm -f's, i.e. meaningless) so a failed strip
+#    preserves the backup instead of discarding it silently."
+#
+# Three behaviours, all three read off that sentence and issue #22's own
+# question ("is a stale backup ever useful to leave behind for manual recovery,
+# or should it always be cleaned up once disable_autologin has run
+# successfully?" — the owner's answer, recorded above: cleaned up, but only on
+# success). None of them is derived from what the current body happens to do:
+# today it deletes nothing and exits 0 either way, which is what makes the pair
+# below red. The suffix and the once-only backup are enable_autologin's own
+# convention, asserted the same way as this file's other .dreamconnect.bak
+# pairs (test_ensure_host_account_backs_up_a_preexisting_accountsservice_file).
+test_disable_autologin_removes_the_backup_on_success() {
+  local conf bak
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  conf="$TMP/gdm-undo-ok/custom.conf"; bak="$conf.dreamconnect.bak"
+  plant_gdm_conf "$conf"
+
+  # The fixture is the REAL backup — whatever enable_autologin writes, wherever
+  # it writes it, is what an uninstall finds on disk. Hand-crafting one would
+  # only prove disable_autologin cleans up a file this test invented.
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: enable_autologin left a backup to clean up"
+  [ -e "$bak" ] || return 0
+
+  run_disable_autologin "$conf"
+
+  assert_not_contains "$(cat "$conf")" "AutomaticLogin" \
+    "the autologin keys are stripped out of the live config"
+  assert_contains "$(cat "$conf")" "[daemon]" \
+    "the surgical strip leaves the rest of the file alone (it is not a wholesale restore)"
+  assert_file_absent "$bak" \
+    "a successful strip removes the backup it owns — after --uninstall nothing of ours is left beside custom.conf (issue #22)"
+  assert_eq "$RUN_DISABLE_RC" "0" \
+    "a successful strip exits 0 (stderr: $RUN_DISABLE_OUT)"
+}
+
+# The other half, and the reason the deletion above may not be unconditional: a
+# strip that did NOT happen must keep the backup, because that backup is then
+# the only copy of the pre-install config the operator has, and must say so to
+# its caller.
+#
+# THE INJECTION is the write-back, not a contrived path: disable_autologin runs
+# `awk ... "$conf" > "$tmp" && cat "$tmp" > "$conf"` (install-lib.sh:106-109),
+# so an unwritable $conf lets the awk pass succeed and fails the write-back —
+# the same shape as test_configure_no_idle_lock_survives_a_failing_chown, which
+# makes the real mechanism fail rather than replacing it. It also pins the
+# narrower half of "meaningful exit code": a fix that returns the AWK's status
+# would be green on the success test above and still exit 0 here, having left
+# the keys in place. This suite never runs as root (line 18), so the mode bits
+# genuinely deny the write; the precondition below proves they did.
+#
+# EXIT CODE: non-zero, value unasserted — the CHECKPOINT requires only that a
+# caller can tell the two apart, and this pair is what makes that true (0 on the
+# success test, non-zero here). install.sh's uninstall() is that caller, and
+# test_install_sh_branches_on_the_disable_autologin_result pins its branch.
+test_disable_autologin_preserves_the_backup_if_the_strip_fails() {
+  local conf bak
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  conf="$TMP/gdm-undo-fail/custom.conf"; bak="$conf.dreamconnect.bak"
+  plant_gdm_conf "$conf"
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: there is a backup to preserve"
+  [ -e "$bak" ] || return 0
+
+  chmod a-w "$conf"
+  run_disable_autologin "$conf"
+  chmod u+w "$conf"   # restored immediately, so nothing later inherits the mode
+
+  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
+    "precondition: the write-back really was refused — the keys are still in the live config, so the revert did NOT happen"
+
+  [ "$RUN_DISABLE_RC" -ne 0 ] || \
+    fail "a failed strip must exit non-zero, got $RUN_DISABLE_RC — the caller cannot tell a reverted config from an untouched one, and install.sh:135 reports success either way (stderr: $RUN_DISABLE_OUT)"
+  assert_file_exists "$bak" \
+    "a failed strip keeps the backup — with the autologin keys still live in $conf, that .dreamconnect.bak is the operator's only copy of the pre-install config"
+}
+
+# WHAT IS WRONG TODAY (breaker lap 1, defect 1 — CHECKPOINT row 2). The pair
+# above only ever ran against a conf with NO autologin configured, so "strip our
+# keys out" and "put back what was there" looked like the same thing. They are
+# not. enable_autologin's strip regex is `#?[[:space:]]*AutomaticLogin(Enable)?`
+# (install-lib.sh:96) — it drops ANY autologin key in [daemon] before writing
+# ours, including an admin's live one. disable_autologin then strips ours back
+# out to nothing, so the admin's own autologin never comes back; until slice 1
+# it was at least still readable in the orphaned .bak, and now that a successful
+# revert deletes the .bak, the last copy goes with it. Silent, on every
+# uninstall, on exactly the boxes where somebody had already set this up.
+#
+# WHAT THE FIX IS — factory/CHECKPOINT.md row 2, verbatim (owner-confirmed):
+#
+#   "disable_autologin now extracts whatever AutomaticLogin*/AutomaticLoginEnable
+#    content (or absence) was in the backup's [daemon] section and writes that
+#    back in place of ours — surgically, not a wholesale file restore, so
+#    unrelated admin edits elsewhere in the file still survive — before
+#    deleting .bak."
+#
+# Every assertion below is one clause of that sentence, checked against the
+# fixture's OWN planted bytes (`AutomaticLogin=alice`, above) rather than
+# anything computed from the library:
+#   - "writes that back"        -> alice's pair is live in the conf again,
+#   - "in place of ours"        -> dreamconnect-host is gone,
+#   - "surgically ... survive"  -> both post-install admin edits are still there,
+#   - "before deleting .bak"    -> and the backup is cleaned up, as in slice 1.
+# The section check is GDM's format, not ours: these keys mean nothing outside
+# [daemon].
+#
+# NOT asserted, deliberately: the commented `#  AutomaticLogin = user1` hint
+# lines the fixture also plants. enable_autologin's `#?` eats those too, and
+# whether "content ... in the backup's [daemon] section" is meant to cover a
+# distro's documentation comments is not something the CHECKPOINT settles — see
+# the gap noted in the run record. Their loss is cosmetic; alice's is not.
+test_disable_autologin_restores_an_autologin_configured_before_the_install() {
+  local conf bak daemon
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  conf="$TMP/gdm-undo-preexisting/custom.conf"; bak="$conf.dreamconnect.bak"
+  plant_gdm_conf_with_autologin "$conf" alice
+
+  # The .bak under test is the REAL one, written by the real enable_autologin —
+  # a hand-built backup would only prove disable_autologin can read a file this
+  # test invented.
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was retargeted (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: enable_autologin backed the admin's config up"
+  [ -e "$bak" ] || return 0
+  assert_not_contains "$(cat "$conf")" "AutomaticLogin=alice" \
+    "precondition: enable_autologin really did overwrite the admin's pre-existing autologin — that is the config this test is owed back"
+  assert_contains "$(cat "$bak")" "AutomaticLogin=alice" \
+    "precondition: the backup holds it, so the revert has a source to restore from"
+
+  edit_gdm_conf_after_install "$conf" "$TMP/gdm-undo-preexisting-edit"
+
+  run_disable_autologin "$conf"
+  daemon="$(gdm_daemon_section "$conf")"
+
+  assert_contains "$daemon" "AutomaticLogin=alice" \
+    "the admin's own autologin is live under [daemon] again — uninstalling DreamConnect must not silently log a machine out of the account it logged in to before we arrived"
+  assert_contains "$daemon" "AutomaticLoginEnable=true" \
+    "and it is enabled — AutomaticLogin without AutomaticLoginEnable configures nothing"
+  assert_not_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
+    "our account is out of the file: restored in place of ours, not alongside"
+  assert_contains "$daemon" "InitialSetupEnable=false" \
+    "an admin edit made inside [daemon] since the install survives — the revert is surgical, not a wholesale restore of the backup"
+  assert_contains "$(cat "$conf")" "DisallowTCP=true" \
+    "an admin edit made outside [daemon] since the install survives too"
+  assert_file_absent "$bak" \
+    "the backup is removed once its content has actually been put back (issue #22)"
+  assert_eq "$RUN_DISABLE_RC" "0" \
+    "a successful revert exits 0 (stderr: $RUN_DISABLE_OUT)"
+}
+
+# WHAT IS WRONG TODAY (breaker lap 1, defect 2 — CHECKPOINT row 3). Slice 1 put
+# the .bak cleanup at the END of disable_autologin, so on the success path the
+# function's exit status is that `rm -f`'s, not the revert's — contradicting the
+# doc comment it was written under (install-lib.sh:107-109, verbatim: "Returns
+# the status of the strip itself (the awk pass and its write-back), not of the
+# scratch-file cleanup"). A .bak that cannot be unlinked therefore reports a
+# revert that DID happen as a failure, and install.sh's uninstall() — which
+# slice 1 taught to branch on this value — prints the failure message and tells
+# the operator their autologin is still live when it is not.
+#
+# THE INJECTION is the same shape as the strip-failure test above: make the real
+# mechanism fail rather than replace it. Unlinking a file needs write permission
+# on its DIRECTORY, so `chmod a-w` on the directory holding custom.conf denies
+# the .bak deletion while leaving the revert itself untouched — the write-back
+# opens an existing file, which needs write permission on the file only. That is
+# also why this works without root, which this suite never has (line 18). The
+# two preconditions below prove the injection landed where it was aimed: the
+# .bak really did survive, and the revert really did happen.
+#
+# EXPECTED VALUE: 0, from the doc comment quoted above and CHECKPOINT row 3's
+# "Fix: explicit `return 0` after cleanup". A leftover .bak is not a failed
+# revert — the keys are out of the live config either way.
+test_disable_autologin_reports_success_when_the_backup_cannot_be_removed() {
+  local conf bak dir
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  dir="$TMP/gdm-undo-stuck-bak"; conf="$dir/custom.conf"; bak="$conf.dreamconnect.bak"
+  plant_gdm_conf "$conf"
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: there is a backup for the cleanup to trip over"
+  [ -e "$bak" ] || return 0
+
+  chmod a-w "$dir"
+  run_disable_autologin "$conf"
+  chmod u+w "$dir"   # restored immediately, so the suite's own cleanup still works
+
+  assert_file_exists "$bak" \
+    "precondition: the .bak deletion really was denied — otherwise this test proves nothing about the return code"
+  assert_not_contains "$(cat "$conf")" "AutomaticLogin" \
+    "precondition: the revert itself succeeded — the autologin keys are out of the live config"
+  assert_eq "$RUN_DISABLE_RC" "0" \
+    "a revert that happened reports success even though its backup could not be unlinked — the return value is the revert's, not the cleanup's (stderr: $RUN_DISABLE_OUT)"
+}
+
+# WHAT IS WRONG TODAY (breaker lap 2, defect 1 — CHECKPOINT row 4, verbatim):
+#
+#   "`getline line < bak` returns -1 on an unreadable/unopenable backup, and the
+#    current code treats that identically to a clean EOF (n=0, "no prior
+#    autologin keys") -- so a `.bak` that can't be read (permission error, disk
+#    error, or truncated/corrupted by a crash mid-cp during enable_autologin's
+#    non-atomic `cp -a`) silently discards whatever it held, reports success, and
+#    deletes it. Fix: detect getline's -1 (read failure) distinctly from EOF; on
+#    a read failure, fail closed -- do not strip, preserve .bak, return non-zero
+#    -- matching the function's own already-established principle that a failure
+#    preserves the operator's only copy."
+#
+# The three assertions below are that fix's three clauses, in order: do not
+# strip, preserve .bak, return non-zero. None is read off the current body,
+# which does the opposite of all three.
+#
+# THE INJECTION breaks the read of the BACKUP and nothing else — mode 000 on
+# $conf.dreamconnect.bak, leaving $conf itself readable and writable, so the awk
+# pass and its write-back would both still succeed and the strip would still
+# happen. That is the point: the fail-closed behaviour has to come from noticing
+# the failed read, not from the write path falling over on its own. This suite
+# never runs as root (line 18), so mode 000 genuinely denies the read; the guard
+# below proves it did on this box rather than assuming it.
+#
+# WHY THIS IS DATA LOSS and not a cosmetic error path: the fixture is the same
+# admin-configured box as the restore test above (a real prior
+# AutomaticLogin=alice), so a call that strips to nothing and then deletes the
+# backup destroys the last copy of alice's config — the exact loss slice 2 was
+# written to prevent, reached through a different door.
+test_disable_autologin_fails_closed_when_the_backup_cannot_be_read() {
+  local conf bak
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  conf="$TMP/gdm-undo-unreadable-bak/custom.conf"; bak="$conf.dreamconnect.bak"
+  plant_gdm_conf_with_autologin "$conf" alice
+
+  # The real backup again, written by the real enable_autologin — an unreadable
+  # file this test created from scratch would prove nothing about the one an
+  # uninstall actually finds.
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was retargeted (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: enable_autologin backed the admin's config up"
+  [ -e "$bak" ] || return 0
+  assert_contains "$(cat "$bak")" "AutomaticLogin=alice" \
+    "precondition: that backup holds the admin's own autologin, and after the install it is the only copy left"
+
+  chmod 000 "$bak"
+  if cat "$bak" >/dev/null 2>&1; then
+    chmod u+rw "$bak"
+    skip "disable_autologin fail-closed on an unreadable backup: mode 000 still readable on this box (filesystem or capability), so the read failure under test cannot be produced here"
+    return 0
+  fi
+
+  run_disable_autologin "$conf"
+  chmod u+rw "$bak" 2>/dev/null || true   # only if it survived; restored at once
+
+  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
+    "a backup that cannot be read leaves the live config alone — with no way to see what it owes back, a strip-to-nothing is indistinguishable from 'the backup held no autologin', and one of those two is silent data loss"
+  assert_file_exists "$bak" \
+    "and the backup stays: unreadable by this call is not the same as worthless — it is still the operator's only copy of the pre-install autologin (CHECKPOINT row 4)"
+  [ "$RUN_DISABLE_RC" -ne 0 ] || \
+    fail "an unreadable backup must exit non-zero, got $RUN_DISABLE_RC — install.sh:137 branches on this value and would announce a completed revert over a config it never read (stderr: $RUN_DISABLE_OUT)"
+}
+
+# WHAT IS WRONG TODAY (breaker lap 2, defect 2 — CHECKPOINT row 5, verbatim):
+#
+#   "the collect regex (line ~133) includes `#?` (matching enable_autologin's own
+#    strip regex, so a backup's commented AutomaticLogin hint lines, e.g. Debian
+#    gdm3's `#  AutomaticLogin = user1`, are captured for restore) but the
+#    LIVE-conf strip regex (line ~142) omits `#?`, so restored commented lines are
+#    re-collected on every subsequent disable_autologin call (reachable via
+#    install.sh:136's retry-on-still-present-.bak path, which slice 3 deliberately
+#    made non-fatal) but never stripped -- duplicating without bound across
+#    repeated uninstall attempts."
+#
+# EXPECTED VALUE — one, from CHECKPOINT row 2's owner-confirmed sentence: the
+# revert writes back "whatever ... was in the backup's [daemon] section" "in
+# place of ours". The backup holds that hint line once, so the config holds it
+# once, however many times the revert runs. A second call has nothing new to
+# restore.
+#
+# THE TWO-CALL SCENARIO IS THE REAL ONE, not a contrived loop. install.sh:136
+# gates the call on `[ -f "$conf.dreamconnect.bak" ]`, so a second --uninstall
+# reaches disable_autologin again exactly when the first left the backup behind.
+# The first call here does that the way the test above already establishes: a-w
+# on the directory denies the unlink while the revert itself succeeds (row 3 —
+# a leftover .bak is not a failed revert). The operator then fixes the
+# permission and re-runs --uninstall, which is the second call. Nothing about
+# defect 1 is involved: the backup is readable throughout.
+#
+# WHAT IT DISCRIMINATES. The count after the FIRST call is asserted too, at 1,
+# so this cannot go green by dropping the hint lines from the collect regex
+# instead — that would restore nothing and contradict row 2's resolved "restore
+# whatever was in the backup's [daemon] section verbatim (comment or live), no
+# special-casing".
+test_disable_autologin_does_not_duplicate_a_restored_comment_hint_on_a_second_call() {
+  local conf bak dir hint enable_hint
+  declare -F disable_autologin >/dev/null || {
+    fail "disable_autologin(): not defined"; return 0; }
+  declare -F enable_autologin >/dev/null || {
+    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
+
+  dir="$TMP/gdm-undo-twice"; conf="$dir/custom.conf"; bak="$conf.dreamconnect.bak"
+  hint="#  AutomaticLogin = user1"
+  enable_hint="#  AutomaticLoginEnable = true"
+  plant_gdm_conf_with_commented_autologin_hints "$conf"
+  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
+    "precondition: the stock Debian gdm3 conf carries that commented hint once"
+
+  run_enable_autologin "$conf" dreamconnect-host
+  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
+    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
+  assert_file_exists "$bak" "precondition: there is a backup to restore from"
+  [ -e "$bak" ] || return 0
+  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "0" \
+    "precondition: enable_autologin's strip ate the commented hint (its regex matches #?), so after the install it lives only in the backup"
+
+  # First --uninstall: the revert runs, the .bak deletion is denied, so the
+  # backup survives — which is the state install.sh:136 gates its retry on.
+  chmod a-w "$dir"
+  run_disable_autologin "$conf"
+  chmod u+w "$dir"
+
+  if [ ! -e "$bak" ]; then
+    skip "disable_autologin duplication on a repeat call: the .bak was removed despite a read-only directory on this box, so the two-call path cannot be produced here"
+    return 0
+  fi
+  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
+    "precondition: the first call put the backup's commented hint back, once (slice 2's restore)"
+
+  # Second --uninstall, over the config the first one just restored.
+  run_disable_autologin "$conf"
+
+  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
+    "a repeated revert restores the backup's commented hint ONCE, not once per call — the live-strip pass has to recognise the line the collect pass puts back, or every retried --uninstall grows [daemon] by another copy, without bound"
+  assert_eq "$(gdm_daemon_line_count "$conf" "$enable_hint")" "1" \
+    "and the same for its companion — GDM reads the pair together, so a duplicated AutomaticLoginEnable hint is the same defect"
+  assert_not_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
+    "our own keys are still gone after the second call — the repeat must not put anything of ours back either"
+}
+
 # Call site 6. Two halves, because a passwd source is DATA, not a fact about the
 # box: the real root entry is refused by the uid-0 and /root-home rails that are
 # already there (verifying the architect's "already sound"), while an entry
@@ -4980,6 +6138,577 @@ test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap() {
 
   run_wait_bus_guarded "$root" 1000 90000 0.05 3
   assert_bus_arg_refused_cleanly "timeout just past the cap" "90000"
+}
+
+# --- issue #25, slice 1: wait_for_user_manager_down ---------------------------
+#
+# WHY THIS SLICE EXISTS (issue #25, the observed failure):
+#   uninstall_host_account (install-lib.sh) already runs disable-linger ->
+#   terminate-user -> userdel in the right ORDER, but `loginctl terminate-user`
+#   is ASYNCHRONOUS: it signals systemd and returns before the account's
+#   processes and its user@<uid>.service manager have actually exited. The very
+#   next `userdel -r` can therefore still race a live process, fail with
+#   "user X is currently used by process N", and leave the account, its home and
+#   a stale compiled dconf db orphaned. This is the exact mirror of issue #24 —
+#   there we waited for the manager to come UP after enable-linger, here we wait
+#   for it to go DOWN after terminate-user.
+#
+# CONTRACT UNDER TEST — from factory/CHECKPOINT.md (seam 1) and issue #25. No
+# implementation exists at the time these tests were written.
+#
+#   wait_for_user_manager_down <uid> [timeout_seconds]
+#
+#   * Polls `systemctl is-active user@<uid>.service` — the BARE command, so it
+#     is PATH-shimmable the way loginctl/userdel already are in slice 6a — until
+#     the manager reports a down state, then returns 0.
+#   * Down means the state STRING reads "inactive" or "failed", or the unit does
+#     not exist at all. Up means "active", "activating" or "deactivating".
+#   * Returns non-zero, with something informative on stderr, if the timeout
+#     elapses with the manager still up.
+#   * DC_DRY_RUN=1 -> return 0 immediately, having never invoked systemctl at
+#     all: a dry run terminates nobody, so waiting could only burn the timeout.
+#   * timeout_seconds is caller input and is validated exactly as
+#     wait_for_user_bus validates it (non-negative plain decimal integer,
+#     0..86400, refused BEFORE any arithmetic that would abort the shell under
+#     `set -u`). Whether the builder extracts a shared guard or duplicates it is
+#     the builder's call; these tests assert behaviour, never structure.
+#
+#   The CALL SITE (wiring into uninstall_host_account between terminate-user and
+#   userdel, non-fatal on timeout) is slice 2's, and is deliberately NOT asserted
+#   here.
+#
+# WHERE THE EXPECTED VALUES COME FROM: the contract above, plus `systemctl
+# is-active`'s real output strings and exit codes CAPTURED on this box rather
+# than imagined (systemd 259, 2026-08-01):
+#
+#     unit running          -> stdout "active"       exit 0
+#     unit stopping         -> stdout "deactivating" exit 3   (see the gap below)
+#     unit stopped          -> stdout "inactive"     exit 3
+#     unit failed           -> stdout "failed"       exit 3
+#     no such unit file     -> stdout "inactive"     exit 4
+#
+#   Note the two DIFFERENT non-zero exits for "down", and that a down unit is
+#   reported on stdout, not stderr — which is why the shim below reproduces both
+#   the string and the status, and why the absent-unit case is asserted
+#   separately from the merely-inactive one.
+#
+# "DEACTIVATING" IS STILL UP — owner-decided, CHECKPOINT.md seam 1. This is the
+# sharpest thing in the whole slice, and it is the one measurement that settles
+# it: a unit part-way through stopping reports
+#
+#     stdout "deactivating"   exit 3    MainPID still alive (measured: 2515062)
+#
+# — the SAME non-zero exit as the genuinely-stopped "inactive"/3, while a live
+# process still holds the account's files open. So "down" can never be decided
+# from the exit STATUS: an implementation reading "any non-zero exit" as down
+# returns 0 the instant terminate-user starts the shutdown, `userdel -r` then
+# races that live PID, and issue #25 is reopened verbatim by the very function
+# written to close it. Down is the STATE STRING "inactive"/"failed" (or no such
+# unit); "deactivating" keeps polling. Two tests below pin exactly this, and the
+# second one exists solely so the status-reading implementation cannot pass.
+
+# `systemctl`, shimmed away on PATH: it records argv one element per line and
+# then answers from a SCRIPTED SEQUENCE of "state:exitcode" entries, one per
+# invocation, the last entry repeating forever. Sequenced by CALL COUNT rather
+# than by wall-clock, so the convergence assertions below hold whatever poll
+# interval the builder picks and however slow the box is.
+make_manager_shim() {  # dir "state:rc state:rc ..." -> echoes the call log path
+  local d="$1"
+  mkdir -p "$d"
+  printf '%s\n' "$2" | tr ' ' '\n' | grep -v '^$' > "$d/states"
+  echo 0 > "$d/count"
+  cat > "$d/systemctl" <<EOF
+#!/usr/bin/env bash
+{ echo "== systemctl"; printf '[%s]\n' "\$@"; } >> "$d/calls.log"
+n=\$(( \$(cat "$d/count") + 1 )); echo "\$n" > "$d/count"
+total=\$(wc -l < "$d/states")
+[ "\$n" -le "\$total" ] || n="\$total"
+entry="\$(sed -n "\${n}p" "$d/states")"
+printf '%s\n' "\${entry%%:*}"   # is-active answers on STDOUT, as measured
+exit "\${entry##*:}"
+EOF
+  chmod +x "$d/systemctl"
+  : > "$d/calls.log"
+  echo "$d/calls.log"
+}
+
+manager_probe_count() {  # call_log -> how many times systemctl was invoked
+  local n
+  n="$(grep -c '^== systemctl' "$1" 2>/dev/null)" || n=0
+  [ -n "$n" ] || n=0
+  echo "$n"
+}
+
+MGR_RC=0
+MGR_ERR=""
+MGR_MS=0
+
+# Call it with systemctl shimmed away, capturing exit status, stderr and
+# wall-clock milliseconds. Arg 4 empty means "omit timeout_seconds entirely".
+# BOTH poll-interval names are exported and NEITHER is asserted: the tests must
+# not dictate whether the builder reuses wait_for_user_bus's DC_BUS_POLL_INTERVAL
+# or introduces its own. They only make the suite fast; every assertion below is
+# driven by the shim's call count or by the timeout ARGUMENT.
+run_wait_manager() {  # dry shim_dir uid timeout_or_empty poll_interval
+  local start end
+  start="$(date +%s%3N)"
+  if [ -n "$4" ]; then
+    MGR_ERR="$(DC_DRY_RUN="$1" PATH="$2:$PATH" \
+               DC_MANAGER_POLL_INTERVAL="$5" DC_BUS_POLL_INTERVAL="$5" \
+               wait_for_user_manager_down "$3" "$4" 2>&1 >/dev/null)"; MGR_RC=$?
+  else
+    MGR_ERR="$(DC_DRY_RUN="$1" PATH="$2:$PATH" \
+               DC_MANAGER_POLL_INTERVAL="$5" DC_BUS_POLL_INTERVAL="$5" \
+               wait_for_user_manager_down "$3" 2>&1 >/dev/null)"; MGR_RC=$?
+  fi
+  end="$(date +%s%3N)"
+  MGR_MS=$((end - start))
+  return 0
+}
+
+# Like run_wait_manager, but in a watchdogged child shell, because the behaviour
+# an unguarded bad timeout produces is an unbounded hang. Exit 124 is the
+# watchdog firing.
+run_wait_manager_guarded() {  # shim_dir uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  MGR_ERR="$(DC_DRY_RUN= PATH="$1:$PATH" \
+             DC_MANAGER_POLL_INTERVAL="$4" DC_BUS_POLL_INTERVAL="$4" \
+             timeout "$5" bash -c 'set -uo pipefail; . "$1"; wait_for_user_manager_down "$2" "$3"' \
+             _ "$LIB" "$2" "$3" 2>&1 >/dev/null)"; MGR_RC=$?
+  end="$(date +%s%3N)"
+  MGR_MS=$((end - start))
+  return 0
+}
+
+# A caller's shape under `set -euo pipefail`, with a NEUTRAL handler — not
+# `|| die`, because slice 2 has already decided this wait's timeout is non-fatal.
+# What is asserted here is only that a refusal arrives as a non-zero RETURN, so
+# the caller's `||` branch runs at all; an uncaught arithmetic expansion error
+# skips it and the caller walks on into the userdel race regardless of which
+# branch it would have taken.
+run_wait_manager_at_call_site() {  # shim_dir uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  MGR_ERR="$(DC_DRY_RUN= PATH="$1:$PATH" \
+             DC_MANAGER_POLL_INTERVAL="$4" DC_BUS_POLL_INTERVAL="$4" \
+             timeout "$5" bash -c '
+               set -euo pipefail
+               . "$1"
+               wait_for_user_manager_down "$2" "$3" || { echo "CALLER-HANDLED" >&2; exit 9; }
+               echo "CALLER-CONTINUED" >&2
+             ' _ "$LIB" "$2" "$3" 2>&1 >/dev/null)"; MGR_RC=$?
+  end="$(date +%s%3N)"
+  MGR_MS=$((end - start))
+  return 0
+}
+
+# A missing function exits 127 with "command not found" on stderr — non-zero with
+# a non-empty message, i.e. it satisfies every timeout assertion below vacuously.
+# Same rail require_wait_for_user_bus puts in front of issue #24's tests.
+require_wait_for_user_manager_down() {  # label
+  declare -F wait_for_user_manager_down >/dev/null && return 0
+  fail "$1: wait_for_user_manager_down() is not defined"
+  return 1
+}
+
+assert_manager_failed() {  # label
+  [ "$MGR_RC" -ne 127 ] || { fail "$1: exit 127 (command not found), not a timeout"; return 0; }
+  assert_not_contains "$MGR_ERR" "command not found" \
+    "$1: the failure came from wait_for_user_manager_down, not the shell"
+  [ "$MGR_RC" -ne 0 ] || fail "$1: expected non-zero exit on timeout, got $MGR_RC"
+  [ -n "$MGR_ERR" ] || fail "$1: expected an informative stderr line, got none"
+}
+
+assert_manager_arg_refused() {  # label bad_value
+  [ "$MGR_RC" -ne 124 ] || { fail "$1: still running after the watchdog fired — '$2' was accepted and the poll is unbounded"; return 0; }
+  [ "$MGR_RC" -ne 0 ] || fail "$1: expected non-zero exit for timeout_seconds='$2', got 0"
+  [ "$MGR_MS" -lt 1000 ] || fail "$1: took ${MGR_MS}ms — an invalid timeout_seconds must be refused before any polling"
+  [ -n "$MGR_ERR" ] || fail "$1: expected an informative stderr line, got none"
+  assert_not_contains "$MGR_ERR" "unbound variable" \
+    "$1: the shell crashed on the arithmetic instead of the function refusing the argument"
+  assert_not_contains "$MGR_ERR" "command not found" "$1: the refusal came from the function, not the shell"
+  assert_not_contains "$MGR_ERR" "timed out" \
+    "$1: reported a timeout it never served — an invalid argument is a caller bug, not a slow manager"
+  assert_contains "$MGR_ERR" "$2" "$1: stderr names the rejected value"
+}
+
+# assert_manager_arg_refused, plus the part that tells a REFUSAL apart from a
+# CRASH that happens to be non-zero and happens to quote the bad value back.
+assert_manager_arg_refused_cleanly() {  # label bad_value
+  assert_manager_arg_refused "$1" "$2"
+  assert_not_contains "$MGR_ERR" "install-lib.sh" \
+    "$1: stderr names the library file — that is bash reporting a crash at a line number, not the function refusing an argument"
+  assert_not_contains "$MGR_ERR" "value too great for base" \
+    "$1: '$2' reached arithmetic expansion and was parsed as octal instead of being refused"
+  assert_not_contains "$MGR_ERR" "error token" \
+    "$1: '$2' reached arithmetic expansion instead of being refused"
+  assert_not_contains "$MGR_ERR" "syntax error" \
+    "$1: '$2' reached arithmetic expansion instead of being refused"
+}
+
+test_library_defines_wait_for_user_manager_down() {
+  declare -F wait_for_user_manager_down >/dev/null || \
+    fail "install-lib.sh defines wait_for_user_manager_down(): not defined"
+}
+
+# (a) The manager is already down — the common case, a box rebooted since the
+# install, where terminate-user had nothing to terminate. Returns 0 without
+# waiting. timeout_seconds is OMITTED, which also pins that arg 2 is optional
+# (under install.sh's `set -u` a bare "$2" would abort). uid 987 is the
+# dreamconnect-host uid the removal fixtures already use, and the unit name is
+# asserted from the shim's argv because probing the WRONG unit is the one way
+# this wait can be silently meaningless.
+test_wait_for_user_manager_down_returns_zero_when_already_inactive() {
+  local shims log calls
+  require_wait_for_user_manager_down "already inactive" || return 0
+  shims="$TMP/shims-mgr-inactive"; log="$(make_manager_shim "$shims" "inactive:3")"
+
+  run_wait_manager "" "$shims" 987 "" 0.05
+  assert_eq "$MGR_RC" "0" "already inactive: returns 0 (stderr: $MGR_ERR)"
+  [ "$MGR_MS" -lt 2000 ] || fail "already inactive: returned in ${MGR_MS}ms, expected no waiting"
+
+  calls="$(cat "$log" 2>/dev/null || true)"
+  [ "$(manager_probe_count "$log")" -ge 1 ] || \
+    fail "already inactive: systemctl was never invoked — the wait cannot know the manager is down"
+  assert_line "$calls" "[is-active]" "already inactive: the probe is 'systemctl is-active'"
+  assert_line "$calls" "[user@987.service]" \
+    "already inactive: the probe names user@<uid>.service for the uid it was given"
+}
+
+# (a2) The other two down states, both measured above and both reported with a
+# non-zero exit that a naive `systemctl is-active ... && keep waiting` would read
+# as "still up": a crashed manager ("failed", exit 3) and a manager whose unit is
+# not loaded at all ("inactive", exit 4 — a DIFFERENT status from the ordinary
+# stopped case). Either one means userdel may proceed.
+test_wait_for_user_manager_down_treats_a_failed_or_absent_unit_as_down() {
+  local shims log i
+  require_wait_for_user_manager_down "failed or absent unit" || return 0
+  local -a specs=("failed:3" "inactive:4")
+  local -a labels=("crashed manager (failed/3)" "no such unit (inactive/4)")
+
+  for i in 0 1; do
+    shims="$TMP/shims-mgr-down-$i"; log="$(make_manager_shim "$shims" "${specs[$i]}")"
+    run_wait_manager "" "$shims" 987 5 0.05
+    assert_eq "$MGR_RC" "0" "${labels[$i]}: counts as down, returns 0 (stderr: $MGR_ERR)"
+    [ "$MGR_MS" -lt 2000 ] || fail "${labels[$i]}: returned in ${MGR_MS}ms — it kept polling a manager that is already gone"
+  done
+}
+
+# (b) The race itself: terminate-user has returned but the manager is still up,
+# and goes down a few polls later. Returning 0 is only half the assertion — a
+# stub returning 0 unconditionally satisfies that — so the PROBE COUNT pins that
+# it actually kept asking. >=4 proves "active" was never accepted as down; <=10
+# proves it stopped once the answer changed instead of polling to the timeout.
+test_wait_for_user_manager_down_converges_while_polling() {
+  local shims log n
+  require_wait_for_user_manager_down "converges while polling" || return 0
+  shims="$TMP/shims-mgr-converge"
+  log="$(make_manager_shim "$shims" "active:0 active:0 active:0 inactive:3")"
+
+  run_wait_manager "" "$shims" 987 10 0.05
+  assert_eq "$MGR_RC" "0" "converges: returns 0 once the manager goes down (stderr: $MGR_ERR)"
+  n="$(manager_probe_count "$log")"
+  [ "$n" -ge 4 ] || \
+    fail "converges: probed $n time(s) — it cannot have waited out three 'active' answers, so it accepted a live manager as down"
+  [ "$n" -le 10 ] || \
+    fail "converges: probed $n times — it kept polling after the manager reported inactive"
+  [ "$MGR_MS" -lt 9000 ] || \
+    fail "converges: took ${MGR_MS}ms, expected a return soon after the manager went down"
+}
+
+# (b2) The real shutdown sequence, in the states systemd actually reports it in:
+# `loginctl terminate-user` returns immediately, the manager spends a while in
+# "deactivating" with its processes still alive, and only then reaches
+# "inactive". Owner-decided (CHECKPOINT.md seam 1): "deactivating" is STILL UP.
+# The probe count is what carries the assertion — >=4 means the three
+# "deactivating" answers were each waited through rather than taken as done, so
+# the 0 it finally returns is the one earned by reading "inactive".
+test_wait_for_user_manager_down_keeps_polling_through_a_deactivating_state() {
+  local shims log n
+  require_wait_for_user_manager_down "deactivating then inactive" || return 0
+  shims="$TMP/shims-mgr-deactivating"
+  log="$(make_manager_shim "$shims" "active:0 deactivating:3 deactivating:3 inactive:3")"
+
+  run_wait_manager "" "$shims" 987 10 0.05
+  assert_eq "$MGR_RC" "0" "deactivating then inactive: returns 0 once the state reads inactive (stderr: $MGR_ERR)"
+  n="$(manager_probe_count "$log")"
+  [ "$n" -ge 4 ] || \
+    fail "deactivating then inactive: probed $n time(s) — it returned during 'deactivating', while the manager's processes were still alive and userdel -r would still race them"
+  [ "$n" -le 10 ] || \
+    fail "deactivating then inactive: probed $n times — it kept polling after the state reached inactive"
+  [ "$MGR_MS" -lt 9000 ] || \
+    fail "deactivating then inactive: took ${MGR_MS}ms, expected a return soon after the manager reached inactive"
+}
+
+# (b3) The discriminator for (b2), and the reason (b2) alone is not enough: in
+# (b2) the manager does eventually reach "inactive", so an implementation that
+# reads "any non-zero exit" as down still ends up returning 0 — right answer,
+# wrong poll, invisible from the exit status alone. Here the manager NEVER gets
+# past "deactivating", which systemd reports with the same exit 3 as "inactive".
+# A status-reading implementation returns 0 on the first probe in a few ms; a
+# state-string implementation keeps polling and times out. Only the second is
+# safe to hand `userdel -r`, so only the second passes.
+test_wait_for_user_manager_down_never_reports_a_deactivating_manager_as_down() {
+  local shims log
+  require_wait_for_user_manager_down "stuck deactivating" || return 0
+  shims="$TMP/shims-mgr-stuck-deactivating"
+  log="$(make_manager_shim "$shims" "deactivating:3")"
+
+  run_wait_manager "" "$shims" 987 1 0.05
+  assert_manager_failed "stuck deactivating"
+  [ "$MGR_MS" -ge 900 ] || \
+    fail "stuck deactivating: returned in ${MGR_MS}ms — 'deactivating' with a non-zero exit was read as down, so this wait would hand userdel -r a manager whose processes are still running"
+  [ "$MGR_MS" -lt 15000 ] || \
+    fail "stuck deactivating: took ${MGR_MS}ms — timeout_seconds=1 did not override the default"
+  [ "$(manager_probe_count "$log")" -ge 2 ] || \
+    fail "stuck deactivating: probed fewer than twice — it asked once and gave up rather than polling"
+  assert_contains "$MGR_ERR" "987" "stuck deactivating: stderr names the uid it waited for"
+}
+
+# (c) The manager never goes down — a wedged session holding files open, which is
+# exactly what makes `userdel -r` fail. Bounded by the timeout ARGUMENT so the
+# uninstall reports a clear failure instead of hanging; the <15s ceiling is what
+# proves arg 2 overrode the default.
+test_wait_for_user_manager_down_times_out_when_still_active() {
+  local shims log
+  require_wait_for_user_manager_down "still active" || return 0
+  shims="$TMP/shims-mgr-stuck"; log="$(make_manager_shim "$shims" "active:0")"
+
+  run_wait_manager "" "$shims" 987 1 0.05
+  assert_manager_failed "still active"
+  [ "$MGR_MS" -ge 900 ] || \
+    fail "still active: gave up after ${MGR_MS}ms, before the 1s timeout elapsed"
+  [ "$MGR_MS" -lt 15000 ] || \
+    fail "still active: took ${MGR_MS}ms — timeout_seconds=1 did not override the default"
+  [ "$(manager_probe_count "$log")" -ge 2 ] || \
+    fail "still active: probed fewer than twice — it asked once and gave up rather than polling"
+  assert_contains "$MGR_ERR" "987" "still active: stderr names the uid it waited for"
+}
+
+# (d) DC_DRY_RUN=1 returns 0 immediately and never invokes systemctl. The shim IS
+# on PATH, so an empty call log means gated, not missing — the same reading the
+# dry push/unpush tests take. The scripted state is "active" forever, so a
+# short-circuit that polled even once would either burn the 3s timeout or fail.
+test_wait_for_user_manager_down_returns_zero_immediately_when_dry() {
+  local shims log
+  require_wait_for_user_manager_down "dry run" || return 0
+  shims="$TMP/shims-mgr-dry"; log="$(make_manager_shim "$shims" "active:0")"
+
+  run_wait_manager 1 "$shims" 987 3 0.05
+  assert_eq "$MGR_RC" "0" "DC_DRY_RUN=1: returns 0 (stderr: $MGR_ERR)"
+  [ "$MGR_MS" -lt 1000 ] || \
+    fail "DC_DRY_RUN=1: took ${MGR_MS}ms — it polled instead of short-circuiting"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "DC_DRY_RUN=1: the systemctl shim is on PATH, so an empty call log means gated — not missing"
+}
+
+# (e) Non-numeric timeout_seconds. Same hazard wait_for_user_bus's test (g)
+# pins: under `set -u`, "abc" in `$(( timeout * 1000 ))` aborts the shell with an
+# unbound-variable error that is not a `return`, so the caller's `||` never runs.
+test_wait_for_user_manager_down_refuses_a_non_numeric_timeout() {
+  local shims
+  require_wait_for_user_manager_down "non-numeric timeout" || return 0
+  shims="$TMP/shims-mgr-arg-abc"; make_manager_shim "$shims" "active:0" >/dev/null
+
+  run_wait_manager_guarded "$shims" 987 abc 0.05 3
+  assert_manager_arg_refused "non-numeric timeout" "abc"
+}
+
+# (f) Numeric but absurd: 99999999999999999 overflows the millisecond deadline
+# and turns the bounded poll unbounded — the watchdog catches that as exit 124.
+test_wait_for_user_manager_down_refuses_a_timeout_beyond_the_86400_second_cap() {
+  local shims
+  require_wait_for_user_manager_down "oversized timeout" || return 0
+  shims="$TMP/shims-mgr-arg-huge"; make_manager_shim "$shims" "active:0" >/dev/null
+
+  run_wait_manager_guarded "$shims" 987 99999999999999999 0.05 3
+  assert_manager_arg_refused "oversized timeout" "99999999999999999"
+}
+
+# (g) The other side of that cap, so it cannot be satisfied by refusing
+# everything: 86400 is the documented maximum and must be ACCEPTED. Asserted with
+# the manager already down, so accepting it costs milliseconds, not a day.
+test_wait_for_user_manager_down_accepts_the_documented_maximum_timeout_of_86400() {
+  local shims
+  require_wait_for_user_manager_down "maximum timeout accepted" || return 0
+  shims="$TMP/shims-mgr-arg-max"; make_manager_shim "$shims" "inactive:3" >/dev/null
+
+  run_wait_manager_guarded "$shims" 987 86400 0.05 5
+  assert_eq "$MGR_RC" "0" "maximum timeout accepted: timeout_seconds=86400 is within the cap (stderr: $MGR_ERR)"
+  [ "$MGR_MS" -lt 2000 ] || fail "maximum timeout accepted: returned in ${MGR_MS}ms with the manager already down"
+}
+
+# (h) "08": a leading zero that is not even valid octal, so `$(( ))` reports
+# "value too great for base" — an EXPANSION error, not a `return`, which skips
+# the caller's `||` branch entirely. Three things are asserted, because the exit
+# status alone cannot see the defect: the refusal is clean and in the function's
+# own voice; it carries the SAME status the function gives any other invalid
+# timeout; and at a caller's `|| ...` the branch actually runs.
+test_wait_for_user_manager_down_refuses_a_leading_zero_timeout_that_is_not_valid_octal() {
+  local shims refusal_rc
+  require_wait_for_user_manager_down "leading-zero timeout 08" || return 0
+  shims="$TMP/shims-mgr-arg-08"; make_manager_shim "$shims" "active:0" >/dev/null
+
+  # The status this function uses to refuse a bad timeout, taken from the case
+  # already pinned by test (e) rather than hard-coded here.
+  run_wait_manager_guarded "$shims" 987 abc 0.05 3
+  refusal_rc="$MGR_RC"
+
+  run_wait_manager_guarded "$shims" 987 08 0.05 3
+  assert_manager_arg_refused_cleanly "leading-zero timeout 08" "08"
+  assert_eq "$MGR_RC" "$refusal_rc" \
+    "leading-zero timeout 08: refused with the same status as any other invalid timeout, not an uncaught shell error's status"
+
+  run_wait_manager_at_call_site "$shims" 987 08 0.05 3
+  assert_contains "$MGR_ERR" "CALLER-HANDLED" \
+    "leading-zero timeout 08: the caller's '||' branch must fire — a refusal has to arrive as a non-zero RETURN, not an expansion error that skips it"
+  assert_not_contains "$MGR_ERR" "CALLER-CONTINUED" \
+    "leading-zero timeout 08: the caller ran on past a failed wait, straight into the userdel race issue #25 is about"
+  [ "$MGR_MS" -lt 1000 ] || \
+    fail "leading-zero timeout 08: the call site took ${MGR_MS}ms — an invalid timeout must be refused before any polling"
+}
+
+# (i) "010": a leading zero that IS valid octal, so nothing crashes and nothing
+# is reported — the wait is silently 8 seconds instead of 10, and the timeout
+# line would then report "010s". The watchdog sits below that 8s so a silently
+# accepted "010" shows up as exit 124 rather than as a quiet pass.
+test_wait_for_user_manager_down_refuses_a_leading_zero_timeout_that_is_valid_octal() {
+  local shims
+  require_wait_for_user_manager_down "leading-zero timeout 010" || return 0
+  shims="$TMP/shims-mgr-arg-010"; make_manager_shim "$shims" "active:0" >/dev/null
+
+  run_wait_manager_guarded "$shims" 987 010 0.05 3
+  assert_manager_arg_refused_cleanly "leading-zero timeout 010" "010"
+}
+
+# (j) The cap, isolated. Test (f) passes 99999999999999999, which any
+# length-based proxy check refuses on digit count alone — so it cannot tell
+# whether the 86400 bound itself is enforced. 90000 is five digits, the same
+# width as the accepted maximum 86400, so only a comparison against the cap can
+# refuse it.
+test_wait_for_user_manager_down_refuses_a_timeout_just_past_the_cap() {
+  local shims
+  require_wait_for_user_manager_down "timeout just past the cap" || return 0
+  shims="$TMP/shims-mgr-arg-90000"; make_manager_shim "$shims" "active:0" >/dev/null
+
+  run_wait_manager_guarded "$shims" 987 90000 0.05 3
+  assert_manager_arg_refused_cleanly "timeout just past the cap" "90000"
+}
+
+# --- (k..m) uid is input too — CHECKPOINT.md row 4 ---------------------------
+#
+# `uid` reaches this function straight from install.state's HOST_UID field, and a
+# corrupted or hand-edited state file can hand it over BLANK. The unit name that
+# then builds is "user@.service" — no number — which is not a syntactically valid
+# unit name at all, and real systemd answers it with NOTHING on stdout. Measured
+# on this box (systemd 259):
+#
+#   $ systemctl is-active "user@.service"      # -> exit 1, EMPTY stdout,
+#     Failed to retrieve unit state: Unit name user@.service is neither a valid
+#     invocation ID nor unit name.             #    (that line is on stderr)
+#   $ systemctl is-active "user@999999.service" # -> "inactive", exit 3
+#
+# The second is the shape a WELL-FORMED uid takes when no such account exists:
+# it converges on the very first poll. The first never matches inactive|failed,
+# so the poll runs out the FULL timeout (30s by default), uninstall_host_account
+# (slice 2) reads that as "the manager is still up", skips `userdel` entirely,
+# and an account that was perfectly removable is stranded permanently.
+#
+# A malformed argument is a caller bug, not a manager that would not stop — so
+# refuse it in this function's own voice, before the poll, exactly as this same
+# function already refuses a malformed timeout_seconds above.
+
+# run_wait_manager_guarded, with DC_DRY_RUN under the test's control. The
+# watchdog matters here for the same reason it does for a bad timeout: the
+# behaviour an unguarded bad uid produces is a wait that runs to the end of its
+# timeout, and exit 124 is what makes that visible instead of merely slow.
+run_wait_manager_guarded_dry() {  # dry shim_dir uid timeout_arg poll_interval watchdog_seconds
+  local start end
+  start="$(date +%s%3N)"
+  MGR_ERR="$(DC_DRY_RUN="$1" PATH="$2:$PATH" \
+             DC_MANAGER_POLL_INTERVAL="$5" DC_BUS_POLL_INTERVAL="$5" \
+             timeout "$6" bash -c 'set -uo pipefail; . "$1"; wait_for_user_manager_down "$2" "$3"' \
+             _ "$LIB" "$3" "$4" 2>&1 >/dev/null)"; MGR_RC=$?
+  end="$(date +%s%3N)"
+  MGR_MS=$((end - start))
+  return 0
+}
+
+# The uid twin of assert_manager_arg_refused. Two things it asserts that the
+# timeout version does not: the shim's call log must be EMPTY, because "refuse
+# before touching anything" is what this fix is (the same discipline
+# remove_no_idle_lock's reserved-name guard is held to); and the message must not
+# read "timed out", because a wait that never ran cannot have timed out, and
+# blaming the manager for a caller's bad argument is what sends the operator
+# looking in the wrong place. The bad value cannot be quoted back the way the
+# timeout tests do it — for the empty uid there is nothing to quote — so what
+# stands in for "a clear message" is the file's own established shape,
+# `error: <function>: <argument-name> ...`.
+assert_manager_uid_refused() {  # label bad_uid call_log
+  [ "$MGR_RC" -ne 124 ] || { fail "$1: still running when the watchdog fired — uid '$2' was accepted and the poll ran on toward its timeout"; return 0; }
+  [ "$MGR_RC" -ne 127 ] || { fail "$1: exit 127 (command not found), not a refusal"; return 0; }
+  [ "$MGR_RC" -ne 0 ] || fail "$1: expected non-zero exit for uid '$2', got 0"
+  [ "$MGR_MS" -lt 1000 ] || \
+    fail "$1: took ${MGR_MS}ms — a malformed uid must be refused before the poll, not waited out for the whole timeout"
+  assert_eq "$(manager_probe_count "$3")" "0" \
+    "$1: systemctl was invoked for uid '$2' — the guard must refuse before the unit name is ever probed"
+  [ -n "$MGR_ERR" ] || fail "$1: expected an informative stderr line, got none"
+  assert_not_contains "$MGR_ERR" "command not found" "$1: the refusal came from the function, not the shell"
+  assert_not_contains "$MGR_ERR" "unbound variable" "$1: the shell crashed instead of the function refusing the argument"
+  assert_not_contains "$MGR_ERR" "timed out" \
+    "$1: reported a timeout it never served — a malformed uid is a caller bug, not a manager that would not stop"
+  assert_contains "$MGR_ERR" "wait_for_user_manager_down" "$1: stderr refuses in the function's own voice"
+  assert_contains "$MGR_ERR" "uid" "$1: stderr names WHICH argument was rejected"
+}
+
+# (k) The defect itself: HOST_UID blank. The shim is scripted ":1" — empty state
+# string, exit 1 — which is the MEASURED answer real systemd gives for
+# "user@.service", so this reproduces the stranding on the box rather than a
+# convenient stand-in. timeout_seconds=5 with a 3s watchdog: today the poll runs
+# the full 5s and the watchdog fires; a guard returns in milliseconds.
+test_wait_for_user_manager_down_refuses_an_empty_uid() {
+  local shims log
+  require_wait_for_user_manager_down "empty uid" || return 0
+  shims="$TMP/shims-mgr-uid-empty"; log="$(make_manager_shim "$shims" ":1")"
+
+  run_wait_manager_guarded_dry "" "$shims" "" 5 0.05 3
+  assert_manager_uid_refused "empty uid" "" "$log"
+}
+
+# (l) The other shapes a broken HOST_UID field takes, and the discriminator for
+# (k): a guard written as `[ -n "$uid" ]` passes (k) and still hands systemctl a
+# unit name it cannot parse. A whitespace-only field is the likelier corruption
+# of the two — `HOST_UID= ` reads as non-empty — and "abc" stands for anything
+# else that is not a number. Digits-only, the same shape the timeout_seconds
+# guard above uses for its own argument.
+test_wait_for_user_manager_down_refuses_a_non_numeric_uid() {
+  local shims log i
+  require_wait_for_user_manager_down "non-numeric uid" || return 0
+  local -a uids=("abc" " ")
+  local -a labels=("non-numeric uid 'abc'" "whitespace-only uid")
+
+  for i in 0 1; do
+    shims="$TMP/shims-mgr-uid-bad-$i"; log="$(make_manager_shim "$shims" ":1")"
+    run_wait_manager_guarded_dry "" "$shims" "${uids[$i]}" 5 0.05 3
+    assert_manager_uid_refused "${labels[$i]}" "${uids[$i]}" "$log"
+  done
+}
+
+# (m) Where the guard sits relative to the dry-run short-circuit, which (k) alone
+# cannot see. This function ALREADY refuses a malformed timeout_seconds in dry
+# mode — its guard is above the `DC_DRY_RUN` line, so `DC_DRY_RUN=1
+# wait_for_user_manager_down 987 abc` returns non-zero today — and the uid guard
+# belongs in the same place for the same reason: `--uninstall --dry-run` against
+# a corrupted install.state exists precisely so the operator finds out BEFORE the
+# real run, not after it has silently skipped userdel.
+test_wait_for_user_manager_down_refuses_an_empty_uid_even_when_dry() {
+  local shims log
+  require_wait_for_user_manager_down "empty uid when dry" || return 0
+  shims="$TMP/shims-mgr-uid-empty-dry"; log="$(make_manager_shim "$shims" ":1")"
+
+  run_wait_manager_guarded_dry 1 "$shims" "" 5 0.05 3
+  assert_manager_uid_refused "empty uid when dry" "" "$log"
 }
 
 # (e) The wiring. Everything above can be green with the helper orphaned, in
@@ -6215,8 +7944,7 @@ test_reclaim_stale_shm_frame_leaves_a_file_already_owned_by_the_target_uid_untou
 # reclaim fails the install outright — a distinct, also-worth-pinning
 # failure mode from the SC-restart one above.
 test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable() {
-  local sh reclaim daemon_enable sc_restart
-  sh="$HERE/install.sh"
+  local sh reclaim daemon_enable sc_restart  sh="$HERE/install.sh"
   assert_file_exists "$sh" "install.sh is present"
   [ -f "$sh" ] || return 0
 
@@ -6245,6 +7973,585 @@ test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable
     fail "call site: reclaim_stale_shm_frame (line $reclaim) must come BEFORE systemctl restart \"\$SC_UNIT\" (line $sc_restart) — the SC restart is what forces its already-running JVM to reopen the shm file; reclaiming after it leaves that JVM mmap'd to the stale file, reopening issue #27's residual gap"
   [ "$reclaim" -lt "$daemon_enable" ] || \
     fail "call site: reclaim_stale_shm_frame (line $reclaim) must come BEFORE the daemon's own enable --now (line $daemon_enable) — the daemon's O_CREAT must never race a stale, foreign-owned frame it cannot clear itself past the sticky bit"
+}
+
+# --- issue #26, slice 2: the push_dconf_environment CALL SITE -----------------
+#
+# Slice 1's two tests (lines 1375-1523) can be green with the function orphaned,
+# and today they are: install.sh never mentions push_dconf_environment, so every
+# install still leaves DCONF_PROFILE out of the live user manager — the whole of
+# issue #26 ("DCONF_PROFILE was absent from both the gnome-shell process env and
+# `systemctl --user show-environment`"). install.sh cannot be executed here (it
+# demands root, a real GDM and a real systemd, and does top-level work on
+# sourcing), so the wiring is asserted by line ordering, the same technique the
+# wait_for_user_bus call-order tests (e)/(e2) above use.
+#
+# WHERE THE ORDER COMES FROM — factory/CHECKPOINT.md, issue #26 seams, verbatim:
+#   "install.sh call site: push_dconf_environment "$USER_NAME" "$USER_UID"
+#    immediately after configure_no_idle_lock, before enable_autologin."
+# Both bounds are load-bearing, not layout preference:
+#   * AFTER configure_no_idle_lock — that is what writes the profile the pushed
+#     value names (issue #26: "/etc/dconf/db/<name>.d/00-display-host (+ compiled
+#     db) and ~/.config/environment.d/dconf-profile.conf"). Pushing first points
+#     the live session at a profile that does not exist yet.
+#   * BEFORE enable_autologin — the plan's ordering for the host-account branch;
+#     enable_autologin is the last step of session setup for that account.
+# The argument check is from the same line of the plan: the second argument is
+# the UID, and $USER_HOME is one slip away in a block that reads
+# `configure_no_idle_lock "$USER_NAME" "$USER_HOME"` two lines up. Handing the
+# home path over would build XDG_RUNTIME_DIR=/run/user//home/<name>, which no
+# other test in this suite can see.
+# The upper bound this test used to carry was enable_autologin. GDM autologin is
+# gone -- backstage creates the session directly -- so the only ordering left to
+# pin is the lower one, and it is the one that mattered: pushing DCONF_PROFILE
+# before configure_no_idle_lock names a profile that has not been written yet.
+test_install_sh_pushes_dconf_environment_after_configure_no_idle_lock() {
+  local sh idle pushed stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  idle="$(first_code_line "$sh" 'configure_no_idle_lock')"
+  [ -n "$idle" ] || { fail "call site: no 'configure_no_idle_lock' line in install.sh"; return 0; }
+
+  # Searched from the top of the file, not from $idle, so that a call placed too
+  # EARLY is reported as too early rather than as missing. Anchored on a
+  # non-identifier character so it cannot match the uninstall path's
+  # `unpush_dconf_environment`, which appears EARLIER in the file (install.sh:127
+  # region) and would otherwise be reported here as a push placed before
+  # configure_no_idle_lock.
+  pushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])push_dconf_environment')"
+  [ -n "$pushed" ] || {
+    fail "call site: install.sh never calls push_dconf_environment (configure_no_idle_lock at line $idle) — the helper is orphaned and issue #26 is not fixed: DCONF_PROFILE reaches the drop-in on disk and never the running user manager"
+    return 0; }
+
+  [ "$idle" -lt "$pushed" ] || \
+    fail "call site: push_dconf_environment (line $pushed) must come AFTER configure_no_idle_lock (line $idle) — before it, the dconf profile it names has not been written or compiled yet"
+
+  stmt="$(logical_statement_at "$sh" "$pushed")"
+  [ -n "$stmt" ] || { fail "call site: could not read the statement at install.sh:$pushed"; return 0; }
+  [[ "$stmt" == *USER_NAME* && "$stmt" == *USER_UID* ]] || \
+    fail "call site: install.sh:$pushed must call push_dconf_environment with the account name and its UID — the UID is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the running manager. Statement was: [$stmt]"
+}
+
+# --- issue #26, slice 3: that call's FAILURE HANDLING -------------------------
+#
+# The ordering test above is green against the bare
+# `push_dconf_environment "$USER_NAME" "$USER_UID"` install.sh carries today, and
+# so is every other test here — but install.sh runs under `set -euo pipefail`
+# (line 34), so ANY non-zero exit from that call aborts the whole install at the
+# last host-account step, after /opt, the user unit and the SC drop-in are all
+# already in place. push_dconf_environment can exit non-zero for reasons that are
+# not install-fatal at all: a reserved or invalid account name (install-lib.sh
+# returns 1 before invoking anything) or a live user manager that refuses
+# set-environment.
+#
+# WHERE THE REQUIRED FORM COMES FROM — factory/CHECKPOINT.md, issue #26, slice 3
+# row, verbatim: "failure handling: a failed set-environment warns (non-fatal),
+# never silently swallowed (no `|| true`)"; the plan spells that same form as
+# `|| echo "!! ..."`, never `|| true` / `|| :`. Both halves are load-bearing:
+#   * NON-FATAL — this push is a belt on top of the braces. The
+#     ~/.config/environment.d/dconf-profile.conf that configure_no_idle_lock
+#     wrote one line above is still on disk and still takes effect at the next
+#     full manager start (a reboot — which host-account mode does anyway, being
+#     autologin by construction). Losing an otherwise-complete install over the
+#     redundant half is strictly the worse outcome.
+#   * NEVER SWALLOWED — with `|| true` the push is gone AND silent, so the
+#     session runs with DCONF_PROFILE unset until the next reboot and nothing in
+#     the install log ever said so. That invisible state is precisely what issue
+#     #26 was filed about; a warning is what makes it diagnosable.
+# The `!!` marker is install.sh's own convention for a warning the operator has
+# to read (lines 345, 390 and 402 today), not this test's preference — the
+# message wording is deliberately NOT asserted and may be rewritten freely. No
+# `>&2` is required either: install.sh's top-level warnings, including the
+# enable_autologin non-fatal path at line 390, all go to stdout.
+test_install_sh_warns_but_does_not_swallow_a_failed_dconf_environment_push() {
+  local sh pushed stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  # Same non-identifier anchor as the ordering test above: `unpush_dconf_
+  # environment` in the uninstall path must not be mistaken for this call.
+  pushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])push_dconf_environment')"
+  [ -n "$pushed" ] || {
+    fail "failure handling: install.sh never calls push_dconf_environment at all"
+    return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$pushed")"
+  [ -n "$stmt" ] || { fail "failure handling: could not read the statement at install.sh:$pushed"; return 0; }
+
+  # (1) Handled at all, and visibly: `|| echo <something>`.
+  [[ "$stmt" =~ \|\|[[:space:]]*echo[[:space:]]+[^[:space:]] ]] || \
+    fail "failure handling: install.sh:$pushed must handle a push_dconf_environment failure with '|| echo <warning>' — unhandled, set -euo pipefail (install.sh:34) aborts the entire install over a push that is redundant to the environment.d drop-in written one line above. Statement was: [$stmt]"
+
+  # (2) Recognisable as a warning, by install.sh's own marker.
+  assert_contains "$stmt" '!!' \
+    "failure handling: install.sh:$pushed must mark the warning with install.sh's '!!' operator-warning prefix (lines 345/390/402). Statement was: [$stmt]"
+
+  # (3) Never silently swallowed.
+  assert_not_contains "$stmt" "|| true" \
+    "failure handling: install.sh:$pushed swallows a failed DCONF_PROFILE push — the live session keeps an unset DCONF_PROFILE and the log never says so"
+  assert_not_contains "$stmt" "|| :" \
+    "failure handling: install.sh:$pushed swallows a failed DCONF_PROFILE push — the live session keeps an unset DCONF_PROFILE and the log never says so"
+
+  # (4) ...and never fatal: aborting here is the outcome the non-fatal
+  # requirement exists to prevent, whether spelled `|| die` or `|| { ...; exit; }`.
+  [[ "$stmt" =~ (^|[^[:alnum:]_])(die|exit)([^[:alnum:]_]|$) ]] && \
+    fail "failure handling: install.sh:$pushed must NOT abort the install when the push fails — the environment.d drop-in still applies at the next manager start, so a warning is the correct response. Statement was: [$stmt]"
+
+  return 0
+}
+
+# --- issue #26, breaker lap 1: the unpush_dconf_environment CALL SITE ----------
+#
+# The two unpush tests at lines 1541+ can be green with the function orphaned,
+# and today they would be: install.sh's uninstall path never mentions it, so
+# every uninstall still leaves the account's live manager holding
+# DCONF_PROFILE=<name> after remove_no_idle_lock has deleted the profile file
+# that name points at. install.sh cannot be executed here (root, real GDM, real
+# systemd, top-level work on sourcing), so the wiring is asserted by line
+# ordering and statement text, the technique the push call-site tests above and
+# the wait_for_user_bus tests before them already use.
+#
+# THE THREE BOUNDS, each load-bearing:
+#
+#   * INSIDE uninstall() — the call must sit between `uninstall()` and the
+#     `remove_no_idle_lock` call, which is itself inside that function's
+#     `if [ -n "$HOST_ACCOUNT" ]` block (install.sh:124-128). Anywhere else and
+#     the uninstall path does not run it.
+#   * BEFORE remove_no_idle_lock — the reverse of the install order (write the
+#     profile, then push; unset, then delete the profile). The other way round
+#     the live manager spends the rest of the uninstall — the AccountsService
+#     revert, userdel, the state file — naming a profile that is already gone,
+#     which is the dconf null configuration this fix exists to prevent, not a
+#     layout preference.
+#   * WITH THE UID — $target_uid (install.sh:74, `target_uid="$HOST_UID"`, read
+#     off install.state) is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the
+#     running manager. $target_home is one slip away in a block whose previous
+#     line reads `remove_no_idle_lock "$HOST_ACCOUNT" "$target_home"`, and
+#     handing the home path over would build /run/user//home/<name>, which no
+#     other test in this suite can see.
+#
+# AND NON-FATAL, for the reason install.sh already gives at its neighbour
+# (install.sh:125-128, verbatim): "Never fatal: a refusal here (a reserved name
+# in a tampered state file) must not stop the account deletion below, which is
+# the whole point." install.sh runs under `set -euo pipefail` (line 34), and
+# unpush_dconf_environment returns non-zero for a guard refusal or a manager that
+# is simply not running any more — neither of which may abort an uninstall
+# before userdel and the state file. Wording is deliberately not asserted; `||
+# true` and `|| :` are refused because a silently swallowed failure leaves the
+# operator with no record that the account's dconf is still pointing at nothing.
+test_install_sh_unpushes_dconf_environment_on_uninstall() {
+  local sh ustart removed unpushed stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall call site: no 'uninstall()' definition in install.sh"; return 0; }
+  removed="$(first_code_line "$sh" '(^|[^[:alnum:]_])remove_no_idle_lock' "$ustart")"
+  [ -n "$removed" ] || { fail "uninstall call site: no 'remove_no_idle_lock' call inside uninstall()"; return 0; }
+
+  unpushed="$(first_code_line "$sh" 'unpush_dconf_environment')"
+  [ -n "$unpushed" ] || {
+    fail "uninstall call site: install.sh never calls unpush_dconf_environment (uninstall() at line $ustart, remove_no_idle_lock at line $removed) — the helper is orphaned and the defect stands: --uninstall deletes /etc/dconf/profile/<name> and leaves DCONF_PROFILE=<name> set in the account's live user manager, so dconf falls to the null configuration and that account can neither read nor write any gsettings key until it logs out"
+    return 0; }
+
+  [ "$ustart" -lt "$unpushed" ] || \
+    fail "uninstall call site: unpush_dconf_environment (line $unpushed) is above uninstall() (line $ustart) — it must be called from the uninstall path, not the install path"
+  [ "$unpushed" -lt "$removed" ] || \
+    fail "uninstall call site: unpush_dconf_environment (line $unpushed) must come BEFORE remove_no_idle_lock (line $removed) — deleting /etc/dconf/profile/<name> first leaves the live manager pointing at an absent profile for the rest of the uninstall, which is the null-configuration state this call exists to prevent"
+
+  stmt="$(logical_statement_at "$sh" "$unpushed")"
+  [ -n "$stmt" ] || { fail "uninstall call site: could not read the statement at install.sh:$unpushed"; return 0; }
+
+  [[ "$stmt" == *HOST_ACCOUNT* || "$stmt" == *target_name* ]] || \
+    fail "uninstall call site: install.sh:$unpushed must pass the recorded account name (\$HOST_ACCOUNT/\$target_name). Statement was: [$stmt]"
+  [[ "$stmt" == *HOST_UID* || "$stmt" == *target_uid* ]] || \
+    fail "uninstall call site: install.sh:$unpushed must pass that account's UID (\$target_uid, install.sh:74) — the UID is what builds XDG_RUNTIME_DIR=/run/user/<uid> for the running manager, and \$target_home one line up would build /run/user//home/<name>. Statement was: [$stmt]"
+
+  [[ "$stmt" =~ \|\|[[:space:]]*echo[[:space:]]+[^[:space:]] ]] || \
+    fail "uninstall call site: install.sh:$unpushed must handle an unpush_dconf_environment failure with '|| echo <warning>' — unhandled, set -euo pipefail (install.sh:34) aborts the uninstall before the AccountsService revert, userdel and the state file, exactly what install.sh:125-128 already says must not happen. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" \
+    "uninstall call site: install.sh:$unpushed swallows a failed unpush — the account's manager keeps a dangling DCONF_PROFILE and the log never says so"
+  assert_not_contains "$stmt" "|| :" \
+    "uninstall call site: install.sh:$unpushed swallows a failed unpush — the account's manager keeps a dangling DCONF_PROFILE and the log never says so"
+  [[ "$stmt" =~ (^|[^[:alnum:]_])(die|exit)([^[:alnum:]_]|$) ]] && \
+    fail "uninstall call site: install.sh:$unpushed must NOT abort the uninstall when the unpush fails — the account deletion and state-file cleanup below are the whole point of --uninstall. Statement was: [$stmt]"
+
+  return 0
+}
+
+# --- issue #26, breaker lap 2: the unpush must beat disable-linger ------------
+#
+# The test above pins the unpush to BEFORE remove_no_idle_lock, and that bound
+# holds either way — so it stays green while the call sits (install.sh:132) AFTER
+# `loginctl disable-linger` (install.sh:122), which is the defect. From
+# factory/CHECKPOINT.md row 6, verbatim:
+#
+#   "`unpush_dconf_environment` call (install.sh:132) sits AFTER `loginctl
+#    disable-linger` (install.sh:122) — in the exact reused-account/same-boot/
+#    no-graphical-session case the fix targets, disable-linger is the only thing
+#    keeping user@uid.service up and is NOT gated on CREATED_ACCOUNT, so the
+#    manager (and /run/user/<uid>) is already gone by line 132: the unpush either
+#    fails with a false-alarm warning on a normal uninstall, or races a dying
+#    manager. Move the unpush call to before disable-linger (near the other
+#    user-manager calls at lines 87-100)."
+#
+# Why that is a mechanism and not a preference: with CREATED_ACCOUNT=0 the
+# account-deleting branch (install.sh:146) never runs, so
+# uninstall_host_account's own `loginctl terminate-user` (install-lib.sh:934) is
+# never reached — uninstall()'s unconditional disable-linger is the one and only
+# thing that stops user@<uid>.service, and systemd tears /run/user/<uid> down
+# with it. unpush_dconf_environment talks to that manager over
+# XDG_RUNTIME_DIR=/run/user/<uid> (install-lib.sh:811), so after the linger drop
+# there is nothing left to unset.
+#
+# WHICH disable-linger: the one in install.sh's own uninstall(), found from the
+# `uninstall()` definition and required to be above that function's closing
+# brace. install-lib.sh:930 has its own `run loginctl disable-linger` inside
+# uninstall_host_account — a different file, never scanned here, and gated behind
+# CREATED_ACCOUNT=1 anyway, so it is deliberately NOT the anchor.
+#
+# The lower bound (after $target_uid is assigned) is here because the fix moves
+# this call EARLIER: past install.sh:74/81 it would expand to
+# XDG_RUNTIME_DIR=/run/user/ against an empty account name. Only enforced when
+# the statement actually names those locals, so a rewrite onto $HOST_ACCOUNT/
+# $HOST_UID is not falsely failed.
+test_install_sh_unpushes_dconf_environment_before_disabling_linger() {
+  local sh ustart uend linger unpushed stmt uidset
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "linger ordering: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "linger ordering: could not find the end of uninstall() in install.sh"; return 0; }
+
+  linger="$(first_code_line "$sh" 'loginctl disable-linger' "$ustart")"
+  [ -n "$linger" ] || { fail "linger ordering: no 'loginctl disable-linger' call after uninstall() (line $ustart) in install.sh"; return 0; }
+  [ "$linger" -lt "$uend" ] || {
+    fail "linger ordering: the 'loginctl disable-linger' found at line $linger is outside uninstall() (which ends at line $uend) — this test anchors on the one uninstall() runs itself, not install-lib.sh's"
+    return 0; }
+
+  # From the top of the file, so a call placed too early reads as too early
+  # rather than as missing.
+  unpushed="$(first_code_line "$sh" '(^|[^[:alnum:]_])unpush_dconf_environment')"
+  [ -n "$unpushed" ] || {
+    fail "linger ordering: install.sh never calls unpush_dconf_environment (uninstall() at line $ustart, disable-linger at line $linger)"
+    return 0; }
+
+  [ "$ustart" -lt "$unpushed" ] || {
+    fail "linger ordering: unpush_dconf_environment (line $unpushed) is above uninstall() (line $ustart) — it must be called from the uninstall path"
+    return 0; }
+
+  [ "$unpushed" -lt "$linger" ] || \
+    fail "linger ordering: unpush_dconf_environment (line $unpushed) must come BEFORE 'loginctl disable-linger' (line $linger), and today it comes after. On a reused account (CREATED_ACCOUNT=0, uninstalled in the same boot with no session ever started) that disable-linger is the only thing stopping user@<uid>.service — uninstall_host_account's terminate-user never runs — so by line $unpushed the manager and /run/user/<uid> are gone and the unpush can only warn about a normal uninstall or race a dying manager"
+
+  stmt="$(logical_statement_at "$sh" "$unpushed")"
+  [ -n "$stmt" ] || { fail "linger ordering: could not read the statement at install.sh:$unpushed"; return 0; }
+
+  # The last `target_uid=` assignment inside uninstall() above the linger drop
+  # (install.sh:74 and :81 today — the two branches of the HOST_ACCOUNT test).
+  uidset="$(awk -v start="$ustart" -v end="$linger" \
+    'NR > start && NR < end && /target_uid=/ && $0 !~ /^[[:space:]]*#/ { n = NR } END { if (n) print n }' "$sh")"
+  if [ -n "$uidset" ] && { [[ "$stmt" == *target_uid* ]] || [[ "$stmt" == *target_name* ]]; }; then
+    [ "$uidset" -lt "$unpushed" ] || \
+      fail "linger ordering: unpush_dconf_environment (line $unpushed) uses \$target_uid/\$target_name but is above the last assignment of \$target_uid (line $uidset) — moving the call up past install.sh:74/81 makes it run as XDG_RUNTIME_DIR=/run/user/ for an empty account name. Statement was: [$stmt]"
+  fi
+
+  return 0
+}
+
+# --- issue #25, slice 2: the uninstall_host_account call site's UID -----------
+#
+# The three slice 2 tests at lines 2934+ drive uninstall_host_account directly and
+# hand it the uid themselves, so they stay green while install.sh keeps making the
+# TWO-argument call it makes today (install.sh:172,
+# `if uninstall_host_account "$HOST_ACCOUNT" "$protect_arg"; then`). That
+# combination is not merely an unfixed issue #25 — it is strictly WORSE than the
+# race it replaces, which is why this is asserted separately:
+#
+#   uid absent -> the wait probes `user@.service`, a template unit with no
+#   instance. Measured on this box (systemd 259, 2026-08-01):
+#
+#       $ systemctl is-active 'user@.service'
+#       Failed to retrieve unit state: Unit name user@.service is neither a
+#       valid invocation ID nor unit name.          (stderr, exit 1, no stdout)
+#
+#   Nothing on stdout, so the state string is never "inactive" or "failed" and
+#   the poll can never converge: EVERY --uninstall then burns the full timeout,
+#   skips `userdel -r` (slice 2's own contract), and reports a failure. The
+#   account, its home, its linger and its dconf db survive every retry forever,
+#   on boxes where nothing was ever wedged. Issue #25 at least deleted the
+#   account most of the time.
+#
+# WHAT IS REQUIRED. The uid of the account being removed reaches the function.
+# $target_uid is already in scope at that call site — install.sh:74 assigns it
+# `target_uid="$HOST_UID"` off install.state inside uninstall(), and the same
+# variable is already handed to unpush_dconf_environment "$HOST_ACCOUNT"
+# "$target_uid" (install.sh:115) a few lines up, which is the precedent this
+# follows exactly.
+#
+# ASSERTED AS THIRD ARGUMENT, deliberately: <name> and <protected_user> are the
+# two arguments install-lib.sh's uninstall_host_account already documents and
+# every existing caller and test passes, so a uid can only be added after them.
+# Both the recorded-account and the local-alias spellings are accepted
+# ($HOST_ACCOUNT/$target_name, $target_uid/$HOST_UID) — the same latitude the
+# unpush call-site test above gives — because which of the pair is used is
+# layout, and only the ARGUMENT POSITION is contract.
+#
+# install.sh cannot be executed here (root, real GDM, real systemd, top-level
+# work on sourcing), so this is a source-text assertion, the technique every
+# call-site test in this file uses.
+test_install_sh_passes_the_uid_to_uninstall_host_account() {
+  local sh ustart uend called stmt uidset rest
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uid call site: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "uid call site: could not find the end of uninstall() in install.sh"; return 0; }
+
+  # Comment lines are skipped by first_code_line, so uninstall()'s own prose
+  # about "uninstall_host_account's terminate-user" (install.sh:104) is not
+  # mistaken for the call.
+  called="$(first_code_line "$sh" '(^|[^[:alnum:]_])uninstall_host_account' "$ustart")"
+  [ -n "$called" ] || {
+    fail "uid call site: uninstall() (line $ustart) never calls uninstall_host_account — nothing deletes the display-host account"
+    return 0; }
+  [ "$called" -lt "$uend" ] || {
+    fail "uid call site: the uninstall_host_account call at line $called is outside uninstall() (which ends at line $uend)"
+    return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$called")"
+  [ -n "$stmt" ] || { fail "uid call site: could not read the statement at install.sh:$called"; return 0; }
+
+  [[ "$stmt" == *target_uid* || "$stmt" == *HOST_UID* ]] || \
+    fail "uid call site: install.sh:$called must pass the account's UID (\$target_uid, install.sh:74) to uninstall_host_account — without it the manager wait probes 'user@.service', which systemd refuses ('neither a valid invocation ID nor unit name', no state on stdout), so the poll never converges, every --uninstall times out and skips userdel -r, and the account can never be removed at all. Statement was: [$stmt]"
+
+  # And in the THIRD argument position: two whitespace-separated tokens
+  # (<name> <protected_user>) stand between the function name and the uid.
+  [[ "$stmt" =~ uninstall_host_account[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]*(target_uid|HOST_UID) ]] || \
+    fail "uid call site: install.sh:$called must pass the UID as the THIRD argument, after <name> and <protected_user> — those two are what install-lib.sh's uninstall_host_account already documents and what every other caller passes, so a uid in any earlier position arrives as the account name or the protected user. Statement was: [$stmt]"
+
+  # The uid must be assigned before it is used: install.sh:74/81 are the two
+  # branches of uninstall()'s `if [ -n "$HOST_ACCOUNT" ]`, and a call moved above
+  # them would pass the empty string — the same failure as omitting it. Only
+  # enforced when the statement actually names the local, so a rewrite onto
+  # $HOST_UID (set by read_install_state at the top of uninstall()) is not
+  # falsely failed.
+  uidset="$(awk -v start="$ustart" -v end="$called" \
+    'NR > start && NR < end && /target_uid=/ && $0 !~ /^[[:space:]]*#/ { n = NR } END { if (n) print n }' "$sh")"
+  if [[ "$stmt" == *target_uid* ]]; then
+    [ -n "$uidset" ] || fail \
+      "uid call site: install.sh:$called uses \$target_uid but nothing assigns it between uninstall() (line $ustart) and the call — under set -u that aborts the uninstall, and unset it would probe user@.service"
+  fi
+
+  # Green today (install.sh:172 is `if uninstall_host_account ...; then`), and
+  # here for the regression: slice 2 makes a non-zero return NORMAL on a wedged
+  # box, and install.sh runs under `set -euo pipefail` (line 34). A bare call
+  # would turn the skipped userdel into an aborted uninstall that never reaches
+  # the state-file branch below it, which is exactly the "non-fatal" half of the
+  # slice 2 contract.
+  rest="$stmt"
+  [[ "$rest" =~ (^|[[:space:]])if[[:space:]] ]] || [[ "$rest" == *"||"* ]] || \
+    fail "uid call site: install.sh:$called must keep handling uninstall_host_account's status ('if ...; then' or '|| ...') — a timeout out of the manager wait returns non-zero by design, and unhandled under set -euo pipefail that aborts the uninstall before the install.state branch that preserves the file for a retry. Statement was: [$stmt]"
+
+  return 0
+}
+
+# --- issue #22: the uninstall() call site -------------------------------------
+#
+# The two disable_autologin tests above can be fully green while install.sh
+# still calls it bare (`disable_autologin "$conf"`, install.sh:134), and a bare
+# call is strictly worse once the return code becomes meaningful: install.sh
+# runs under `set -euo pipefail` (line 34) and uninstall() is invoked as the
+# command after the final `&&` (`[ "$ACTION" = "--uninstall" ] && uninstall`,
+# line 187), where set -e still applies — so a failed strip would abort the
+# whole uninstall at line 134, before disable-linger, the AccountsService
+# revert, userdel and the state file. That is the outcome install.sh's own
+# neighbouring comment already forbids (lines 142-144: "Never fatal ... must not
+# stop the account deletion below, which is the whole point").
+#
+# WHAT IS REQUIRED — factory/CHECKPOINT.md, issue #22 seams, verbatim:
+#   "install.sh call site (uninstall(), ~line 128-136): branches on
+#    disable_autologin's now-meaningful return code"
+# So: handled, and handled non-fatally. `&&` alone does not qualify — the status
+# of `disable_autologin ... && echo ...` is the function's own when it fails, so
+# set -e still kills the uninstall; only an `if` or a `||` branch absorbs it.
+# Structure only, exactly as the unpush/wait_for_user_bus call-site tests above:
+# the message wording is NOT asserted here. The CHECKPOINT records that the
+# "(backup: $conf.dreamconnect.bak)" text at install.sh:135 "must change" once
+# the file is deleted on success, but not what it must become, and the same
+# substring is legitimate in a FAILURE branch (where the backup really is still
+# there) — so pinning it textually would fail correct implementations. Left to
+# the builder deliberately.
+
+# --- issue #28: the enablement symlink --uninstall leaves dangling ------------
+#
+# THE DEFECT — factory/CHECKPOINT.md, issue #28 root cause, verbatim:
+#   "`systemctl --user disable --now dreamconnect-daemon.service` (line 87)
+#    bundles a live stop into the call via `--now`, which needs a reachable bus.
+#    When the host account's user manager isn't up (never initialized, or box
+#    rebooted since last login), the WHOLE invocation errors (not a partial
+#    no-op) and `2>/dev/null || true` swallows it -- so the on-disk enablement
+#    symlink is never removed, dangling after the unit file itself is deleted a
+#    few lines later."
+# And the owner-confirmed shape of the fix, from the same file:
+#   "remove the symlink directly and unconditionally, independent of whether the
+#    live systemctl call succeeded."
+#
+# WHICH SYMLINK — and this is where the written contract is WRONG. Issue #28's
+# suggested-fix text and CHECKPOINT.md's slice row both name
+# `.config/systemd/user/default.target.wants/dreamconnect-daemon.service`. This
+# repo's own unit does not go there. systemd/dreamconnect-daemon.service ends:
+#
+#     [Install]
+#     WantedBy=graphical-session.target
+#
+# and has done since it was first committed (447a2ca, 0fc6606, b0a1faa — every
+# revision in `git log --follow`). `systemctl enable` places the symlink in
+# <WantedBy>.wants/, so the path that actually exists on a box is
+# graphical-session.target.wants/. Measured on this machine, 2026-08-01, systemd
+# 259 (259.6-1.fc44), enabling THIS unit file offline into a scratch root:
+#
+#     $ systemctl --global --root=$R enable dreamconnect-daemon.service
+#     Created symlink '$R/etc/systemd/user/graphical-session.target.wants/
+#       dreamconnect-daemon.service' -> '/etc/systemd/user/dreamconnect-daemon.service'
+#
+# `default.target.wants/dreamconnect-daemon.service` has therefore never existed
+# on any install of this project: an `rm -f` aimed there removes nothing, and
+# issue #28 would stand with the suite green. So the expected directory is read
+# HERE off the unit's own `[Install] WantedBy=` rather than hard-coded — if that
+# line ever changes, the removal in uninstall() must change with it, and this
+# test says so instead of silently pinning a stale literal.
+#
+# THE FOUR BOUNDS, each load-bearing:
+#
+#   * INSIDE uninstall() — between the `uninstall()` definition and its closing
+#     brace. install.sh's install path (line 358) also names this unit; a removal
+#     that lands there is not an uninstall.
+#   * UNCONDITIONAL — not gated on the `systemctl --user disable --now` call at
+#     install.sh:87, whose failure is exactly the case this fix exists for. So:
+#     no `systemctl`/`$?` in the removal's own statement, no `if`/`elif` opened
+#     between the home guard and it, and the preceding code line must not end in
+#     `&&`, `||` or a backslash continuation that would chain it onto the live
+#     call. `if systemctl ... disable ...; then rm ...; fi` is the wrong fix.
+#   * BEFORE the unit-file `rm -f` — the reverse of the install order: the unit
+#     file is written first (install.sh:348-350), then `enable --now` creates the
+#     symlink pointing at it (install.sh:358). Undoing that order leaves the
+#     symlink pointing at a deleted target for the rest of the uninstall.
+#   * INSIDE THE SAME `valid_home_dir "$target_home"` BLOCK (install.sh:95-99),
+#     not a second guard of its own and not at top level. $target_home is passwd
+#     field 6 verbatim; empty (account deleted by hand before --uninstall) it
+#     points the rm at root's own /.config/systemd/user, which is precisely what
+#     install.sh:88-94 already says that guard is there to stop.
+#
+# install.sh cannot be executed here (root, real GDM, real systemd, top-level
+# work on sourcing — see this file's header), so this is a source-text assertion,
+# the technique every call-site test above uses.
+test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file() {
+  local sh unit wants targets t t_re line ustart uend guard symrm unitrm stmt boundary opener prev
+  sh="$HERE/install.sh"
+  unit="$HERE/systemd/dreamconnect-daemon.service"
+  assert_file_exists "$sh" "install.sh is present"
+  assert_file_exists "$unit" "the daemon unit is present"
+  { [ -f "$sh" ] && [ -f "$unit" ]; } || return 0
+
+  wants="$(awk -F'=' '/^[[:space:]]*WantedBy[[:space:]]*=/ {
+             n = split($2, a, /[[:space:]]+/)
+             for (i = 1; i <= n; i++) if (a[i] != "") { print a[i]; exit }
+           }' "$unit")"
+  [ -n "$wants" ] || {
+    fail "enablement symlink: systemd/dreamconnect-daemon.service has no '[Install] WantedBy=' line, so there is no telling which <target>.wants/ directory 'systemctl --user enable' populates — this test cannot say what uninstall() must remove"
+    return 0; }
+  # WantedBy in the template is the @SESSION_UNIT@ placeholder: which target
+  # `systemctl --user enable` populates is decided at install time
+  # (graphical-session.target for an attended install, the backstage unit
+  # otherwise). Pinning the placeholder would assert a path that never exists on
+  # disk, so read the concrete values install.sh assigns instead -- and require
+  # EVERY one of them, because uninstall is not told which mode this box used.
+  if [ "$wants" = "@SESSION_UNIT@" ]; then
+    targets="$(awk -F'"' '/^[[:space:]]*SESSION_UNIT=/ { print $2 }' "$sh" | sort -u)"
+    [ -n "$targets" ] || {
+      fail "enablement symlink: systemd/dreamconnect-daemon.service templates 'WantedBy=@SESSION_UNIT@' but install.sh assigns no SESSION_UNIT — there is no telling which <target>.wants/ directory uninstall() must clear"
+      return 0; }
+  else
+    targets="$wants"
+  fi
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "enablement symlink: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "enablement symlink: could not find the end of uninstall() in install.sh"; return 0; }
+
+  # Backslashes doubled for the same `awk -v` reason as $wants_re below. The
+  # trailing 'user/dreamconnect-daemon' cannot match the symlink path, whose
+  # <target>.wants/ component sits between the two.
+  unitrm="$(first_code_line "$sh" 'rm[[:space:]]+-f.*\\.config/systemd/user/dreamconnect-daemon\\.service' "$ustart")"
+  [ -n "$unitrm" ] || {
+    fail "enablement symlink: uninstall() (line $ustart) no longer removes \$target_home/.config/systemd/user/dreamconnect-daemon.service — this test anchors the symlink removal on that neighbour"
+    return 0; }
+
+  guard="$(first_code_line "$sh" 'if[[:space:]]+valid_home_dir' "$ustart")"
+  [ -n "$guard" ] || {
+    fail "enablement symlink: uninstall() (line $ustart) has no 'if valid_home_dir ...' guard around the removals under \$target_home"
+    return 0; }
+
+  # Dots are the only regex metacharacter in a unit/target name; escape them so
+  # 'graphical-session.target.wants' cannot match 'graphical-sessionXtargetYwants'.
+  # Doubled, because first_code_line passes the pattern through `awk -v`, which
+  # processes escape sequences in the assignment: `\\.` there arrives as `\.`.
+  symrm=""
+  for t in $targets; do
+    t_re="$(printf '%s.wants/dreamconnect-daemon.service' "$t" | sed 's/\./\\\\./g')"
+    line="$(first_code_line "$sh" "$t_re" "$ustart")"
+    [ -n "$line" ] && [ "$line" -lt "$uend" ] || {
+      fail "enablement symlink: uninstall() (lines $ustart-$uend) never removes \"\$target_home/.config/systemd/user/$t.wants/dreamconnect-daemon.service\" (found at line ${line:-none}). install.sh's 'systemctl --user disable --now ... 2>/dev/null || true' is what would normally remove it: on a host account whose user manager is not up, that whole call errors and the '|| true' swallows it, so the enablement symlink survives while the unit file it points at is deleted at line $unitrm — issue #28. The removal must not depend on that call having worked"
+      return 0; }
+    # The earliest of them anchors the ordering checks below.
+    if [ -z "$symrm" ] || [ "$line" -lt "$symrm" ]; then symrm="$line"; fi
+  done
+
+  [ "$guard" -lt "$symrm" ] || \
+    fail "enablement symlink: the removal at line $symrm is above the 'if valid_home_dir \$target_home' guard (line $guard) — \$target_home is passwd field 6 verbatim and is empty for an account deleted by hand before --uninstall, which points the rm at root's own /.config/systemd/user (install.sh:88-94)"
+  [ "$symrm" -lt "$unitrm" ] || \
+    fail "enablement symlink: the removal at line $symrm must come BEFORE the unit-file 'rm -f' (line $unitrm) — install writes the unit file first and lets 'enable --now' create the symlink pointing at it, so uninstall reverses that: symlink, then the file it names"
+
+  boundary="$(awk -v a="$guard" -v b="$unitrm" \
+    'NR > a && NR < b && $0 ~ /^[[:space:]]*(fi|else|elif)([[:space:];]|$)/ { print NR; exit }' "$sh")"
+  [ -z "$boundary" ] || \
+    fail "enablement symlink: line $boundary closes or branches the 'if valid_home_dir' block (line $guard) before the unit-file removal (line $unitrm) — both removals belong in that one guard's then-branch, not in a second guard of their own"
+
+  opener="$(awk -v a="$guard" -v b="$symrm" \
+    'NR > a && NR < b && $0 !~ /^[[:space:]]*#/ && $0 ~ /^[[:space:]]*(if|elif)([[:space:]]|$)/ { print NR; exit }' "$sh")"
+  [ -z "$opener" ] || \
+    fail "enablement symlink: line $opener opens a conditional between the home guard (line $guard) and the removal (line $symrm) — the symlink removal must run whether or not the live 'systemctl --user disable --now' at install.sh:87 succeeded, and that failure is the whole of issue #28"
+
+  prev="$(awk -v n="$symrm" 'NR < n && $0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*#/ { p = $0 } END { print p }' "$sh")"
+  [[ "$prev" =~ (\&\&|\|\||\\)[[:space:]]*$ ]] && \
+    fail "enablement symlink: the code line above the removal (line $symrm) ends in '&&', '||' or a continuation, so the removal is chained onto it rather than run unconditionally. Preceding line was: [$prev]"
+
+  stmt="$(logical_statement_at "$sh" "$symrm")"
+  [ -n "$stmt" ] || { fail "enablement symlink: could not read the statement at install.sh:$symrm"; return 0; }
+
+  [[ "$stmt" =~ (^|[^[:alnum:]_])rm([[:space:]]|$) ]] || \
+    fail "enablement symlink: install.sh:$symrm names a <target>.wants/dreamconnect-daemon.service but does not 'rm' it. Statement was: [$stmt]"
+  assert_contains "$stmt" "target_home" \
+    "enablement symlink: install.sh:$symrm must remove the symlink under \$target_home (install.sh:75/82 — the account being uninstalled), the same variable the unit-file removal at line $unitrm uses"
+  assert_contains "$stmt" ".config/systemd/user/" \
+    "enablement symlink: install.sh:$symrm must remove the symlink from the account's own unit directory .config/systemd/user/, where install.sh:347-358 put it"
+  assert_not_contains "$stmt" "systemctl" \
+    "enablement symlink: install.sh:$symrm ties the removal to a systemctl invocation — the case issue #28 is about is precisely the one where systemctl cannot reach the account's bus at all"
+  assert_not_contains "$stmt" '$?' \
+    "enablement symlink: install.sh:$symrm gates the removal on a previous command's exit status — it must be unconditional"
+
+  return 0
 }
 
 # --- runner ------------------------------------------------------------------
@@ -6705,6 +9012,15 @@ REGISTER_UNIT="$HERE/systemd/dreamconnect-register@.service"
 # Sourced if it exists; every test below guards, so a missing script fails each
 # of them by name instead of exploding once at startup.
 [ -f "$REGISTER_SH" ] && . "$REGISTER_SH"
+# dreamconnect-register.sh:34 prefers "$INSTALL_DIR/install-lib.sh" -- the
+# INSTALLED /opt/dreamconnect copy -- over the checkout's, so the line above
+# silently replaced every library function this suite exists to test with
+# whatever the box last installed. On this machine that copy is weeks old and
+# has neither wait_for_user_manager_down nor the compiled-db removal, and the
+# tests for both passed anyway, against code that is not in this tree. Put the
+# checkout's library back. Order matters: register.sh defines its own
+# register_* functions AFTER it sources the library, so they survive this.
+. "$LIB"
 
 require_register_script() {  # label
   local fn
@@ -7393,6 +9709,12 @@ for CURRENT in \
   test_configure_no_idle_lock_points_the_session_at_the_profile \
   test_configure_no_idle_lock_skips_gnome_initial_setup \
   test_configure_no_idle_lock_refuses_reserved_dconf_names \
+  test_push_dconf_environment_invokes_set_environment_with_the_profile_name \
+  test_push_dconf_environment_refuses_reserved_dconf_names \
+  test_push_dconf_environment_refuses_malformed_account_names \
+  test_unpush_dconf_environment_unsets_the_profile_from_the_running_manager \
+  test_unpush_dconf_environment_refuses_reserved_and_malformed_names \
+  test_push_and_unpush_dconf_environment_gate_the_invocation_behind_run \
   test_configure_no_idle_lock_is_byte_identical_on_a_second_run \
   test_remove_no_idle_lock_reverts_everything_configure_wrote \
   test_remove_no_idle_lock_is_a_no_op_when_nothing_was_configured \
@@ -7411,6 +9733,9 @@ for CURRENT in \
   test_remove_no_idle_lock_restores_backed_up_dconf_system_files \
   test_remove_no_idle_lock_removes_fresh_dconf_system_files_it_created \
   test_no_idle_lock_backs_up_each_dconf_system_file_independently \
+  test_remove_no_idle_lock_removes_the_compiled_db_it_owned_outright \
+  test_remove_no_idle_lock_leaves_the_compiled_db_for_dconf_update_when_restoring_a_backup \
+  test_remove_no_idle_lock_refuses_reserved_names_before_touching_the_compiled_db \
   test_library_defines_uninstall_host_account \
   test_uninstall_host_account_removes_a_removable_account \
   test_uninstall_host_account_runs_nothing_when_the_gate_refuses \
@@ -7420,6 +9745,9 @@ for CURRENT in \
   test_uninstall_host_account_survives_set_e_when_loginctl_fails \
   test_uninstall_host_account_treats_a_hand_deleted_account_as_already_removed \
   test_uninstall_host_account_still_refuses_an_account_that_is_really_there \
+  test_uninstall_host_account_waits_for_the_user_manager_between_terminate_user_and_userdel \
+  test_uninstall_host_account_skips_userdel_when_the_manager_never_goes_down \
+  test_uninstall_host_account_reports_a_wait_timeout_without_aborting_the_uninstall \
   test_remove_no_idle_lock_refuses_reserved_dconf_names \
   test_library_defines_the_name_and_marker_functions \
   test_valid_account_name_accepts_ordinary_names \
@@ -7484,6 +9812,23 @@ for CURRENT in \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_not_valid_octal \
   test_wait_for_user_bus_refuses_a_leading_zero_timeout_that_is_valid_octal \
   test_wait_for_user_bus_refuses_a_timeout_just_past_the_cap \
+  test_library_defines_wait_for_user_manager_down \
+  test_wait_for_user_manager_down_returns_zero_when_already_inactive \
+  test_wait_for_user_manager_down_treats_a_failed_or_absent_unit_as_down \
+  test_wait_for_user_manager_down_converges_while_polling \
+  test_wait_for_user_manager_down_keeps_polling_through_a_deactivating_state \
+  test_wait_for_user_manager_down_never_reports_a_deactivating_manager_as_down \
+  test_wait_for_user_manager_down_times_out_when_still_active \
+  test_wait_for_user_manager_down_returns_zero_immediately_when_dry \
+  test_wait_for_user_manager_down_refuses_a_non_numeric_timeout \
+  test_wait_for_user_manager_down_refuses_a_timeout_beyond_the_86400_second_cap \
+  test_wait_for_user_manager_down_accepts_the_documented_maximum_timeout_of_86400 \
+  test_wait_for_user_manager_down_refuses_a_leading_zero_timeout_that_is_not_valid_octal \
+  test_wait_for_user_manager_down_refuses_a_leading_zero_timeout_that_is_valid_octal \
+  test_wait_for_user_manager_down_refuses_a_timeout_just_past_the_cap \
+  test_wait_for_user_manager_down_refuses_an_empty_uid \
+  test_wait_for_user_manager_down_refuses_a_non_numeric_uid \
+  test_wait_for_user_manager_down_refuses_an_empty_uid_even_when_dry \
   test_install_sh_waits_for_the_user_bus_before_the_first_systemctl_user_call \
   test_install_sh_aborts_the_install_when_the_user_bus_never_comes_up \
   test_wait_for_user_bus_reports_a_missing_python3_instead_of_a_timeout \
@@ -7531,9 +9876,22 @@ for CURRENT in \
   test_register_label_survives_a_crlf_state_file \
   test_reclaim_stale_shm_frame_unlinks_a_root_owned_file_under_a_sticky_bit_dir \
   test_reclaim_stale_shm_frame_leaves_a_file_already_owned_by_the_target_uid_untouched \
-  test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable
+  test_install_sh_reclaims_the_stale_shm_frame_before_sc_restart_and_daemon_enable \
+  test_install_sh_pushes_dconf_environment_after_configure_no_idle_lock \
+  test_install_sh_warns_but_does_not_swallow_a_failed_dconf_environment_push \
+  test_install_sh_unpushes_dconf_environment_on_uninstall \
+  test_install_sh_unpushes_dconf_environment_before_disabling_linger \
+  test_install_sh_passes_the_uid_to_uninstall_host_account \
+  test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file
 do
   before=$FAILURES
+  # bash caches where it found a command, and clears that cache only when PATH is
+  # assigned IN THE SHELL -- not when PATH arrives as a prefix on a function call,
+  # which is how every shimmed helper in this file overrides it. So a test that
+  # ran the real systemctl/dconf/userdel leaves it hashed, and the next test's
+  # shim is bypassed in silence: the assertions then pass or fail against the
+  # host's own tools. Clear the table between tests so a shim is always reached.
+  hash -r
   "$CURRENT"
   if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
 done
