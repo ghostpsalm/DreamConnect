@@ -1,0 +1,130 @@
+{
+  "recorded_at": "2026-07-31T13:37:39Z",
+  "repo": "keyboard-tables",
+  "branch": "agent/keyboard-tables",
+  "base": "2f833fcc264a504ee52356424152a705ca6ec804",
+  "window_start": "2026-07-31T23:16:48+10:00",
+  "head": "df8f86742d9ae3939b56d6edc5132b90931e570e",
+  "issue": {
+    "number": 38,
+    "state": "OPEN",
+    "title": "Make testAwtEvdevTablesDisjoint total instead of a bounded scan",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/38"
+  },
+  "commits": [
+    {
+      "sha": "df8f86742d9ae3939b56d6edc5132b90931e570e",
+      "subject": "Boot tests: make the KEY/KSYM disjointness guard total, not a bounded scan"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "1 file changed, 49 insertions(+), 22 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 106,
+      "output_tokens": 41123,
+      "cache_read_input_tokens": 10758143,
+      "cache_creation_input_tokens": 86860
+    },
+    "subagents": {
+      "input_tokens": 10,
+      "output_tokens": 8336,
+      "cache_read_input_tokens": 267908,
+      "cache_creation_input_tokens": 6452
+    },
+    "subagent_spawns": 5,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 2351,
+        "cache_read_input_tokens": 58565,
+        "total_tokens": 61390,
+        "duration_ms": 145630,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 2335,
+        "cache_read_input_tokens": 93586,
+        "total_tokens": 101415,
+        "duration_ms": 413390,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 1316,
+        "cache_read_input_tokens": 38865,
+        "total_tokens": 40312,
+        "duration_ms": 120767,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "breaker": {
+        "spawns": 1,
+        "output_tokens": 1487,
+        "cache_read_input_tokens": 51238,
+        "total_tokens": 52842,
+        "duration_ms": 192255,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 847,
+        "cache_read_input_tokens": 25654,
+        "total_tokens": 26747,
+        "duration_ms": 70206,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      }
+    },
+    "usage_blocks": 54,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "aa15d982-c0a4-4726-8bac-0bce046bb5e2.jsonl",
+        "usage_blocks": 54
+      }
+    ],
+    "agent_wall_clock_ms": 942248,
+    "first_activity": "2026-07-31T13:16:48.562000+00:00",
+    "last_activity": "2026-07-31T13:37:31.032000+00:00",
+    "notification_tokens": 0,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 36",
+    "/submit",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "ask: This edits a version number.": 32,
+    "ask: This would publish a GitHub release, which ships to real devices.": 11,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 11,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 11,
+    "block: recursive/forced delete": 58,
+    "block: editing the deployed factory directly": 70,
+    "block: writing to a file the harness owns": 10,
+    "block: touching a secret/credential file": 50,
+    "block: force push (never rewrite published history)": 10,
+    "block: editing an existing migration": 10,
+    "block: hard reset discards work": 10
+  },
+  "status": "done",
+  "note": "Breaker surfaced a pre-existing, unrelated harness masking pattern (unhandled test-method exceptions abort run-tests.sh under set -e) -- filed as #41, not fixed here since it's orthogonal and predates this diff.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "1"
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "recorded_at": "2026-07-31T13:15:58Z",
+  "repo": "keyboard-tables",
+  "branch": "agent/keyboard-tables",
+  "base": "fd474176ac2f707c6fdae00c24e1531f5f1c6b3a",
+  "window_start": "2026-07-31T21:21:10+10:00",
+  "head": "800eeabb9f80252b22efc5e15255b7655a5d4ffe",
+  "issue": {
+    "number": 36,
+    "state": "OPEN",
+    "title": "Keyboard: decide the fate of fallbackKeysym and the ~86 silently-dropped vks",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/36"
+  },
+  "commits": [
+    {
+      "sha": "800eeabb9f80252b22efc5e15255b7655a5d4ffe",
+      "subject": "Keyboard: delete fallbackKeysym, map 17 of the 86 dropped vks, contract the rest"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "5 files changed, 422 insertions(+), 112 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 366,
+      "output_tokens": 129667,
+      "cache_read_input_tokens": 19383431,
+      "cache_creation_input_tokens": 402756
+    },
+    "subagents": {
+      "input_tokens": 32,
+      "output_tokens": 28102,
+      "cache_read_input_tokens": 881576,
+      "cache_creation_input_tokens": 12278
+    },
+    "subagent_spawns": 16,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 3431,
+        "cache_read_input_tokens": 73260,
+        "total_tokens": 76947,
+        "duration_ms": 185408,
+        "models": [
+          "claude-fable-5"
+        ]
+      },
+      "oracle": {
+        "spawns": 4,
+        "output_tokens": 10081,
+        "cache_read_input_tokens": 266403,
+        "total_tokens": 280724,
+        "duration_ms": 1057619,
+        "models": [
+          "claude-opus-5",
+          "claude-sonnet-5"
+        ]
+      },
+      "builder": {
+        "spawns": 4,
+        "output_tokens": 3556,
+        "cache_read_input_tokens": 169980,
+        "total_tokens": 176924,
+        "duration_ms": 646740,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "seraph": {
+        "spawns": 4,
+        "output_tokens": 6554,
+        "cache_read_input_tokens": 201703,
+        "total_tokens": 210585,
+        "duration_ms": 638471,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "breaker": {
+        "spawns": 2,
+        "output_tokens": 3649,
+        "cache_read_input_tokens": 126158,
+        "total_tokens": 131070,
+        "duration_ms": 315049,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      },
+      "reviewer": {
+        "spawns": 1,
+        "output_tokens": 831,
+        "cache_read_input_tokens": 44072,
+        "total_tokens": 45738,
+        "duration_ms": 66692,
+        "models": [
+          "claude-sonnet-5"
+        ]
+      }
+    },
+    "usage_blocks": 185,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "aa15d982-c0a4-4726-8bac-0bce046bb5e2.jsonl",
+        "usage_blocks": 185
+      }
+    ],
+    "agent_wall_clock_ms": 2909979,
+    "first_activity": "2026-07-31T11:59:43.628000+00:00",
+    "last_activity": "2026-07-31T13:15:49.524000+00:00",
+    "notification_tokens": 0,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 36",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "block: recursive/forced delete": 506,
+    "ask: This edits a version number.": 283,
+    "ask: This would publish a GitHub release, which ships to real devices.": 92,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 92,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 92,
+    "block: editing the deployed factory directly": 644,
+    "block: writing to a file the harness owns": 92,
+    "block: touching a secret/credential file": 467,
+    "block: force push (never rewrite published history)": 92,
+    "block: editing an existing migration": 92,
+    "block: hard reset discards work": 99
+  },
+  "status": "done",
+  "note": "Breaker checked live-guest Mutter behavior for KP-arrow/plain-arrow press-release mismatch; unprobed, no oracle available (same class of gap already flagged in #19's hazard doc). VK_SEPARATOR layout-independence gap split to #40, deliberately out of scope.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0"
+  }
+}

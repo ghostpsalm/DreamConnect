@@ -48,16 +48,14 @@ public final class DreamConnectRobotPeer implements RobotPeer {
 
     /**
      * Character keys go out as a layout-independent keysym (KS); modifiers and
-     * functional keys as an evdev keycode (K); anything left over falls back to
-     * a best-effort keysym. See {@link AwtEvdev} for why.
+     * functional keys as an evdev keycode (K). See {@link AwtEvdev} for why.
      */
     private void sendKey(int awtVk, int state) {
         int sym = AwtEvdev.keysym(awtVk);
         if (sym >= 0) { daemon.input("KS " + sym + " " + state); return; }
         int e = AwtEvdev.keycode(awtVk);
         if (e >= 0) { daemon.input("K " + e + " " + state); return; }
-        int fb = AwtEvdev.fallbackKeysym(awtVk);
-        if (fb >= 0) daemon.input("KS " + fb + " " + state);
+        // Unmapped vk: dropped deliberately, not a bug (see AwtEvdev's javadoc).
     }
 
     // ---- screen capture ----------------------------------------------------

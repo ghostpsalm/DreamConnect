@@ -64,19 +64,75 @@ the X11 one. The agent swaps that peer for its own, so one seam reroutes every
 
 #### Key routing
 
-An AWT virtual keycode takes the **first** of these four that applies:
+An AWT virtual keycode takes the **first** of these three that applies:
 
 1. **Character key** (letters, digits, punctuation) → `NotifyKeyboardKeysym`
    with the base X11 keysym, so the guest's own layout picks the keycode.
 2. **Physical/functional key** (modifiers, whitespace/control, navigation,
    function row, numpad, locks) → `NotifyKeyboardKeycode`, from the AWT vk →
    evdev keycode map.
-3. **Unmapped vk that lands in printable ASCII** → best-effort keysym from the
-   vk itself.
-4. **Anything else** → dropped silently, with no line put on the control socket.
+3. **Anything else** → dropped silently, with no line put on the control socket.
 
-Order matters: several functional vks (VK_F1 = 0x70) fall inside step 3's
-printable-ASCII range, so the tables must be consulted before the fallback.
+There used to be a fourth step — a best-effort keysym for an unmapped vk that
+happened to land in printable ASCII — but #36 deleted it: it existed to catch
+raw ints ScreenConnect never actually sends, and the one named vk it was
+silently papering over (VK_SEPARATOR) got a real table entry instead of a
+guess. Order no longer matters between the two remaining branches either: the
+keysym and evdev tables are guaranteed disjoint (AwtEvdevTablesDisjoint), so
+for any given vk at most one of them ever answers.
+
+##### The 86-vk drop contract
+
+Before #36, 86 of AWT's 189 named `VK_*` constants matched neither table and
+fell through to the (now-deleted) fallback — an accident of two disjoint maps,
+not a decision. #36 turned that into a stated contract, one vk-class at a
+time:
+
+**Mapped instead of dropped (17):**
+- `VK_F13`–`VK_F24` — real hardware keys on extended function rows, evdev
+  `KEY_F13`–`KEY_F24` exist and mean the same thing.
+- `VK_HELP` — evdev `KEY_HELP` exists.
+- `VK_KP_UP`/`DOWN`/`LEFT`/`RIGHT` — the same physical key as
+  `VK_UP`/`DOWN`/`LEFT`/`RIGHT` with Num Lock off; share their evdev codes.
+
+**Still dropped, now by contract rather than accident (69):**
+- Clipboard/edit/action keys (12) — `VK_ACCEPT`, `VK_AGAIN`, `VK_CANCEL`,
+  `VK_CLEAR`, `VK_COMPOSE`, `VK_COPY`, `VK_CUT`, `VK_FIND`, `VK_PASTE`,
+  `VK_PROPS`, `VK_STOP`, `VK_UNDO` — modelled on Sun/Solaris keyboards' action
+  row, not a standard PC key position. A few (`KEY_COPY`, `KEY_PASTE`,
+  `KEY_CUT`, `KEY_UNDO`, `KEY_AGAIN`, `KEY_FIND`, `KEY_PROPS`, `KEY_STOP`,
+  `KEY_CANCEL`, `KEY_COMPOSE`) do exist as evdev "Application Control" codes
+  for dedicated multimedia-keyboard buttons, but that names a different
+  physical key from the Ctrl+C-style shortcut Robot models here — mapping
+  them is deliberately out of scope for #36 rather than declared unmappable.
+- `VK_DEAD_*` (16) — dead-key *composition outcomes* from an IME, not
+  physical keys Robot should ever receive from ScreenConnect.
+- The IME/input-method cluster (20) — `VK_ALL_CANDIDATES`, `VK_ALPHANUMERIC`,
+  `VK_CODE_INPUT`, `VK_CONVERT`, `VK_FINAL`, `VK_FULL_WIDTH`, `VK_HALF_WIDTH`,
+  `VK_HIRAGANA`, `VK_INPUT_METHOD_ON_OFF`, `VK_JAPANESE_HIRAGANA`,
+  `VK_JAPANESE_KATAKANA`, `VK_JAPANESE_ROMAN`, `VK_KANA`, `VK_KANA_LOCK`,
+  `VK_KANJI`, `VK_KATAKANA`, `VK_MODECHANGE`, `VK_NONCONVERT`,
+  `VK_PREVIOUS_CANDIDATE`, `VK_ROMAN_CHARACTERS` — evdev does define matching
+  codes (`KEY_HANJA`, `KEY_KATAKANA`, `KEY_HENKAN`, …) but only meaningful
+  inside a CJK IME session, which ScreenConnect's Robot path never drives.
+- Shifted-symbol vks (19) — `VK_AMPERSAND`, `VK_ASTERISK`, `VK_AT`,
+  `VK_BRACELEFT`, `VK_BRACERIGHT`, `VK_CIRCUMFLEX`, `VK_COLON`, `VK_DOLLAR`,
+  `VK_EURO_SIGN`, `VK_EXCLAMATION_MARK`, `VK_GREATER`,
+  `VK_INVERTED_EXCLAMATION_MARK`, `VK_LEFT_PARENTHESIS`, `VK_LESS`,
+  `VK_NUMBER_SIGN`, `VK_PLUS`, `VK_QUOTEDBL`, `VK_RIGHT_PARENTHESIS`,
+  `VK_UNDERSCORE` — already reachable: the character they represent goes
+  through the keysym table when AWT sends the base key plus Shift, so
+  mapping the named vk itself would be redundant. Two of these
+  (`VK_DOLLAR`, `VK_EURO_SIGN`) do have a same-named evdev code
+  (`KEY_DOLLAR`, `KEY_EURO`), but that names a dedicated hardware
+  currency key some international keyboards have, not the Shift+digit
+  combination AWT's Robot models here — mapping it would send the wrong
+  physical key.
+- `VK_UNDEFINED` — the sentinel value 0, not a real keypress.
+- `VK_BEGIN` — no evdev or X11 equivalent.
+
+`VK_SEPARATOR`'s own layout-independence gap (evdev 121 binds nothing on
+`us`/`pc` layouts) is tracked separately in #40.
 
 ### Injection mechanism
 The client runs from a systemd unit we control (`connectwisecontrol-<id>.service`),

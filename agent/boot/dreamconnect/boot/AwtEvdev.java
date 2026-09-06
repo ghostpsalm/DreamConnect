@@ -22,7 +22,7 @@ import java.util.Map;
  *     KEY_A=30, not the X11 +8 keycode). These are physical/functional keys that
  *     mean the same thing on every layout, so position-based injection is right.
  *
- * Gaps return -1 so the caller can fall back ({@link #fallbackKeysym}) or drop.
+ * Gaps return -1 so the caller can drop the key: no fallback exists.
  */
 final class AwtEvdev {
     // evdev button codes
@@ -62,14 +62,23 @@ final class AwtEvdev {
         m(KeyEvent.VK_PAGE_UP, 104); m(KeyEvent.VK_PAGE_DOWN, 109);
         m(KeyEvent.VK_UP, 103); m(KeyEvent.VK_DOWN, 108);
         m(KeyEvent.VK_LEFT, 105); m(KeyEvent.VK_RIGHT, 106);
+        // numpad arrows (NumLock off) share the plain arrows' evdev codes
+        m(KeyEvent.VK_KP_UP, 103); m(KeyEvent.VK_KP_DOWN, 108);
+        m(KeyEvent.VK_KP_LEFT, 105); m(KeyEvent.VK_KP_RIGHT, 106);
         // function row
         m(KeyEvent.VK_F1, 59); m(KeyEvent.VK_F2, 60); m(KeyEvent.VK_F3, 61);
         m(KeyEvent.VK_F4, 62); m(KeyEvent.VK_F5, 63); m(KeyEvent.VK_F6, 64);
         m(KeyEvent.VK_F7, 65); m(KeyEvent.VK_F8, 66); m(KeyEvent.VK_F9, 67);
         m(KeyEvent.VK_F10, 68); m(KeyEvent.VK_F11, 87); m(KeyEvent.VK_F12, 88);
+        // extended function row
+        m(KeyEvent.VK_F13, 183); m(KeyEvent.VK_F14, 184); m(KeyEvent.VK_F15, 185);
+        m(KeyEvent.VK_F16, 186); m(KeyEvent.VK_F17, 187); m(KeyEvent.VK_F18, 188);
+        m(KeyEvent.VK_F19, 189); m(KeyEvent.VK_F20, 190); m(KeyEvent.VK_F21, 191);
+        m(KeyEvent.VK_F22, 192); m(KeyEvent.VK_F23, 193); m(KeyEvent.VK_F24, 194);
         // locks / sysreq
         m(KeyEvent.VK_NUM_LOCK, 69); m(KeyEvent.VK_SCROLL_LOCK, 70);
         m(KeyEvent.VK_PRINTSCREEN, 99); m(KeyEvent.VK_PAUSE, 119);
+        m(KeyEvent.VK_HELP, 138); // KEY_HELP
         // numpad
         m(KeyEvent.VK_NUMPAD0, 82); m(KeyEvent.VK_NUMPAD1, 79);
         m(KeyEvent.VK_NUMPAD2, 80); m(KeyEvent.VK_NUMPAD3, 81);
@@ -91,17 +100,6 @@ final class AwtEvdev {
     static int keysym(int awtVk) {
         Integer s = KSYM.get(awtVk);
         return s == null ? -1 : s;
-    }
-
-    /**
-     * Last-resort keysym for a printable VK not in either table. Java's
-     * character VK constants equal the uppercase ASCII code, so letters map to
-     * the lowercase (base) keysym and other printables map to themselves.
-     */
-    static int fallbackKeysym(int awtVk) {
-        if (awtVk >= 'A' && awtVk <= 'Z') return awtVk + 0x20;
-        if (awtVk >= 0x20 && awtVk <= 0x7E) return awtVk;
-        return -1;
     }
 
     /**
