@@ -220,10 +220,22 @@ read_install_state() {
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     key="${line%%=*}"; value="${line#*=}"
-    # A state file written or edited on Windows carries CR, which would ride
-    # along into an account name, a uid, and the picker label derived from it.
-    # Stripped here so every consumer gets the same clean value.
-    value="${value%$'\r'}"
+    # A state file written or edited on Windows carries CR, and a hand-edited one
+    # carries whatever spacing the operator typed — which would ride along into
+    # an account name, a uid, and the picker label derived from it. Both ends of
+    # BOTH halves are trimmed: padding on the key ("HOST_ACCOUNT = dchost")
+    # matches no case arm below, so the whole record would read as "nothing
+    # recorded" and host_account_installable would take the fresh-box branch on a
+    # box that already has a host account.
+    #
+    # [:space:] covers CR, so this subsumes the old `%$'\r'` strip. It is done
+    # with the ends-only expansions rather than `tr -d '[:space:]'` because inner
+    # whitespace is data, not padding: a recorded "dc host" must stay distinct
+    # from "dchost" for the refusal message to be worth reading. A value that is
+    # only whitespace trims to empty, which every consumer already treats as
+    # unset — the right reading, since " " is not an account.
+    key="${key#"${key%%[![:space:]]*}"}";       key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
     case "$key" in
       HOST_ACCOUNT)    HOST_ACCOUNT="$value" ;;
       HOST_UID)        HOST_UID="$value" ;;
@@ -286,8 +298,12 @@ host_account_removable() {  # name protected_user
   fi
 
   read_install_state
+  # Both names through %q, for the reason spelled out at the installable
+  # mismatch below: this is the other refusal that juxtaposes two names, and a
+  # recorded one that differs only by inner whitespace reads as the given one.
   [ "$HOST_ACCOUNT" = "$name" ] || {
-    echo "refusing to remove $name: install state records host account '$HOST_ACCOUNT'" >&2; return 1; }
+    printf "refusing to remove %q: install state records host account '%q'\n" \
+      "$name" "$HOST_ACCOUNT" >&2; return 1; }
   [ "$CREATED_ACCOUNT" = "1" ] || {
     echo "refusing to remove $name: install state says the installer did not create it" >&2; return 1; }
 
@@ -357,8 +373,18 @@ host_account_installable() {  # requested_or_empty
     return 0
   fi
 
+  # The one message that prints two names side by side, and read_install_state
+  # only trims the ENDS of a recorded value — inner whitespace is data and
+  # survives on purpose. So a hand-edited or Windows-edited state file can make
+  # this refusal name "dchost" and "dc host", which a terminal renders as the
+  # same string, and the operator cannot tell a mistyped account from a padded
+  # state file. %q makes the difference visible ("dc\ host"). ${var@Q} was ruled
+  # out: it only quotes ('dc host'), which the literal quotes here already did,
+  # so it reveals nothing. A name without whitespace passes through %q
+  # unchanged, so the ordinary refusal reads exactly as it did.
   [ "$requested" = "$HOST_ACCOUNT" ] || {
-    echo "error: refusing to install under '$requested': install state records display-host account '$HOST_ACCOUNT'; run ./install.sh --uninstall first" >&2
+    printf "error: refusing to install under '%q': install state records display-host account '%q'; run ./install.sh --uninstall first\n" \
+      "$requested" "$HOST_ACCOUNT" >&2
     return 1; }
 
   echo "$requested"

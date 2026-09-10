@@ -1,9 +1,9 @@
 ---
 progress: 80
-updated: 2026-09-06
+updated: 2026-09-11
 stage: Active
 status: building
-next: Work down the daemon/installer hardening backlog; #57 (torn area_x/area_y) is next on the daemon seam, #30/#32-#34 on the install seam.
+next: Work down the daemon/installer hardening backlog; #57 (torn area_x/area_y) is next on the daemon seam, #30/#32/#34 on the install seam. #33 is done; it left #60 behind.
 flags:
   - Verified end to end on exactly one configuration — Fedora, GNOME 49+, one live ScreenConnect session. Other distros and desktops are untested, and KDE/wlroots are out of scope by design.
   - There is no remote CI. `.github/workflows/ci.yml` exists in the working tree but is untracked and on no branch, so a push to GitHub still triggers nothing. Verification is local only: `.githooks/pre-commit` runs `./scripts/gate.sh` before every commit and every merge, and refuses the commit when it is red.

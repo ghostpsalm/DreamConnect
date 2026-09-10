@@ -475,6 +475,64 @@ test_read_install_state_resets_to_safe_defaults_when_absent() {
   assert_eq "$CREATED_ACCOUNT" "0" "absent state file resets CREATED_ACCOUNT to 0"
 }
 
+# Issue #33 slice 1. The reader strips a trailing CR from the VALUE only, so a
+# hand-edited or Windows-edited state file still gets whitespace into the values
+# every consumer trusts — and, worse, into the KEY, where "HOST_ACCOUNT = x"
+# matches no case arm at all and the record silently reads as "nothing
+# recorded". The contract this asserts, in full:
+#
+#   leading/trailing [:space:] is trimmed from BOTH key and value
+#   inner whitespace is preserved
+#   a value that is empty after trimming behaves as unset
+#
+# All three clauses matter and none is implied by the others:
+#
+#   * key trimming is what "HOST_ACCOUNT = dchost" needs; value trimming is what
+#     the padded/CRLF forms need. An implementation that trims only the value
+#     leaves the reserved-name and validity rails in host_account_installable
+#     (install-lib.sh:341, :346) reading an EMPTY recorded account and taking the
+#     fresh-box branch at :330 instead.
+#   * inner whitespace must survive: a `tr -d '[:space:]'`-style fix would pass
+#     the padded fixture and destroy the very case slice 2 exists to make
+#     legible, "dc host" vs "dchost" in a refusal.
+#   * empty-after-trim is the difference between install-lib.sh:330 seeing a
+#     fresh box and seeing a recorded account made of three spaces, which then
+#     fails valid_account_name and refuses the install outright.
+#
+# 992 and dchost are the recorded uid and account name the issue and the
+# existing CRLF fixture (test_register_label_survives_a_crlf_state_file) already
+# use; the fixture is written BY HAND so the reader under test is not vouching
+# for its own input.
+test_read_install_state_trims_whitespace_around_keys_and_values() {
+  local DC_STATE_FILE
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
+
+  # CRLF, a space either side of the separator, a tab, and a key indented.
+  DC_STATE_FILE="$TMP/state-padded/install.state"
+  mkdir -p "$(dirname "$DC_STATE_FILE")"
+  printf 'HOST_ACCOUNT = dchost\r\nHOST_UID =\t992 \r\n  CREATED_ACCOUNT=1  \r\n' \
+    > "$DC_STATE_FILE"
+  read_install_state
+  assert_eq "$HOST_ACCOUNT"    "dchost" "padded/CRLF state file: HOST_ACCOUNT is the bare name"
+  assert_eq "$HOST_UID"        "992"    "padded/CRLF state file: HOST_UID is the bare uid"
+  assert_eq "$CREATED_ACCOUNT" "1"      "padded/CRLF state file: CREATED_ACCOUNT is the bare flag"
+
+  # Inner whitespace is data, not padding — slice 2's refusal message depends on
+  # it surviving this far.
+  DC_STATE_FILE="$TMP/state-inner/install.state"
+  mkdir -p "$(dirname "$DC_STATE_FILE")"
+  printf 'HOST_ACCOUNT=  dc host  \nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  read_install_state
+  assert_eq "$HOST_ACCOUNT" "dc host" "trimming is at the ends only: inner whitespace is preserved"
+
+  # Whitespace-only is not a recorded account.
+  DC_STATE_FILE="$TMP/state-blank/install.state"
+  mkdir -p "$(dirname "$DC_STATE_FILE")"
+  printf 'HOST_ACCOUNT= \t \nHOST_UID=992\nCREATED_ACCOUNT=1\n' > "$DC_STATE_FILE"
+  read_install_state
+  assert_eq "$HOST_ACCOUNT" "" "a whitespace-only HOST_ACCOUNT reads as unset, not as an account named ' '"
+}
+
 # All six rails satisfied: this is the only shape that may be deleted.
 test_host_account_removable_accepts_the_account_we_created() {
   local db state
@@ -4113,6 +4171,83 @@ test_host_account_installable_refuses_a_different_account_than_recorded() {
   assert_eq "$INSTALLABLE_OUT" "" "a refusal resolves no account on stdout"
   assert_eq "$(cat "$state" 2>/dev/null || true)" "$before" \
     "the refusal leaves install.state untouched (single slot, still naming the old account)"
+}
+
+# Issue #33 slice 2. Slice 1 stopped install.state's padding at the ENDS of a
+# value; inner whitespace is data and survives on purpose. So the two refusals
+# that juxtapose a given name with the recorded one can still print a pair a
+# terminal renders as one and the same string, and the operator cannot tell "I
+# typed the wrong account" from "the state file has stray whitespace" — which is
+# the whole of the issue.
+#
+# The contract: install-lib.sh:302 (host_account_removable rail 5) and
+# install-lib.sh:373 (host_account_installable's mismatch) render BOTH names
+# through `printf '%q'`. The assertions are on the escaped form, not merely on
+# "the names are quoted somehow", because the near-miss is real: ${name@Q}
+# renders "dc host" as 'dc host', which is the manual quoting these two messages
+# already carry and reveals nothing. %q gives `dc\ host` — the space becomes a
+# character the operator can see — and leaves "dchost" and "dreamconnect-host"
+# byte-identical, so the ordinary refusals the tests above pin read exactly as
+# they do today.
+#
+# Both directions are driven. Escaping one name and not the other is the likelier
+# half-fix and leaves precisely the confusion the issue describes, and the padding
+# can genuinely sit on either side: on the RECORDED name (a hand-edited or
+# Windows-edited install.state) or on the REQUESTED one (a mistyped
+# DREAMCONNECT_HOST_ACCOUNT).
+#
+# host_account_removable is driven with the padding on the recorded name only:
+# its own valid_account_name rail (install-lib.sh:264) refuses a <name> holding a
+# space long before rail 5, so no whitespace-bearing given name can reach that
+# message. Nothing to assert there that could ever happen.
+#
+# The single-name refusals in these two functions are deliberately NOT covered —
+# install-lib.sh:334, :355 and :359 print one name each, so there is no second
+# string to confuse it with and nothing for %q to disambiguate;
+# test_host_account_installable_refuses_a_malformed_recorded_account already pins
+# :359 to the RAW recorded name, "dc host" included.
+#
+# The escapings expected here are bash's own, from `printf '%q'` run on its own
+# (bash 5.3.9: "dc host" -> `dc\ host`), not read off install-lib.sh.
+test_state_mismatch_refusals_reveal_whitespace_in_both_names() {
+  local state db
+
+  # The recorded name carries it: someone hand-edited install.state.
+  state="$TMP/state-q-recorded/install.state"
+  write_state_fixture "$state" "dc host" 992 1 1
+  try_installable "$state" dchost
+  assert_install_refused "recorded account with an inner space"
+  assert_eq "$INSTALLABLE_OUT" "" "a whitespace refusal resolves no account on stdout"
+  assert_contains "$INSTALLABLE_ERR" 'dc\ host' \
+    "install refusal: the recorded name's inner space is made visible"
+  assert_not_contains "$INSTALLABLE_ERR" "dc host" \
+    "install refusal: the recorded name is never printed with a bare space"
+  assert_contains "$INSTALLABLE_ERR" "dchost" \
+    "install refusal: the requested name is still named, and needs no escaping"
+
+  # The requested name carries it: a mistyped DREAMCONNECT_HOST_ACCOUNT.
+  state="$TMP/state-q-requested/install.state"
+  write_state_fixture "$state" dchost 992 1 1
+  try_installable "$state" "dc host"
+  assert_install_refused "requested account with an inner space"
+  assert_contains "$INSTALLABLE_ERR" 'dc\ host' \
+    "install refusal: the requested name's inner space is made visible"
+  assert_not_contains "$INSTALLABLE_ERR" "dc host" \
+    "install refusal: the requested name is never printed with a bare space"
+  assert_contains "$INSTALLABLE_ERR" "dchost" \
+    "install refusal: the recorded name is still named, and needs no escaping"
+
+  # Rail 5 of the removal gate: the same two-name shape, and the same fix.
+  db="$(make_removal_passwd_db)"; state="$TMP/state-q-removal/install.state"
+  write_state_fixture "$state" "dreamconnect host" 987 1 1
+  try_removable "$db" "$state" "" dreamconnect-host kogies
+  assert_refused "removal rail 5, recorded name with an inner space"
+  assert_contains "$REMOVE_ERR" 'dreamconnect\ host' \
+    "removal refusal: the recorded name's inner space is made visible"
+  assert_not_contains "$REMOVE_ERR" "dreamconnect host" \
+    "removal refusal: the recorded name is never printed with a bare space"
+  assert_contains "$REMOVE_ERR" "dreamconnect-host" \
+    "removal refusal: the account asked for is still named, and needs no escaping"
 }
 
 # A bare `sudo ./install.sh` re-run must keep working, and must keep working
@@ -9682,6 +9817,7 @@ for CURRENT in \
   test_write_install_state_survives_a_write_killed_part_way_through \
   test_install_state_round_trips_all_four_values \
   test_read_install_state_resets_to_safe_defaults_when_absent \
+  test_read_install_state_trims_whitespace_around_keys_and_values \
   test_host_account_removable_accepts_the_account_we_created \
   test_host_account_removable_refuses_an_unknown_account \
   test_host_account_removable_refuses_uid_zero \
@@ -9772,6 +9908,7 @@ for CURRENT in \
   test_ensure_host_account_refuses_malformed_account_names \
   test_library_defines_host_account_installable \
   test_host_account_installable_refuses_a_different_account_than_recorded \
+  test_state_mismatch_refusals_reveal_whitespace_in_both_names \
   test_host_account_installable_warns_and_reuses_the_recorded_account_when_unset \
   test_host_account_installable_accepts_the_recorded_account_silently \
   test_host_account_installable_accepts_any_account_on_a_fresh_install \
