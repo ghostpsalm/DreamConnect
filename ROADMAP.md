@@ -235,8 +235,11 @@ Character keys (letters, digits, punctuation) now inject as a **base X11 keysym*
 via Mutter's `NotifyKeyboardKeysym`, which resolves the keycode on the *guest's*
 layout — so the right character lands on US, QWERTZ, AZERTY, etc. Modifiers and
 functional keys (F-row, nav, numpad, locks) stay evdev (position-based, correct
-on every layout); an operator-held Shift/Ctrl/Alt injected as an evdev modifier
-combines correctly with the keysym. **Empirically verified** with a focused
+on every layout *where the layout binds the position*); an operator-held
+Shift/Ctrl/Alt injected as an evdev modifier combines correctly with the keysym.
+The numpad comma `VK_SEPARATOR` is the single exception and goes by keysym
+(`XK_KP_Separator` 0xFFAC, #40): `symbols/us` and `symbols/pc` bind nothing to
+its evdev position, so position-based injection is dead there. **Empirically verified** with a focused
 key-logger: on German, evdev-21 gave `z` (the QWERTZ swap bug) while keysym `y`
 gave `y`; on US, `a`/`A`/`@`/`5`/`;`/Ctrl+C all correct via the new path.
 
