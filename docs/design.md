@@ -70,16 +70,43 @@ An AWT virtual keycode takes the **first** of these three that applies:
    with the base X11 keysym, so the guest's own layout picks the keycode.
 2. **Physical/functional key** (modifiers, whitespace/control, navigation,
    function row, numpad, locks) → `NotifyKeyboardKeycode`, from the AWT vk →
-   evdev keycode map.
+   evdev keycode map. One numpad key is deliberately excluded — see
+   *The numpad's one exception* below.
 3. **Anything else** → dropped silently, with no line put on the control socket.
 
 There used to be a fourth step — a best-effort keysym for an unmapped vk that
 happened to land in printable ASCII — but #36 deleted it: it existed to catch
 raw ints ScreenConnect never actually sends, and the one named vk it was
 silently papering over (VK_SEPARATOR) got a real table entry instead of a
-guess. Order no longer matters between the two remaining branches either: the
-keysym and evdev tables are guaranteed disjoint (AwtEvdevTablesDisjoint), so
-for any given vk at most one of them ever answers.
+guess — a keysym entry, for the reason below. Order no longer matters between
+the two remaining branches either: the keysym and evdev tables are guaranteed
+disjoint (AwtEvdevTablesDisjoint), so for any given vk at most one of them ever
+answers.
+
+##### The numpad's one exception
+
+`VK_SEPARATOR` — the numpad comma, AWT's "NumPad ," — is a numpad key that
+routes through the **keysym** table anyway, as `XK_KP_Separator` 0xFFAC (#40).
+
+Rule 2 above is right only where the layout binds the position, and no layout
+has to. #19 mapped this vk to `KEY_KPCOMMA` 121, which `symbols/hu` binds (via
+`alias <KPPT> = <I129>`) but `symbols/us` and `symbols/pc` bind to nothing at
+all. On the default layouts the evdev route was therefore dead: the key produced
+no character rather than the wrong one. Asking Mutter for the keysym makes it
+find whatever keycode produces `KP_Separator` on the guest's own keymap, so
+layout-independence for this key comes from the symbol instead of the position.
+
+It is `XK_KP_Separator` 0xFFAC and not `XK_KP_Decimal` 0xFFAE because AWT keeps
+the comma key (`VK_SEPARATOR`) distinct from the dot key (`VK_DECIMAL`).
+
+The rest of the numpad keeps the evdev route: those positions are bound
+everywhere. This is the only exception, and `AwtEvdevTablesDisjoint` keeps it
+from becoming two entries.
+
+**Fixture-proven only.** That `KS 65452` lands a separator on a `us` guest has
+not been observed on a live Fedora GNOME box; it rests on Mutter finding a
+keycode for the keysym, which the tests cannot see. A key-logger run by the H1
+method would settle it.
 
 ##### The 86-vk drop contract
 
@@ -132,7 +159,8 @@ time:
 - `VK_BEGIN` — no evdev or X11 equivalent.
 
 `VK_SEPARATOR`'s own layout-independence gap (evdev 121 binds nothing on
-`us`/`pc` layouts) is tracked separately in #40.
+`us`/`pc` layouts) was closed by #40, which moved it to the keysym table — see
+*The numpad's one exception* above.
 
 ### Injection mechanism
 The client runs from a systemd unit we control (`connectwisecontrol-<id>.service`),

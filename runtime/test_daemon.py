@@ -84,6 +84,19 @@ class TestHandle(unittest.TestCase):
         self.assertIsNone(self.cs.handle("KS 97 1"))
         self.assertEqual(self.s.calls[-1], ("KS", 97, True))
 
+    def test_keysym_above_ascii_is_forwarded_whole(self):
+        # Issue #40 routes VK_SEPARATOR as XK_KP_Separator
+        # (/usr/include/X11/keysymdef.h:303, 0xffac = 65452) — the first KS
+        # value the agent sends outside the ASCII range every other KSYM entry
+        # sits in. The parse is meant to be value-agnostic and the D-Bus arg is
+        # uint32, so this is a standing guard rather than new behaviour: it is
+        # expected to pass before the agent-side change as well as after, and
+        # exists to fail if anyone ever narrows the parse. A byte-sized one
+        # would forward 65452 & 0xFF = 172 (XK_onehalf) and type the wrong
+        # character with no error anywhere.
+        self.assertIsNone(self.cs.handle("KS 65452 1"))
+        self.assertEqual(self.s.calls[-1], ("KS", 65452, True))
+
     # malformed input must not reply (no desync) and must not dispatch
     def test_malformed_input_returns_none_and_stream_stays_aligned(self):
         self.assertIsNone(self.cs.handle("M"))          # missing args

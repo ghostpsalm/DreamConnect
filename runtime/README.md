@@ -60,7 +60,12 @@ returned, which keeps the reply stream aligned with control commands only.
 | `B <evdev_button> <state>` | pointer button (state 1/0) | — |
 | `W <axis> <steps>` | wheel (axis 0=vert 1=horiz) | — |
 | `K <evdev_keycode> <state>` | key by evdev keycode (modifiers, whitespace, navigation, function, numpad, locks) | — |
-| `KS <keysym> <state>` | key by keysym — character-producing keys; guest layout resolves the keycode | — |
+| `KS <keysym> <state>` | key by keysym — character-producing keys, plus the numpad comma; guest layout resolves the keycode | — |
+
+The numpad is otherwise a `K` group. Its comma key (AWT `VK_SEPARATOR`) is the
+one exception and arrives as `KS 65452` (`XK_KP_Separator` 0xFFAC, #40), because
+`symbols/us` and `symbols/pc` bind nothing to its evdev position — see *Key
+routing* in `docs/design.md`.
 
 An unrecognised command replies `ERR unknown cmd <X>`. The table above lists the
 commands the agent's Robot path uses; the daemon also serves `WHO`, `WAKELOCK`,

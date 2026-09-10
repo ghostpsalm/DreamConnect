@@ -1,0 +1,168 @@
+{
+  "recorded_at": "2026-09-10T22:11:17Z",
+  "repo": "keyboard-separator",
+  "branch": "agent/keyboard-separator",
+  "base": "d5d4f5ab1a62bfc2923ac5abcdeee8b375d8fc33",
+  "window_start": "2026-09-06T21:40:39+10:00",
+  "head": "4f256af2e9c76a17bef4601133544fc0350f79e7",
+  "issue": {
+    "number": 40,
+    "state": "OPEN",
+    "title": "Keyboard: VK_SEPARATOR only works on hu/keypad layouts (us/pc bind nothing to evdev 121)",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/40"
+  },
+  "commits": [
+    {
+      "sha": "4f256af2e9c76a17bef4601133544fc0350f79e7",
+      "subject": "Keyboard: route VK_SEPARATOR by keysym, not evdev 121 (#40)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "7 files changed, 140 insertions(+), 36 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 280,
+      "output_tokens": 153427,
+      "cache_read_input_tokens": 19317031,
+      "cache_creation_input_tokens": 1749904
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 4,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 52896,
+        "duration_ms": 170952,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 70203,
+        "duration_ms": 295017,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 50915,
+        "duration_ms": 138188,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 60097,
+        "duration_ms": 204572,
+        "models": []
+      }
+    },
+    "usage_blocks": 140,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "fb5e5330-56e4-462e-97ce-d83e3979158f.jsonl",
+        "usage_blocks": 140
+      }
+    ],
+    "agent_wall_clock_ms": 808729,
+    "first_activity": "2026-09-06T21:22:53.736000+00:00",
+    "last_activity": "2026-09-10T22:11:07.985000+00:00",
+    "notification_tokens": 234111,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 40",
+    "<task-notification>\n<task-id>af68cbb9af9fd8729</task-id>\n<tool-use-id>toolu_013GK5cEmbbKzZ3VtFL4f6g4</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-keyboard-separator/fb5e5330-56e4-462e-97ce-d83e3979158f/tasks/af68cbb9af9fd8729.output</output-file>\n<status>completed</status>\n<summary>Agent \"Plan VK_SEPARATOR keysym change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: plan-ready\nACTION-ID: d7b5369867364bedb45ba89e302ca6f8\nSLICES: 1\nINVOCATION-ID: inv-001-d9eb21a1\nEVIDENCE REQ-001: Today `agent/boot/dreamconnect/boot/AwtEvdev.java:90` ends `m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA`, and `DreamConnectRobotPeer.java:53-59` routes KSYM first, so moving the vk to `k(KeyEvent.VK_SEPARATOR, 0xFFAC)` is what makes the wire read `KS 65452 &lt;state&gt;`; pinned by the rewritten `testRobotPeerSeparatorKey` (BootTests.java:302-317).\nEVIDENCE REQ-002: `testAwtEvdevTablesDisjoint` (BootTests.java:688-716) already reflects over both maps and fails on any vk in both, so leaving line 90 in place while adding the keysym turns the suite red; slice 1 also asserts `AwtEvdev.keycode(VK_SEPARATOR) == -1` locally.\nEVIDENCE REQ-003: The rule is stated at `AwtEvdev.java:8-24` (\"numpad, locks \u2014 maps to an evdev keycode \u2026 position-based injection is right\") with no exception clause; slice 1 edits that javadoc, and the same claim is repeated at `docs/design.md:70-73`, `docs/design.md:134` (\"tracked separately in #40\" \u2014 goes stale on merge), `ROADMAP.md:237`, `runtime/README.md:62-63`.\nEVIDENCE REQ-004: No fallback route exists to reach `KS 108` (deleted by #36, guarded at BootTests.java:602-621); additionally VK_SEPARATOR is 0x6C, inside the 0x20..0x7E window scanned by `testNoNamedAwtVkNeedsTheDeletedFallback` (BootTests.java:641-656), so a removal-wi",
+    "Done. The seam gate is approved: ~/.claude/scripts/factory_owner_decisions.py --approve-gate --run-id impl-40-370010e8 --gate seam --owner roger was run from the primary checkout, and the record is at /home/kogies/.factory/owner-decisions/impl-40-370010e8/seam.json with source_snapshot tree:b6f71a4ffb38834850cd177ac6c78cf167def284. Continue the run.",
+    "<task-notification>\n<task-id>a56fe269a66e1197a</task-id>\n<tool-use-id>toolu_01GrSmviDDc1up7mAsLRRSah</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-keyboard-separator/fb5e5330-56e4-462e-97ce-d83e3979158f/tasks/a56fe269a66e1197a.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write failing VK_SEPARATOR test\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: 2f32b831f3824660a06bebb88f075594\nINVOCATION-ID: inv-002-d83b29bc\nEVIDENCE REQ-001: `BootTests.java:341,346` assert `\"KS 65452 1\"`/`\"KS 65452 0\"`. Real output: `FAIL: keyPress(VK_SEPARATOR) -&gt; \"KS 65452 1\" ... (got \"K 121 1\")` and `FAIL: keyRelease ... (got \"K 121 0\")`.\nEVIDENCE REQ-002: `BootTests.java:333` asserts `keycode(VK_SEPARATOR) == -1` \u2192 `FAIL: ... (got 121)`. Mutant B (keysym added, `m(...,121)` left) failed both this and the untouched #38 guard: `got 1 vk(s) in both: [vk 0x6c -&gt; evdev 121 AND keysym 65452]`.\nEVIDENCE REQ-003: Not assertable \u2014 javadoc is not retained at runtime. Today `AwtEvdev.java:8-26` states the rule with no exception clause; `AwtEvdev.java:90` still reads `m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA`. Builder writes the prose; a reviewer must read it. Flagged in the test's own javadoc (`BootTests.java:305-307`).\nEVIDENCE REQ-004: `BootTests.java:349` asserts `KS 108` never on the wire, plus `BootTests.java:322` machine-checks `VK_SEPARATOR == 0x6C` \u2192 `ok : ... (got 0x6c)`, so the guard cannot go vacuous.\nEVIDENCE REQ-005: The old `\"K 121 1\"`/`\"K 121 0\"` assertions are replaced. `java ... dreamconnect.boot.BootTests` \u2192 `4 FAILURE(S)`, exit 1 (baseline before my edit: `ALL PASS`, exit 0). I could not run `./scripts/gate.sh` \u2014 the pre_tool_use hook blocks a worker role from the authoritative gate; gate-green is ",
+    "<task-notification>\n<task-id>a9b869cdf54bb57fb</task-id>\n<tool-use-id>toolu_01Y1SbMuywA7b52T5jYYmzoq</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-keyboard-separator/fb5e5330-56e4-462e-97ce-d83e3979158f/tasks/a9b869cdf54bb57fb.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make VK_SEPARATOR test green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 24909a4c586d4468b3f453ca18eb911a\nINVOCATION-ID: inv-003-ae1cd7d6\nEVIDENCE REQ-001: BootTests output after the change: `ok  : keyPress(VK_SEPARATOR) -&gt; \"KS 65452 1\" (XK_KP_Separator), not the layout-dead evdev line \"K 121 1\" (got \"KS 65452 1\")` and `ok  : keyRelease(VK_SEPARATOR) -&gt; \"KS 65452 0\" (got \"KS 65452 0\")`. Before the change the same two lines read `FAIL \u2026 (got \"K 121 1\")` / `(got \"K 121 0\")`.\nEVIDENCE REQ-002: `ok  : and the evdev entry is gone, not merely shadowed: AwtEvdev.keycode(VK_SEPARATOR) == -1, no longer KEY_KPCOMMA 121 (got -1)` plus the #38 guard `ok  : AwtEvdev KEY and KSYM tables are disjoint (total check, via reflection, over every vk either table actually contains \u2026) (got 0 vk(s) in both)`. Source: `agent/boot/dreamconnect/boot/AwtEvdev.java:101-106` now holds `k(KeyEvent.VK_SEPARATOR, 0xFFAC);` and line 100 ends the evdev numpad block at `m(KeyEvent.VK_DIVIDE, 98);`.\nEVIDENCE REQ-003: `agent/boot/dreamconnect/boot/AwtEvdev.java:25-36` \u2014 new javadoc paragraph beginning \"VK_SEPARATOR is the one deliberate exception to that second rule (#40)\", naming `symbols/us`/`symbols/pc` binding nothing to KEY_KPCOMMA 121 and stating the evdev route is dead there. The evdev rule itself remains at lines 20-23.\nEVIDENCE REQ-004: `ok  : #19 stays fixed: the 'l' keysym 108 never reaches the wire (got [KS 65452 1, KS 65452 0])` and `ok  : one",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-a155166d8bf2 --outcome CONTINUE --owner roger was run from the primary checkout. Also: yes, update docs/design.md, ROADMAP.md and runtime/README.md for the numpad rule change before /submit - the chosen option was explicitly 'record this one key as a named exception and say why', so leaving those three stating the old rule is part of this issue, not a follow-up. Run next and continue.",
+    "<task-notification>\n<task-id>aa3578641b9612772</task-id>\n<tool-use-id>toolu_01JBaP2us5wZghjpSnF6oyaH</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-keyboard-separator/fb5e5330-56e4-462e-97ce-d83e3979158f/tasks/aa3578641b9612772.output</output-file>\n<status>completed</status>\n<summary>Agent \"Independently verify VK_SEPARATOR change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: fail\nACTION-ID: 5950d9777fd34b34a2f1a257f49b7a83\nINVOCATION-ID: inv-004-a6a3d934\nEVIDENCE REQ-001: BootTests real output: `ok  : keyPress(VK_SEPARATOR) -&gt; \"KS 65452 1\" (XK_KP_Separator), not the layout-dead evdev line \"K 121 1\" (got \"KS 65452 1\")` and `ok  : keyRelease(VK_SEPARATOR) -&gt; \"KS 65452 0\" (got \"KS 65452 0\")`; source at `agent/boot/dreamconnect/boot/AwtEvdev.java:107` = `k(KeyEvent.VK_SEPARATOR, 0xFFAC);`. Java suite exit 0, `ALL PASS`.\nEVIDENCE REQ-002: `ok  : and the evdev entry is gone, not merely shadowed: AwtEvdev.keycode(VK_SEPARATOR) == -1, no longer KEY_KPCOMMA 121 (got -1)` and `ok  : AwtEvdev KEY and KSYM tables are disjoint (total check, via reflection...) (got 0 vk(s) in both)`.\nEVIDENCE REQ-003: `AwtEvdev.java:25-36` states the rule, names VK_SEPARATOR as \"the one deliberate exception to that second rule (#40)\", and gives the reason (\"symbols/us and symbols/pc bind to nothing at all, so on the default layouts the evdev route is dead\"). Satisfied *in the javadoc*; see finding for the other three places the rule is stated.\nEVIDENCE REQ-004: no `fallbackKeysym` symbol exists anywhere in `agent/boot/**.java` (grep, 0 hits); new assertion at `BootTests.java:352` passes: `ok  : #19 stays fixed: the 'l' keysym 108 never reaches the wire`.\nEVIDENCE REQ-005: full `./scripts/gate.sh` was BLOCKED by the pre_tool_use hook (control-plane only",
+    "Both findings ruled REQUEST_REMEDIATION (fix, not waive), owner Roger, source-snapshot tree:71e29b1a24a33cb56a74408c2565568f470c69f4, decision-ref issue #40. finding-366fced9c89d and finding-dcebc8fedf4a are both sent back for a fix: docs/design.md, ROADMAP.md and runtime/README.md must stop stating the old numpad-by-position rule and must record VK_SEPARATOR as the named exception with its reason. Run next and continue.",
+    "Yes - run /submit now to gate, commit and push. Do not add a Co-Authored-By trailer."
+  ],
+  "fence_decisions": {
+    "ask: This edits a version number.": 119,
+    "ask: This would publish a GitHub release, which ships to real devices.": 48,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 58,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 48,
+    "block: recursive/forced delete": 351,
+    "block: editing the deployed factory directly": 336,
+    "block: writing to a file the harness owns": 48,
+    "block: touching a secret/credential file": 211,
+    "block: sending a secret/credential file to a network client": 1410,
+    "block: sending ~/.claude.json to a network client": 94,
+    "block: force push (never rewrite published history)": 49,
+    "block: editing an existing migration": 47,
+    "block: malformed hook input": 835,
+    "block: unbounded read of a 600-line source file": 160,
+    "block: writing an owner approval from inside a factory worktree": 282,
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 282,
+    "block: writing an owner approval from a session with no recorded cwd": 47,
+    "block: running an owner-decision command from inside a factory worktree": 231,
+    "block: running an owner-decision command from a session with no recorded cwd": 47,
+    "block: hard reset discards work": 22,
+    "block: unbounded read of a 1326-line source file": 20,
+    "block: unbounded read of a 13294-line source file": 22,
+    "block: a model-tool write to Factory acceptance authority state": 473,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 159,
+    "block: a factory worker role executing the authoritative full gate": 318,
+    "block: the driver's state file could not be read (/tmp/tmp77mk362_/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpgd6jm67x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1tr3h209/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 511-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpy36rdrxx/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpbx0ktpg1/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe7e84qdj/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpybbtyg7x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpsse8eplz/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1z4_a0v5/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpx_d702y0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpxxnc07yb/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe35g42t6/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpwzts2bk0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/binaryfacts/engine's c": 1,
+    "block: destructive SQL DDL": 1,
+    "block: the driver's state file could not be read (/tmp/tmpk8v8gm1d/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1zeajaia/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 115,
+    "block: the driver's state file could not be read (/tmp/tmpee5uzj_y/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 560-line source file": 1,
+    "block: the driver's state file could not be read (/tmp/tmpjtab0xx4/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpoyzracjn/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 1442-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpbgp3my3f/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpvg2kkxrw/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpb_b6so3x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpnge3ox46/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /home/kogie": 1,
+    "block: the driver's state file could not be read (/tmp/tmpywze8dmm/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: git clean deletes untracked files": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/Spi": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp/claude": 18,
+    "ask: version bump": 875
+  },
+  "status": "done",
+  "note": "Seraph failed the run on stale docs; owner ruled REQUEST_REMEDIATION but the driver refused to route it (PROOF_METADATA_MISSING: it demands a proof_type field the seraph findings contract never asks for and FINDINGS.jsonl has no key for). Run parked by owner; the three doc files were then edited by hand and had NO independent seraph check. Breaker was not in the risk-tier ladder and did not run. Targeted testing was blocked (TEST_REGISTRY_ABSENT) and the owner ruled CONTINUE, so the full gate is this change's only coverage; that gate verdict stays recorded NEGATIVE_RESULT. Behaviour is fixture-proven only -- no live Fedora GNOME box confirmed KS 65452 produces a separator on a us/pc guest.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "1"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}
