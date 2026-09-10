@@ -87,9 +87,14 @@ trap 'rm -rf "$TMP"' EXIT
 # A sandbox is a copy of everything build.sh reads ($HERE/boot, $HERE/src) plus
 # build.sh itself, so the HERE it computes from $0 lands inside the sandbox and
 # LIB/BUILD/DIST all follow it there. lib/ starts empty; each case populates it.
-make_sandbox() {  # -> prints the sandbox path
-  local sb
-  sb="$(mktemp -d "$TMP/sandbox.XXXXXX")"
+#
+# The optional parent argument exists only for Case E: the sandbox path is the
+# variable under test there, so everything else about the sandbox must stay
+# byte-for-byte what Case A gets, or a difference in outcome would not be
+# attributable to the path.
+make_sandbox() {  # [parent_dir] -> prints the sandbox path
+  local sb parent="${1:-$TMP}"
+  sb="$(mktemp -d "$parent/sandbox.XXXXXX")"
   cp -a "$BUILD_SH" "$sb/build.sh"
   cp -a "$HERE/boot" "$HERE/src" "$sb/"
   mkdir -p "$sb/lib" "$sb/bin"
@@ -103,8 +108,13 @@ EOF
 }
 
 OUT=""; RC=0
+# LC_ALL=C because several assertions below are about diagnostics coreutils
+# emits ("FAILED open or read", "improperly formatted"). Those strings are
+# translated, so under a localised box the negative assertions would silently
+# stop discriminating -- they would pass against the broken implementation for
+# the wrong reason. Pinning the locale makes the absence mean something.
 run_build() {  # sandbox -- sets OUT (stdout+stderr) and RC
-  OUT="$(cd "$1" && PATH="$1/bin:$PATH" timeout 600 bash "$1/build.sh" 2>&1)"
+  OUT="$(cd "$1" && PATH="$1/bin:$PATH" LC_ALL=C timeout 600 bash "$1/build.sh" 2>&1)"
   RC=$?
 }
 
@@ -288,6 +298,123 @@ test_an_unrunnable_verifier_fails_closed_without_destroying_the_cached_jar() {
     "unrunnable verifier: a missing verifier is not a cache miss; build.sh must not re-fetch"
 }
 
+# Case E -- issue #49. The verify step must not route $BB_JAR through
+# `sha256sum -c`'s *line format*, because that format is a parser: it reads the
+# filename back out of "<hash>  <path>" using its own escaping rules, and a path
+# it cannot parse exits 1 in exactly the way a genuine mismatch does.
+#
+# Where the trigger comes from (independent of build.sh -- reproduced against
+# GNU coreutils 9.10 before this test was written):
+#
+#     $ echo "$h  /tmp/we<newline>ird/f.jar" | sha256sum -c -
+#     sha256sum: /tmp/we: No such file or directory
+#     /tmp/we: FAILED open or read
+#     sha256sum: WARNING: 1 line is improperly formatted
+#     sha256sum: WARNING: 1 listed file could not be read
+#     ; echo $?  ->  1
+#
+# Note what that output does *not* contain: the jar. The line was split at the
+# newline, so the check ran against a truncated path, the jar was never hashed,
+# and nothing downstream can tell that apart from "the bytes are wrong".
+#
+# The issue's stated backslash trigger does NOT reproduce on coreutils 9.10 (GNU
+# unescapes only when the line *starts* with a backslash, so a mid-path one is
+# passed through and the check succeeds); a test written to the issue's literal
+# wording would pass before the fix and prove nothing. The newline is the real
+# trigger, so that is what this case uses.
+#
+# Asserted here is the observable consequence of the contract's "avoid the parse
+# entirely", not any particular way of avoiding it: whatever build.sh does, a
+# poisoned jar in an awkward path must be rejected *as a checksum failure naming
+# the jar*, with none of the parser's own diagnostics leaking out. The name is
+# the load-bearing assertion -- the parse cannot produce it, and any
+# hash-the-file-directly implementation gets it for free.
+awkward_parent() {  # -> prints a dir whose name contains a newline, or fails
+  local p
+  p="$TMP/awk
+ward"
+  mkdir -p "$p" 2>/dev/null || return 1
+  [ -d "$p" ] || return 1
+  printf '%s\n' "$p"
+}
+
+test_a_path_the_checksum_line_format_cannot_parse_is_still_a_real_verification() {
+  local sb parent
+  parent="$(awkward_parent)" || {
+    skip "this filesystem will not hold a directory name containing a newline"
+    return 0
+  }
+  sb="$(make_sandbox "$parent")"
+  printf 'this is not a jar, it is a payload\n' > "$sb/lib/$BB_JAR_NAME"
+
+  run_build "$sb"
+
+  assert_ne "$RC" "0" "unparseable path: a poisoned jar must still fail the build"
+  assert_not_contains "$OUT" ">> compile" \
+    "unparseable path: the build must stop at verification, before compiling"
+
+  # The discriminators. Today's `echo ... | sha256sum -c -` cannot satisfy these:
+  # it names the truncated path instead of the jar, and leaks the parser's
+  # complaint about a line it could not read.
+  assert_contains "$OUT" "$BB_JAR_NAME" \
+    "unparseable path: the failure must name the jar it actually hashed and rejected"
+  assert_not_contains "$OUT" "FAILED open or read" \
+    "unparseable path: the jar was readable -- an open/read failure means the path was misparsed, not the bytes checked"
+  assert_not_contains "$OUT" "improperly formatted" \
+    "unparseable path: nothing may be parsing a checksum line format at all"
+  assert_not_contains "$OUT" "No such file or directory" \
+    "unparseable path: the jar exists; a not-found diagnostic means a truncated path was hashed"
+
+  reads_like_an_integrity_failure "$OUT" \
+    || fail "unparseable path: output must say the checksum did not match, got [$OUT]"
+  assert_file_absent "$sb/lib/$BB_JAR_NAME" \
+    "unparseable path: the jar really was verified and really was bad, so Case C's removal still applies"
+  assert_not_contains "$OUT" "$NET_MARKER" \
+    "unparseable path: a mismatch fails the build, it does not re-fetch"
+}
+
+# Case F -- the other half of #49, and the branch the fix newly creates. Hashing
+# the file directly can fail for reasons that say nothing about its contents:
+# unreadable file, I/O error. That is the same shape as Case D's missing
+# sha256sum, and it must land on the same answer, for the same reason -- build.sh
+# has learned nothing about the jar, so it must fail closed without deleting it
+# and without claiming to have rejected anything.
+#
+# Without this case, the obvious fix to Case E ("|| { rm -f; echo rejected; }"
+# around the hash) re-introduces #43's defect one line further down.
+#
+# chmod 000 is a no-op for root, which is why the suite refuses to run as root
+# (line 38) -- and it is still skipped rather than asserted if the file stays
+# readable, so a box with CAP_DAC_OVERRIDE reports no coverage instead of a
+# hollow pass.
+test_a_jar_that_cannot_be_hashed_is_not_reported_as_rejected() {
+  local sb lower
+  sb="$(make_sandbox)"
+  printf 'cached jar bytes that build.sh must not touch\n' > "$sb/lib/$BB_JAR_NAME"
+  chmod 000 "$sb/lib/$BB_JAR_NAME" 2>/dev/null || true
+  if [ -r "$sb/lib/$BB_JAR_NAME" ] && head -c1 "$sb/lib/$BB_JAR_NAME" >/dev/null 2>&1; then
+    skip "chmod 000 did not make the jar unreadable here; the unhashable branch is unreachable"
+    return 0
+  fi
+
+  run_build "$sb"
+
+  assert_ne "$RC" "0" \
+    "unhashable jar: build.sh must fail closed when it cannot hash the file"
+  assert_not_contains "$OUT" ">> compile" \
+    "unhashable jar: nothing may be compiled from a jar that was never verified"
+  assert_file_exists "$sb/lib/$BB_JAR_NAME" \
+    "unhashable jar: the jar was never hashed, so it must not be deleted"
+
+  lower="$(printf '%s' "$OUT" | tr '[:upper:]' '[:lower:]')"
+  assert_not_contains "$lower" "rejected jar" \
+    "unhashable jar: nothing was rejected -- the hash was never computed"
+  reads_like_an_unrunnable_verifier "$OUT" \
+    || fail "unhashable jar: output must say the check could not be performed, got [$OUT]"
+  assert_not_contains "$OUT" "$NET_MARKER" \
+    "unhashable jar: an unreadable cache entry is not a cache miss; build.sh must not re-fetch"
+}
+
 # Case B -- the same check must not reject a jar that is what it claims to be.
 # Guards the degenerate 'fix' of always failing, and a mistyped pinned hash.
 test_a_correctly_hashed_cached_jar_still_builds() {
@@ -325,6 +452,8 @@ for CURRENT in \
   test_a_poisoned_cached_jar_fails_the_build_before_anything_is_produced \
   test_a_poisoned_cached_jar_is_removed_so_the_next_run_can_recover \
   test_an_unrunnable_verifier_fails_closed_without_destroying_the_cached_jar \
+  test_a_path_the_checksum_line_format_cannot_parse_is_still_a_real_verification \
+  test_a_jar_that_cannot_be_hashed_is_not_reported_as_rejected \
   test_a_correctly_hashed_cached_jar_still_builds \
   test_the_real_agent_lib_cache_is_never_written
 do
