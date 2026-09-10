@@ -14,6 +14,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -159,6 +160,106 @@ class TestGeomIsAtomic(unittest.TestCase):
             {f"{w} {h}" for w, h in FlickeringGeomSession.MODES},
             f"GEOM replied {reply!r}, which is neither published geometry: it "
             f"mixed {s.observations} observations of a changing pair",
+        )
+
+
+class FlickeringAreaSession(d.Session):
+    """A session whose published capture-area origin changes between every
+    observation.
+
+    Models a monitor-layout change landing on the D-Bus thread (start() picks a
+    fresh RecordArea bounding box) while the socket thread is shifting a pointer
+    coordinate. Each read of a published origin field advances to the next
+    layout, so a reader that observes the origin *twice* subtracts x from one
+    layout and y from the other, while a reader that takes a single snapshot
+    always shifts by one whole origin. Both layouts are themselves coherent:
+    nothing here can produce a half-shifted point except the reader mixing two
+    observations.
+
+    .area_x/.area_y are kept alongside .area_origin on purpose, for the same
+    reason FlickeringGeomSession keeps .width/.height: without them a two-load
+    reader would die on a missing attribute, which proves only that a rename
+    happened; with them it is caught mis-shifting the pointer, which is the
+    defect itself.
+
+    Session.__init__ is deliberately not chained. It wants a bus, a monitor and
+    a frame buffer that this test has no use for, and it *assigns* the published
+    origin, which is a read-only property here -- chaining would abort in the
+    constructor instead of exercising motion_abs. Only the state motion_abs
+    touches is set up. _rd is stubbed rather than driven through a FakeBus
+    because the coordinates are the whole assertion and FakeBus records method
+    names, not arguments; going through the real _rd would only add a GLib
+    Variant round-trip between the reader and the value under test.
+    """
+
+    ORIGINS = ((1920, 200), (640, 100))
+
+    def __init__(self):
+        self.observations = 0
+        self.stream_path = "/org/gnome/Mutter/ScreenCast/Session/u1/Stream/u2"
+        self._lock = threading.Lock()
+        self.rd_calls = []
+
+    def _observe(self):
+        origin = self.ORIGINS[self.observations % len(self.ORIGINS)]
+        self.observations += 1
+        return origin
+
+    @property
+    def area_origin(self):
+        return self._observe()
+
+    @property
+    def area_x(self):
+        return self._observe()[0]
+
+    @property
+    def area_y(self):
+        return self._observe()[1]
+
+    def _rd(self, method, params=None, sig=None):
+        self.rd_calls.append((method, params, sig))
+
+
+class TestAreaOriginIsAtomic(unittest.TestCase):
+    """Issue #57: area_x and area_y are written on the D-Bus thread and read
+    together on the socket thread, so "a reader can take a new `area_x` with a
+    stale `area_y`" and the pointer is mis-shifted -- "input lands in the wrong
+    place", and unlike #44's torn GEOM it does not self-correct on the next
+    frame.
+
+    The shift is contract, not implementation detail: runtime/README.md:59
+    defines `M <x> <y>` as a pointer absolute move in *screen* px, and
+    ROADMAP.md:255 -- "Pointer coordinates are shifted by the area origin
+    (`area_x/area_y`) into the stream's frame". So the screen point (2020, 500)
+    is (100, 300) in a stream whose area is anchored at (1920, 200), and
+    (1380, 400) in one anchored at (640, 100). Those two are the only answers a
+    correct reader can give while the layout flickers between exactly those two
+    areas; (100, 400) -- x from the first area, y from the second -- is a point
+    on neither, and is the pointer landing 100 px from where the operator
+    clicked. Neither origin is (0, 0), so "shifted by one whole origin" is also
+    not satisfiable by dropping the shift altogether.
+    """
+
+    DESKTOP_X, DESKTOP_Y = 2020.0, 500.0
+
+    def test_pointer_is_shifted_by_one_published_origin_never_a_mix_of_two(self):
+        s = FlickeringAreaSession()
+        s.motion_abs(self.DESKTOP_X, self.DESKTOP_Y)
+
+        self.assertEqual(len(s.rd_calls), 1, "motion_abs made no single RemoteDesktop call")
+        method, params, sig = s.rd_calls[0]
+        self.assertEqual(method, "NotifyPointerMotionAbsolute")
+        self.assertEqual(params[0], s.stream_path)
+
+        coherent = {(self.DESKTOP_X - ox, self.DESKTOP_Y - oy)
+                    for ox, oy in FlickeringAreaSession.ORIGINS}
+        self.assertIn(
+            (params[1], params[2]),
+            coherent,
+            f"pointer sent to {(params[1], params[2])}, which is the point in "
+            f"neither published area {FlickeringAreaSession.ORIGINS}: the "
+            f"reader mixed {s.observations} observations of a changing origin",
         )
 
 
