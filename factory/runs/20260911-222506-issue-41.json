@@ -1,0 +1,162 @@
+{
+  "recorded_at": "2026-09-11T22:25:07Z",
+  "repo": "build-integrity-2",
+  "branch": "agent/build-integrity-2",
+  "base": "181d9e6f3385c3e5b3bd24602538edafdb653402",
+  "window_start": "2026-09-10T11:48:34+10:00",
+  "head": "11ffe92e9e3dff608fb2dfa1c311ea2c1b200ad9",
+  "issue": {
+    "number": 41,
+    "state": "OPEN",
+    "title": "run-tests.sh: an uncaught exception from one Java test method aborts the whole gate silently",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/41"
+  },
+  "commits": [
+    {
+      "sha": "11ffe92e9e3dff608fb2dfa1c311ea2c1b200ad9",
+      "subject": "Agent: catch Throwable per boot test and defer the gate failure (#41)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "3 files changed, 359 insertions(+), 62 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 360,
+      "output_tokens": 259519,
+      "cache_read_input_tokens": 71172245,
+      "cache_creation_input_tokens": 1734897
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 9,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 40650,
+        "duration_ms": 172698,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 143455,
+        "duration_ms": 734586,
+        "models": []
+      },
+      "builder": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 192987,
+        "duration_ms": 508922,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 3,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 219602,
+        "duration_ms": 740652,
+        "models": []
+      }
+    },
+    "usage_blocks": 180,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "c074718a-6042-435c-beda-b51357e884a8.jsonl",
+        "usage_blocks": 180
+      }
+    ],
+    "agent_wall_clock_ms": 2156858,
+    "first_activity": "2026-09-10T01:49:08.825000+00:00",
+    "last_activity": "2026-09-11T22:24:54.113000+00:00",
+    "notification_tokens": 596694,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "<task-notification>\n<task-id>a1accea73bbbb0350</task-id>\n<tool-use-id>toolu_01PP4uTBKjS9smWS9q46YVKm</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a1accea73bbbb0350.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder green for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 6bc5d04606da4cacb5a7d589ea5079fe\nINVOCATION-ID: inv-003-a5524926\nEVIDENCE REQ-001: Throws now land in the suite's existing counter, not `set -e`. Mutant run (real method made to throw) printed `FAIL: testAwtEvdevTablesDisjoint threw java.lang.NoSuchFieldException: KEY_RENAMED_BY_MUTANT` then `1 FAILURE(S)`, JVM exit 1 \u2014 reported via `check(false, \u2026)` at `BootTests.java:94`, the same `check()` at `:30-33` every other failure uses.\nEVIDENCE REQ-002: `BootTests.java:69-84` \u2014 `for (NamedTest t : tests) { try { t.body().run(); } catch (Throwable e) { thrown.add(t.name() + \" threw \" + e); } }`. Oracle's element 2 throws `AssertionError` (an `Error`); run log: `ok  : an AssertionError is caught and reported against the test it came from \u2026 (got \"beta threw java.lang.AssertionError: boom-assert\")`.\nEVIDENCE REQ-003: Observed `ok  : exactly the two tests that threw are reported, and no others (got 2: [beta threw java.lang.AssertionError: boom-assert, delta threw java.lang.Exception: boom-checked])` \u2014 name + type + detail message. `toString()` chosen over `getMessage()` (comment at `:75-80`).\nEVIDENCE REQ-004: `ok  : every test still runs, in order, after two of them throw (ran [alpha, beta, gamma, delta, epsilon])`. End-to-end: mutant produced 371 `ok  :` lines vs 374 unmutated \u2014 exactly the mutated test's own 3 checks lost, every later test still ran.\nEVIDENCE REQ-",
+    "<task-notification>\n<task-id>a16b03b7f8a7aa0b8</task-id>\n<tool-use-id>toolu_01VRWbgYLkK9Ac8Xg5Sw8B55</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a16b03b7f8a7aa0b8.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle red test slice 2 for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>```\nRED: confirmed\nACTION-ID: 3880954c278b47178efa9fd55f775743\nINVOCATION-ID: inv-004-dede20d9\nEVIDENCE REQ-001: Slice 2 observes \"same place\" from outside the JVM: `BootTests.java:353-358` requires a `FAIL: ` line and `:359` forbids `ALL PASS` \u2014 `FAIL: `/`N FAILURE(S)`/`System.exit(1)` are pre-existing at committed `HEAD:BootTests.java:30-33,95-99`, so nothing asserted here was introduced by #41.\nEVIDENCE REQ-002: Mutant A (one `catch` around the whole loop \u2014 the \"abort loud\" alternative the issue raised) failed: `FAIL: ... the child prints its marker (child wrote 1 lines, status 1)`. Its status check *passed*, so status alone would not have caught it.\nEVIDENCE REQ-003: `:353-358` requires the FAIL line to contain the test name, `AssertionError` and the detail message. Red gave `(got null)`; mutant A gave `(got \"FAIL: java.lang.AssertionError: fault-selftest-boom\")` \u2014 unnamed test, caught.\nEVIDENCE REQ-004: `:347-349` asserts the child prints `FAULT-SELFTEST-CONTINUED`, printed by the fixture element listed *after* the thrower (`faultSelfTest()`, `:276-282`).\nEVIDENCE REQ-005: `:350-352` asserts child exit status `== 1`. Mutant B (catch+continue, uncounted) failed: `(got status 0)` plus `does not report the run as passing`.\nEVIDENCE REQ-006: The thrower is a lambda with no `throws` clause throwing an `AssertionError` (`:277-279`); containment cannot come from a declare",
+    "<task-notification>\n<task-id>a40c05d6795d76c1c</task-id>\n<tool-use-id>toolu_01VCYhScB5f9opkanJrwVqFz</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a40c05d6795d76c1c.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder green slice 2 for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 747cf97c6faf44c9acda48dda40aa6dc\nINVOCATION-ID: inv-005-0aee5652\nEVIDENCE REQ-001: The child JVM reported the throw through the suite's own `check()`/summary, not `set -e`: run.log:401 `ok : the throw is reported as a failure naming the test it came from and the throwable (got \"FAIL: faultSelfTestThrows threw java.lang.AssertionError: fault-selftest-boom\")`. `--fault-selftest` reuses main's single reporting path (`BootTests.java:105-106`), so nothing separate was built for it.\nEVIDENCE REQ-002: Containment is `runAll`'s per-element `catch (Throwable)` (`BootTests.java:72-83`, unchanged this slice); the child threw an `AssertionError` (an `Error`) from element 1 and still ran element 2 \u2014 run.log:399 `(child wrote 3 lines, status 1)`, i.e. FAIL line + marker + summary, not a truncated 1-line abort.\nEVIDENCE REQ-003: run.log:401 above \u2014 the `FAIL: ` line carries the method name `faultSelfTestThrows`, the type `java.lang.AssertionError` and the detail `fault-selftest-boom`; produced by `check(false, thrown)` at `BootTests.java:106`, the same `check()` at `:31-34` as every other failure.\nEVIDENCE REQ-004: run.log:399 `ok : a test listed after the throwing one still runs: the child prints its marker`. The marker is printed by the fixture element listed *after* the thrower (`:281-282`).\nEVIDENCE REQ-005: run.log:400 `ok : and the child still exits 1 \u2026 (go",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-3f22fb96887f --outcome CONTINUE --owner Roger was run from the primary checkout. Run next and continue.",
+    "<task-notification>\n<task-id>a8f12bddc6a94e574</task-id>\n<tool-use-id>toolu_01PcLey4H58fnmkZUZkjYEMD</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a8f12bddc6a94e574.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph verification for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: fail\nACTION-ID: 2c94d8da271748bab82fe45909078a4f\nINVOCATION-ID: inv-006-b0054b2f\n\nEVIDENCE REQ-001: Owner decision recorded independently of the builder \u2014 `factory/decision-consumption/pd-3f22fb96887f.json`: `\"outcome\": \"CONTINUE\"`, `\"owner\": \"Roger\"`, `\"decided_at\": 1789128699`, matching the `UserPromptSubmit` log line for cwd `build-integrity-2` (\"Decided. factory_pending_decisions.py --decide --pending-decision-id pd-3f22fb96887f --outcome CONTINUE --owner Roger\"). Approval is *recorded*, one step from the owner, not proven.\nEVIDENCE REQ-002: `BootTests.java:66-79` `runAll` wraps `t.body().run()` in `catch (Throwable e)` per element; `TestBody.run() throws Throwable` (`:45`). Live: injected `throw new IllegalStateException(\"SERAPH-INJECTED-THROW\")` into `testCaptureTuning` (scratchpad copy) \u2192 suite still emitted 366 `ok  :` lines including tests listed after it.\nEVIDENCE REQ-003: `java \u2026 BootTests --fault-selftest` printed `FAIL: faultSelfTestThrows threw java.lang.AssertionError: fault-selftest-boom` / `1 FAILURE(S)` \u2014 via the pre-existing `check()` (`:23-26`), naming test and throwable.\nEVIDENCE REQ-004: Injected-throw run reached `testLogonProbeCache` and the three trailing state-mutating tests (`rt.out:395` `precondition: registryReadCount()\u2026`), i.e. every later method ran.\nEVIDENCE REQ-005: **FAIL (partial).** Exit status half holds: `SELFTEST_EXIT=1`, and i",
+    "<task-notification>\n<task-id>afd8710f1077717e3</task-id>\n<tool-use-id>toolu_015F1ke9Qpy2x6xWZg6kbwHN</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/afd8710f1077717e3.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder remediation for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 4f22f39437b34902b67a68dba8dc1033\nINVOCATION-ID: inv-007-2ad703b9\nEVIDENCE REQ-001: The owner's \"catch per test, count it, keep going\" now reaches the gate end-to-end: injected-throw run printed `FAIL: testCaptureTuning threw java.lang.IllegalStateException: BUILDER-INJECTED-THROW`, ran on, and ended `FAILED: the Java boot tests (exit 1)` with `RUNTESTS_EXIT=1` \u2014 red, nothing masked, nothing truncated.\nEVIDENCE REQ-002: `runAll` at `agent/test/dreamconnect/boot/BootTests.java:70-85` wraps `t.body().run()` in `catch (Throwable e)` per element (unchanged this invocation). Live: the injected throw in `testCaptureTuning` cost only that test \u2014 the run still produced all later sections.\nEVIDENCE REQ-003: Candidate-tree run: `379` `ok  :` lines, `BOOT_EXIT=0`, `ALL PASS`; `--fault-selftest` path asserted in-suite \u2014 `ok  : the throw is reported as a failure naming the test it came from and the throwable (got \"FAIL: faultSelfTestThrows threw java.lang.AssertionError: fault-selftest-boom\")`.\nEVIDENCE REQ-004: Injected-throw output reached the trailing state-mutating Java tests and every later suite; `grep -a '^== '` returned all 7 headers (`== Java boot tests ==` \u2026 `== Agent build shell tests ==`), against the seraph's previous 1.\nEVIDENCE REQ-005: `RUNTESTS_EXIT=1` with all 7 section headers present and `ALL TESTS PASSED` absent \u2014 both halves now hold. Clean c",
+    "<task-notification>\n<task-id>a32c5a6bfeca89c72</task-id>\n<tool-use-id>toolu_01RpUWTG5CFbsvBrCHboqx47</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a32c5a6bfeca89c72.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph reverification for issue 41\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: 4973e91d0ff944e3b938651d9cc1c97e\nINVOCATION-ID: inv-008-2dc25669\n\nEVIDENCE REQ-001: Owner decision is in the issue body (verbatim ask) and is now realised: injected `throw new IllegalStateException(\"SERAPH-INJECTED-THROW\")` into `testCaptureTuning` in a scratchpad copy of the candidate; `bash ./run-tests.sh` \u2192 `RUNTESTS_EXIT=1`, output line 406 `FAIL: testCaptureTuning threw java.lang.IllegalStateException: SERAPH-INJECTED-THROW`, line 407 `1 FAILURE(S)`, and all seven section headers present.\nEVIDENCE REQ-002: `BootTests.java:70-85` \u2014 `runAll` loops the list with `try { t.body().run(); } catch (Throwable e) { thrown.add(t.name() + \" threw \" + e); }`; `TestBody.run() throws Throwable` (:46) so `Error`/`AssertionError` is in scope, not just `Exception`.\nEVIDENCE REQ-003: `BootTests.java:105` `for (String thrown : runAll(...)) check(false, thrown);` routes it into the same `failures++` counter as every assertion (`check`, :31-34). Observed output names both: `FAIL: testCaptureTuning threw java.lang.IllegalStateException: SERAPH-INJECTED-THROW` then `1 FAILURE(S)`.\nEVIDENCE REQ-004: Baseline `ok  :` count 379 vs injected 366 \u2014 a difference of exactly testCaptureTuning's 13 checks, nothing else lost. Tests listed after it still ran: injected output :378 `every test still runs, in order, after two of them throw`, :382/:384 the `--fault-selftest` child c",
+    "1 - fix the comments now. A comment naming the wrong mechanism is worse than none, CLAUDE.md says comments must record real reasoning, and this repo has now been bitten by that class four times: the CLAUDE.md suite list, the area_x/area_y docs (#62), the VK_SEPARATOR numpad rule (#40), and the umask comment I just filed as #64. You have the budget. Continue.",
+    "<task-notification>\n<task-id>a79bea99ffc7f5896</task-id>\n<tool-use-id>toolu_01KwzjqzWj4bHdjyVvD8tQUR</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a79bea99ffc7f5896.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph reverify comment finding\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: fail\nACTION-ID: 8458fdc76f0c49478891a8afa0d6c38c\nINVOCATION-ID: inv-009-234afd55\nEVIDENCE REQ-001: `bash ./run-tests.sh` on a scratchpad copy with `throw new IllegalStateException(\"SERAPH-INJECTED-THROW\")` injected into `testCaptureTuning` \u2192 `RUNTESTS_EXIT=1`, output line 406 `FAIL: testCaptureTuning threw java.lang.IllegalStateException: SERAPH-INJECTED-THROW`, line 407 `1 FAILURE(S)`, all seven `== \u2026 ==` section headers present (lines 1, 409, 431, 439, 447, 455, 728). Owner decision recorded: factory/decision-consumption/pd-3f22fb96887f.json (`owner: \"Roger\"`, outcome CONTINUE, decision_ref issue #41).\nEVIDENCE REQ-002: BootTests.java:70-83 \u2014 `runAll` loops `for (NamedTest t : tests)` with `try { t.body().run(); } catch (Throwable e)` inside the loop; `TestBody.run() throws Throwable` (:45-47), so `AssertionError` is caught too.\nEVIDENCE REQ-003: BootTests.java:81 `thrown.add(t.name() + \" threw \" + e);` fed to `check(false, \u2026)` at :105, the same counter as every other failure (:31-34). Real output: `FAIL: testCaptureTuning threw java.lang.IllegalStateException: SERAPH-INJECTED-THROW`.\nEVIDENCE REQ-004: injected-throw run printed 366 `ok  : ` lines, including tests registered after `testCaptureTuning` (allTests():149-155) and the self-test's `ok  : the --fault-selftest child exits rather than hanging` (rt.out:382). 57 `new NamedTest(\"test\u2026` entries vs 57 `private st",
+    "Decided REMEDIATE. factory_pending_decisions.py --decide --pending-decision-id pd-c0517c986a04 --outcome REMEDIATE --owner Roger was run from the primary checkout. Fix the three comments to name the deferred exit, not set -e. Run next and continue.",
+    "1 - run stop-work and fix the comments outside the loop. Same ruling as everywhere else: a comment naming the wrong mechanism is worse than none, and this is the fifth time that class has cost this repo an issue. Edit BootTests.java:92, :102 and :361-362 to name exit \"$java_status\" (run-tests.sh:57) and the call at :23, run the full gate, then /submit. Yes on the driver bug - I am verifying it against the factory source and filing it on ghostpsalm/AI-Factory this tick, you do not need to.",
+    "The driver bug is filed as https://github.com/ghostpsalm/AI-Factory/issues/601 - your diagnosis was right and I verified it in the source. The collision is factory_implement.py:3620-3636 forbidding an obligation from naming a mutating role, which is correct, against REMEDIATE re-issuing whatever role the obligation names - so the verifier is re-issued on an unchanged tree forever. Carry on with option 1: stop-work, fix BootTests.java:92, :102 and :361-362 to name exit $java_status, full gate, /submit."
+  ],
+  "fence_decisions": {
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 373,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 123,
+    "block: a factory worker role executing the authoritative full gate": 9011,
+    "block: unbounded read of a 1326-line source file": 6,
+    "block: unbounded read of a 13294-line source file": 6,
+    "block: recursive/forced delete": 711,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 1530,
+    "block: a model-tool write to Factory acceptance authority state": 157,
+    "block: running an owner-decision command from inside a factory worktree": 329,
+    "block: malformed hook input": 514,
+    "block: unbounded read of a 600-line source file": 284,
+    "block: the driver's state file could not be read (/tmp/tmpbgp3my3f/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpvg2kkxrw/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpb_b6so3x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpnge3ox46/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /home/kogie": 1,
+    "ask: This edits a version number.": 2114,
+    "ask: This would publish a GitHub release, which ships to real devices.": 1509,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 182,
+    "block: editing the deployed factory directly": 4382,
+    "block: writing to a file the harness owns": 101,
+    "block: touching a secret/credential file": 1161,
+    "block: sending a secret/credential file to a network client": 4107,
+    "block: sending ~/.claude.json to a network client": 182,
+    "block: force push (never rewrite published history)": 104,
+    "block: editing an existing migration": 96,
+    "block: writing an owner approval from inside a factory worktree": 552,
+    "block: writing an owner approval from a session with no recorded cwd": 474,
+    "block: running an owner-decision command from a session with no recorded cwd": 3518,
+    "block: hard reset discards work": 15,
+    "block: the driver's state file could not be read (/tmp/tmpywze8dmm/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: git clean deletes untracked files": 5,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 8843,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/Spi": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp/claude": 30,
+    "ask: version bump": 875,
+    "block: the driver's state file could not be read (/tmp/tmp_l8u3_hy/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: piping remote content straight to a shell": 17,
+    "block: the driver's state file could not be read (/tmp/tmpb_7czqhr/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: destructive SQL DDL": 3610,
+    "block: push --all (push the current branch only)": 4,
+    "block: TRUNCATE destroys data": 4,
+    "block: unqualified DELETE (no WHERE)": 4,
+    "block: disk-destructive command": 8,
+    "block: fork bomb": 4,
+    "block: world-writable recursive chmod": 4,
+    "block: reading ~/.claude.json, which holds a live credential": 4,
+    "block: writing to ~/.claude.json, which holds a live credential": 8,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp could ": 6
+  },
+  "status": "done",
+  "note": "Owner-decided design first: issue #41 posed an open question and had no requirements; a Requirements section was added to the issue recording the owner's 2026-09-11 decision (catch per test, count it, keep going) before the run could start. Seraph FAILED the first pass and was right: the BootTests-only fix left run-tests.sh:13 running the JVM bare under set -e, so the gate still truncated. Builder remediation extended scope to run-tests.sh and scripts/gate.sh, which the approved plan did not cover. A third finding (comments naming set -e as the failing mechanism) could not be discharged inside the loop: REMEDIATE on a verification obligation re-issues the verifier, never a builder, so the seraph was re-run twice on an unchanged tree. Filed as ghostpsalm/AI-Factory#601 (collision at factory_implement.py:3620-3636). Run parked with stop-work at 5156s; the three comments were corrected outside the loop and verified by hand. No breaker ran: risk tier normal drew architect/oracle/builder/seraph only. Gate green exit 0, with 1 SKIP (agent build good-jar case needs a local byte-buddy jar). Injected-throw check run by hand: exit 1, all 7 section headers present, ALL TESTS PASSED absent. No CI: .github/workflows is untracked, so the push triggers nothing.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "1"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}
