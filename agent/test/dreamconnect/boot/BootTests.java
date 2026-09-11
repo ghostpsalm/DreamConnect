@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Dependency-free unit tests for the bootstrap classes (no JUnit — the agent
@@ -32,70 +33,345 @@ public class BootTests {
         if (!cond) failures++;
     }
 
-    public static void main(String[] args) throws Exception {
-        testAwtEvdev();
-        testAwtEvdevKeysymLetters();
-        testAwtEvdevKeysymDigits();
-        testAwtEvdevKeysymPunctuation();
-        testAwtEvdevTablesDisjoint();
-        testRobotPeerKeyWire();
-        testRobotPeerSeparatorKey();
-        testAwtEvdevF13ToF24Mapped();
-        testAwtEvdevHelpMapped();
-        testAwtEvdevKpArrowsMapped();
-        testRobotPeerUnmappedKeyDropped();
-        testRobotPeerNoPrintableAsciiFallback();
-        testNoNamedAwtVkNeedsTheDeletedFallback();
-        testFrameReader();
-        testFrameReaderNeverBlackMidWrite();
-        testCurateLogonSessions();
-        testCurateKeepsEverySessionWithALiveDaemon();
-        testCurateOrdersTheConfiguredSessionFirst();
-        testCurateMatchesDisplaysAcrossNormalisation();
-        testCurateDropsWhatCannotWork();
-        testCurateFallsBackToTodaysBehaviourWithNoRegistry();
-        testCurateNeverEmptiesThePicker();
-        testCurateOffKeepsEverything();
-        testCurateOffersOnlyWhatResolutionWillAccept();
-        testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown();
-        testCurateRelabelsAtomically();
-        testCurateCollapsesDuplicateDisplayEntries();
-        testCaptureTuning();
-        testLogonProbeCache();
-        testNormalizeDisplay();
-        testNormalizeDisplayRejectsProtocolError();
-        testSanitizeLabel();
-        testResolveEndpointMatchesChildDisplay();
-        testResolveEndpointFallsBackWhenNothingToResolve();
-        testResolveEndpointFallsBackWhenRegistrySilent();
-        testResolveEndpointRefusesWhenDescribedButNotLive();
-        testResolveEndpointNeverMatchesUnknownDaemon();
-        testResolveEndpointNeverMatchesErrorReplyDaemon();
-        testResolveEndpointRefusesAmbiguousClaims();
-        testResolveEndpointRefusesKnownWrongFallback();
-        testParseRegistryEntry();
-        testTrustedFile();
-        testUsableShm();
-        testReadRegistryTrustGate();
-        testReadRegistryDropsOnlyTheBadEntry();
-        testReadRegistryIgnoresNonUidFilenames();
-        testLiveSessionsKeepsOnlyVerifiedSessions();
-        testLiveSessionsIsolatesMalformedEntries();
-        testPeerUserIsTheConnectedPeer();
-        testDaemonClientRefusesWrongPeerUser();
-        testDaemonClientCloseIsTerminal();
-        testProbeConnectIsBounded();
-        // Last, and in this order: both mutate Bridge's process-wide static
-        // state (daemon/frame, and shm=/socket=/label= config). Add new tests
-        // ABOVE this line.
-        testAttachedClientIsPeerAuthenticated();
-        testRegistryLabelWinsOverWho();
-        testCurateEntryPointDoesNoWorkForInputItCannotCurate();
+    /**
+     * One test method's body, as {@link #runAll} invokes it.
+     *
+     * Declares {@code throws Throwable} rather than {@code throws Exception}
+     * on purpose: the failure this runner exists to contain is an
+     * {@code AssertionError}, which is an {@code Error}. A body type — and so
+     * a catch — shaped around {@code Exception} would let exactly the failure
+     * mode #41 reports walk straight back out of the loop.
+     */
+    interface TestBody {
+        void run() throws Throwable;
+    }
+
+    /** A test method's body paired with the name it is reported under. */
+    record NamedTest(String name, TestBody body) {}
+
+    /**
+     * Run every test in the list and return one message per test that threw.
+     *
+     * The contract (#41, decided 2026-09-11 by the owner): every body is
+     * invoked inside its own {@code catch (Throwable)}, so a throw ends that
+     * test and nothing else — every later test in the list still runs. A
+     * caught Throwable is never rethrown; it comes back as a message naming
+     * both the test it came from and the throwable, for the caller to hand to
+     * {@link #check} so that it lands in the same failure count as every other
+     * failure in this suite. A test that returns normally contributes no
+     * message.
+     *
+     * That this holds is a stated contract, not an accident of which methods
+     * happen to declare {@code throws Exception}: it holds for every element
+     * of the list, checked or unchecked, {@code Error} or {@code Exception}.
+     *
+     * @return one message per throwing test; empty when none threw
+     */
+    static List<String> runAll(List<NamedTest> tests) {
+        List<String> thrown = new ArrayList<>();
+        for (NamedTest t : tests) {
+            try {
+                t.body().run();
+            } catch (Throwable e) {
+                // The throwable's toString(), not getMessage(): a throwable
+                // constructed without a message (`new IllegalStateException()`)
+                // has a null message, which would name the test and then say
+                // nothing at all about what happened to it. toString() always
+                // carries at least the type.
+                thrown.add(t.name() + " threw " + e);
+            }
+        }
+        return thrown;
+    }
+
+    public static void main(String[] args) {
+        // Every test runs inside runAll's own per-test catch, so a throw ends
+        // that test and nothing else. Reporting what it caught through check()
+        // is the other half of #41's contract: a throw lands in the same
+        // failure counter as every failed assertion, so the exit below still
+        // goes non-zero. `set -e` is NOT what carries that to the gate:
+        // run-tests.sh:23 catches this status with `|| java_status=$?`, which
+        // is precisely the form that stops `set -e` firing, and fails the gate
+        // from the deferred `exit "$java_status"` at run-tests.sh:57 -- after
+        // the Python and installer sections have run, instead of killing the
+        // script where the throw happened.
+        //
+        // --fault-selftest swaps the suite for the two-element fixture list
+        // faultSelfTest() describes, and changes nothing else: same runAll,
+        // same check(), same summary and exit below. That sameness is the
+        // point -- what it demonstrates is only worth anything if the path it
+        // takes is the one a real throw would take. It is a hidden argument
+        // rather than a separate main because the boundary under test is this
+        // class's own process: run-tests.sh:23 sees an exit status and a
+        // stream of output, and nothing else.
+        boolean selfTest = List.of(args).contains("--fault-selftest");
+        for (String thrown : runAll(selfTest ? faultSelfTest() : allTests())) check(false, thrown);
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
         }
         System.out.println("ALL PASS");
+    }
+
+    /**
+     * Every test in the suite, in the order it must run.
+     *
+     * List order is execution order, so the ordering constraint the last three
+     * entries carry is load-bearing here exactly as it was when main() called
+     * them as a bare sequence.
+     */
+    private static List<NamedTest> allTests() {
+        return List.of(
+                new NamedTest("testAwtEvdev", BootTests::testAwtEvdev),
+                new NamedTest("testAwtEvdevKeysymLetters", BootTests::testAwtEvdevKeysymLetters),
+                new NamedTest("testAwtEvdevKeysymDigits", BootTests::testAwtEvdevKeysymDigits),
+                new NamedTest("testAwtEvdevKeysymPunctuation", BootTests::testAwtEvdevKeysymPunctuation),
+                new NamedTest("testAwtEvdevTablesDisjoint", BootTests::testAwtEvdevTablesDisjoint),
+                new NamedTest("testRobotPeerKeyWire", BootTests::testRobotPeerKeyWire),
+                new NamedTest("testRobotPeerSeparatorKey", BootTests::testRobotPeerSeparatorKey),
+                new NamedTest("testAwtEvdevF13ToF24Mapped", BootTests::testAwtEvdevF13ToF24Mapped),
+                new NamedTest("testAwtEvdevHelpMapped", BootTests::testAwtEvdevHelpMapped),
+                new NamedTest("testAwtEvdevKpArrowsMapped", BootTests::testAwtEvdevKpArrowsMapped),
+                new NamedTest("testRobotPeerUnmappedKeyDropped", BootTests::testRobotPeerUnmappedKeyDropped),
+                new NamedTest("testRobotPeerNoPrintableAsciiFallback", BootTests::testRobotPeerNoPrintableAsciiFallback),
+                new NamedTest("testNoNamedAwtVkNeedsTheDeletedFallback", BootTests::testNoNamedAwtVkNeedsTheDeletedFallback),
+                new NamedTest("testFrameReader", BootTests::testFrameReader),
+                new NamedTest("testFrameReaderNeverBlackMidWrite", BootTests::testFrameReaderNeverBlackMidWrite),
+                new NamedTest("testCurateLogonSessions", BootTests::testCurateLogonSessions),
+                new NamedTest("testCurateKeepsEverySessionWithALiveDaemon", BootTests::testCurateKeepsEverySessionWithALiveDaemon),
+                new NamedTest("testCurateOrdersTheConfiguredSessionFirst", BootTests::testCurateOrdersTheConfiguredSessionFirst),
+                new NamedTest("testCurateMatchesDisplaysAcrossNormalisation", BootTests::testCurateMatchesDisplaysAcrossNormalisation),
+                new NamedTest("testCurateDropsWhatCannotWork", BootTests::testCurateDropsWhatCannotWork),
+                new NamedTest("testCurateFallsBackToTodaysBehaviourWithNoRegistry", BootTests::testCurateFallsBackToTodaysBehaviourWithNoRegistry),
+                new NamedTest("testCurateNeverEmptiesThePicker", BootTests::testCurateNeverEmptiesThePicker),
+                new NamedTest("testCurateOffKeepsEverything", BootTests::testCurateOffKeepsEverything),
+                new NamedTest("testCurateOffersOnlyWhatResolutionWillAccept", BootTests::testCurateOffersOnlyWhatResolutionWillAccept),
+                new NamedTest("testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown", BootTests::testCurateKeepsTheConfiguredSessionEvenWhenItsDaemonIsDown),
+                new NamedTest("testCurateRelabelsAtomically", BootTests::testCurateRelabelsAtomically),
+                new NamedTest("testCurateCollapsesDuplicateDisplayEntries", BootTests::testCurateCollapsesDuplicateDisplayEntries),
+                new NamedTest("testCaptureTuning", BootTests::testCaptureTuning),
+                new NamedTest("testLogonProbeCache", BootTests::testLogonProbeCache),
+                new NamedTest("testNormalizeDisplay", BootTests::testNormalizeDisplay),
+                new NamedTest("testNormalizeDisplayRejectsProtocolError", BootTests::testNormalizeDisplayRejectsProtocolError),
+                new NamedTest("testSanitizeLabel", BootTests::testSanitizeLabel),
+                new NamedTest("testResolveEndpointMatchesChildDisplay", BootTests::testResolveEndpointMatchesChildDisplay),
+                new NamedTest("testResolveEndpointFallsBackWhenNothingToResolve", BootTests::testResolveEndpointFallsBackWhenNothingToResolve),
+                new NamedTest("testResolveEndpointFallsBackWhenRegistrySilent", BootTests::testResolveEndpointFallsBackWhenRegistrySilent),
+                new NamedTest("testResolveEndpointRefusesWhenDescribedButNotLive", BootTests::testResolveEndpointRefusesWhenDescribedButNotLive),
+                new NamedTest("testResolveEndpointNeverMatchesUnknownDaemon", BootTests::testResolveEndpointNeverMatchesUnknownDaemon),
+                new NamedTest("testResolveEndpointNeverMatchesErrorReplyDaemon", BootTests::testResolveEndpointNeverMatchesErrorReplyDaemon),
+                new NamedTest("testResolveEndpointRefusesAmbiguousClaims", BootTests::testResolveEndpointRefusesAmbiguousClaims),
+                new NamedTest("testResolveEndpointRefusesKnownWrongFallback", BootTests::testResolveEndpointRefusesKnownWrongFallback),
+                new NamedTest("testParseRegistryEntry", BootTests::testParseRegistryEntry),
+                new NamedTest("testTrustedFile", BootTests::testTrustedFile),
+                new NamedTest("testUsableShm", BootTests::testUsableShm),
+                new NamedTest("testReadRegistryTrustGate", BootTests::testReadRegistryTrustGate),
+                new NamedTest("testReadRegistryDropsOnlyTheBadEntry", BootTests::testReadRegistryDropsOnlyTheBadEntry),
+                new NamedTest("testReadRegistryIgnoresNonUidFilenames", BootTests::testReadRegistryIgnoresNonUidFilenames),
+                new NamedTest("testLiveSessionsKeepsOnlyVerifiedSessions", BootTests::testLiveSessionsKeepsOnlyVerifiedSessions),
+                new NamedTest("testLiveSessionsIsolatesMalformedEntries", BootTests::testLiveSessionsIsolatesMalformedEntries),
+                new NamedTest("testPeerUserIsTheConnectedPeer", BootTests::testPeerUserIsTheConnectedPeer),
+                new NamedTest("testDaemonClientRefusesWrongPeerUser", BootTests::testDaemonClientRefusesWrongPeerUser),
+                new NamedTest("testDaemonClientCloseIsTerminal", BootTests::testDaemonClientCloseIsTerminal),
+                new NamedTest("testProbeConnectIsBounded", BootTests::testProbeConnectIsBounded),
+                new NamedTest("testRunnerCatchesEachTestAndKeepsGoing", BootTests::testRunnerCatchesEachTestAndKeepsGoing),
+                new NamedTest("testFaultSelfTestExitsNonZeroAfterContinuing", BootTests::testFaultSelfTestExitsNonZeroAfterContinuing),
+                // Last, and in this order: both mutate Bridge's process-wide static
+                // state (daemon/frame, and shm=/socket=/label= config). Add new tests
+                // ABOVE this line.
+                new NamedTest("testAttachedClientIsPeerAuthenticated", BootTests::testAttachedClientIsPeerAuthenticated),
+                new NamedTest("testRegistryLabelWinsOverWho", BootTests::testRegistryLabelWinsOverWho),
+                new NamedTest("testCurateEntryPointDoesNoWorkForInputItCannotCurate", BootTests::testCurateEntryPointDoesNoWorkForInputItCannotCurate));
+    }
+
+    /** First message that mentions {@code name}, or null. Keeps the asserts legible. */
+    private static String firstMentioning(List<String> messages, String name) {
+        for (String m : messages) if (m != null && m.contains(name)) return m;
+        return null;
+    }
+
+    /**
+     * #41's contract at the runner seam: one test throwing must cost that test
+     * and nothing else.
+     *
+     * Demonstrated live on this very suite before the fix — rename the field
+     * testAwtEvdevTablesDisjoint reflects on and it threw NoSuchFieldException,
+     * uncaught, out of main(). run-tests.sh runs under `set -e` (:4), so back
+     * when the invocation was bare the non-zero JVM status killed the script at
+     * that line: the Python daemon tests and the installer shell tests that come
+     * after the Java section never ran at all, and whoever read the output had
+     * no way to tell "one test threw" from "half the gate never executed". That
+     * is strictly worse than an ordinary failed check(), which reports itself
+     * and lets the rest of the run finish.
+     *
+     * Decided 2026-09-11 by the owner: catch per test, count it as a failure,
+     * keep going — an uncaught exception should land where every other failure
+     * already lands rather than in `set -e`.
+     *
+     * So: five synthetic tests, of which the second throws an AssertionError
+     * and the fourth a checked Exception. The AssertionError is the load-
+     * bearing one — it is an Error, not an Exception, so a runner whose catch
+     * is `catch (Exception)` passes the checked case and still lets the
+     * ordinary failed-assertion case escape, which is the failure mode being
+     * fixed. Both throwables carry a distinct detail message so a message
+     * attributed to the wrong test is visible.
+     *
+     * Reported by type as well as message: `getMessage()` alone is empty for a
+     * throwable constructed without one (`throw new IllegalStateException()`),
+     * which would name the test and then say nothing about what happened.
+     */
+    private static void testRunnerCatchesEachTestAndKeepsGoing() {
+        List<String> entered = new ArrayList<>();
+        List<NamedTest> tests = List.of(
+                new NamedTest("alpha", () -> entered.add("alpha")),
+                new NamedTest("beta", () -> {
+                    entered.add("beta");
+                    throw new AssertionError("boom-assert");
+                }),
+                new NamedTest("gamma", () -> entered.add("gamma")),
+                new NamedTest("delta", () -> {
+                    entered.add("delta");
+                    throw new Exception("boom-checked");
+                }),
+                new NamedTest("epsilon", () -> entered.add("epsilon")));
+
+        List<String> messages = runAll(tests);
+
+        check(entered.equals(List.of("alpha", "beta", "gamma", "delta", "epsilon")),
+              "every test still runs, in order, after two of them throw (ran " + entered + ")");
+        check(messages.size() == 2,
+              "exactly the two tests that threw are reported, and no others (got "
+              + messages.size() + ": " + messages + ")");
+
+        String betaMsg = firstMentioning(messages, "beta");
+        String deltaMsg = firstMentioning(messages, "delta");
+        check(betaMsg != null && betaMsg.contains("AssertionError") && betaMsg.contains("boom-assert"),
+              "an AssertionError is caught and reported against the test it came from, "
+              + "naming type and message (got " + q(betaMsg) + ")");
+        check(deltaMsg != null && deltaMsg.contains("Exception") && deltaMsg.contains("boom-checked"),
+              "a checked Exception is caught and reported against the test it came from, "
+              + "naming type and message (got " + q(deltaMsg) + ")");
+    }
+
+    /** Printed by the --fault-selftest test listed *after* the one that throws. */
+    static final String FAULT_SELFTEST_CONTINUED = "FAULT-SELFTEST-CONTINUED";
+
+    /** The name --fault-selftest's throwing test is reported under. */
+    static final String FAULT_SELFTEST_THROWER = "faultSelfTestThrows";
+
+    /** Detail message of the Throwable --fault-selftest's first test throws. */
+    static final String FAULT_SELFTEST_BOOM = "fault-selftest-boom";
+
+    /**
+     * Set on the child this suite forks. In the env rather than in a system
+     * property because the env is inherited by every descendant: a child that
+     * somehow reaches this test anyway still cannot fork one of its own, so the
+     * recursion is bounded at one level even while --fault-selftest is
+     * unimplemented and the child therefore runs the whole suite.
+     */
+    static final String FAULT_SELFTEST_FORK_GUARD = "DREAMCONNECT_BOOTTESTS_FORKED";
+
+    /**
+     * The list `--fault-selftest` must run, through the same main() reporting
+     * path a normal run uses.
+     *
+     * A fixture, not a test: two synthetic tests, the first of which throws and
+     * the second of which prints a marker. Ordinary suite failures cannot be
+     * used to settle #41 because check() never ends the run — only a throw
+     * does, and no real test may be made to throw on demand just to prove it.
+     *
+     * The thrower throws an AssertionError deliberately. It is an Error, and a
+     * runner whose catch is `catch (Exception)` would let exactly the failure
+     * mode #41 reports back out. The lambda declares no `throws` clause at all,
+     * which is the point of REQ-006: containment must not depend on the test
+     * method having declared `throws Exception`.
+     */
+    static List<NamedTest> faultSelfTest() {
+        return List.of(
+                new NamedTest(FAULT_SELFTEST_THROWER, () -> {
+                    throw new AssertionError(FAULT_SELFTEST_BOOM);
+                }),
+                new NamedTest("faultSelfTestContinues",
+                              () -> System.out.println(FAULT_SELFTEST_CONTINUED)));
+    }
+
+    /**
+     * #41 at the boundary that actually decides whether the gate truncates: the
+     * JVM process.
+     *
+     * All the gate ever sees of this suite is its exit status and its output —
+     * run-tests.sh:23 runs `java … dreamconnect.boot.BootTests` under
+     * `set -euo pipefail` (:4). That is why the masking the issue reports is a
+     * property of this boundary and not of runAll(): a throw used to end main(),
+     * and while that invocation was bare the non-zero status killed the script
+     * there, so the Python suites (:26-41) and both shell suites (:43, :47)
+     * never ran at all. The reader could not tell "one test threw" from "half
+     * the gate never executed".
+     *
+     * The contract, decided 2026-09-11 by the owner: catch per test, count it as
+     * a failure, keep going. Both halves must hold at once, and neither is
+     * observable from inside this JVM:
+     *
+     *   kept going — a test listed after the thrower still runs, so the child
+     *   prints FAULT_SELFTEST_CONTINUED;
+     *
+     *   still red — the throw is counted like every other failure, so the child
+     *   prints a `FAIL: ` line naming the test and the throwable and exits 1.
+     *   `FAIL: `, the "N FAILURE(S)" summary and exit 1 are the suite's own
+     *   pre-existing reporting (check(), :30-33; main's summary), not anything
+     *   #41 introduced — which is what "the same failure-counting mechanism the
+     *   rest of the suite uses" means.
+     *
+     * Asserting the status alone would pass for the wrong reason: a child that
+     * dies at class load because the two --add-exports were not propagated also
+     * exits non-zero. Hence the marker, and hence the FAIL line.
+     */
+    private static void testFaultSelfTestExitsNonZeroAfterContinuing() throws Exception {
+        if (System.getenv(FAULT_SELFTEST_FORK_GUARD) != null) {
+            System.out.println("skip: the fork self-test does not run inside a forked child");
+            return;
+        }
+
+        Path log = Files.createTempFile("dcboot-faultselftest", ".log");
+        ProcessBuilder pb = new ProcessBuilder(
+                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                // Both exports, exactly as run-tests.sh:6-7 passes them.
+                "--add-exports", "java.desktop/java.awt.peer=ALL-UNNAMED",
+                "--add-exports", "java.desktop/sun.awt=ALL-UNNAMED",
+                "-cp", System.getProperty("java.class.path"),
+                "dreamconnect.boot.BootTests", "--fault-selftest");
+        pb.environment().put(FAULT_SELFTEST_FORK_GUARD, "1");
+        pb.redirectErrorStream(true);
+        // To a file, not a pipe. A pipe deadlocks once the child outruns the
+        // 64K buffer with nobody draining it, and the child does exactly that
+        // whenever --fault-selftest is not honoured and it runs the whole suite.
+        pb.redirectOutput(log.toFile());
+
+        Process p = pb.start();
+        boolean exited = p.waitFor(60, TimeUnit.SECONDS);
+        if (!exited) p.destroyForcibly().waitFor();
+        int status = exited ? p.exitValue() : -1;
+        String out = Files.readString(log);
+        Files.deleteIfExists(log);
+        List<String> lines = List.of(out.split("\n"));
+        String failLine = firstMentioning(lines, "FAIL: ");
+
+        check(exited, "the --fault-selftest child exits rather than hanging");
+        check(out.contains(FAULT_SELFTEST_CONTINUED),
+              "a test listed after the throwing one still runs: the child prints its marker "
+              + "(child wrote " + lines.size() + " lines, status " + status + ")");
+        check(status == 1,
+              "and the child still exits 1, which run-tests.sh:23 captures and its deferred "
+              + "`exit \"$java_status\"` (:57) turns into a red gate only after the sections "
+              + "below the Java one have run (got status " + status + ")");
+        check(failLine != null
+              && failLine.contains(FAULT_SELFTEST_THROWER)
+              && failLine.contains("AssertionError")
+              && failLine.contains(FAULT_SELFTEST_BOOM),
+              "the throw is reported as a failure naming the test it came from and the "
+              + "throwable (got " + q(failLine) + ")");
+        check(!out.contains("ALL PASS"),
+              "and the child does not report the run as passing");
     }
 
     /**

@@ -8,8 +8,10 @@
 # be a list that can disagree with the one that actually runs, so there isn't one.
 #
 # Everything the Factory needs from a gate, run-tests.sh already provides: it is
-# `set -euo pipefail`, every suite aborts the run on failure, and it prints
-# "ALL TESTS PASSED" only on the path where all of them did.
+# `set -euo pipefail`, a failing suite always ends the run non-zero, and it prints
+# "ALL TESTS PASSED" only on the path where all of them passed. The Java section is
+# the one that defers rather than aborts (#41) -- it still fails the run, from the
+# bottom of the script, so that the suites after it are reported rather than cut off.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
