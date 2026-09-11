@@ -153,7 +153,7 @@ Three things the spike could not have shown, all found while wiring it in:
   GDM handover mechanism is real. Whether a third party may drive it is unestablished — but this finding
   means it is **not needed** for ordinary unattended access.
 - ~~Whether the existing area/coordinate maths needs adjusting for a virtual output.~~ **Resolved:** a
-  `RecordVirtual` output is origin-anchored, so `area_x`/`area_y` stay 0 and the pointer shift is a
+  `RecordVirtual` output is origin-anchored, so `area_origin` stays `(0, 0)` and the pointer shift is a
   no-op, exactly as on the `RecordMonitor` path.
 - **Resolution cannot be changed on a live stream.** Renegotiating the consumer's caps mid-stream
   stalls it (tested: no further frames). Changing the backstage resolution means tearing the

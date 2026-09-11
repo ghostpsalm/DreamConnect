@@ -255,7 +255,7 @@ The daemon now captures the **whole logical desktop** via `RecordArea` over the
 bounding box of all logical monitors — auto-enabled when more than one monitor is
 present (or forced with `--all-monitors`), falling back to the proven
 single-monitor `RecordMonitor` otherwise. Pointer coordinates are shifted by the
-area origin (`area_x/area_y`) into the stream's frame; for a single monitor / an
+area origin (`area_origin`) into the stream's frame; for a single monitor / an
 origin-anchored layout that's a no-op. The bounding box honours per-monitor scale
 and 90/270 rotation. **Verified** on this single-monitor box that `RecordArea`
 over `(0,0) 1920×1080` captures live at the right geometry, identical to
