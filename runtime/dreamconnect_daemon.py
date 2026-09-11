@@ -775,8 +775,12 @@ class ControlServer(threading.Thread):
         # inject input. Narrow the umask across the bind so the window is 0700
         # however the daemon was started -- the shipped unit's UMask=0077
         # already gives that, this makes it not depend on the launcher.
-        # Restored in a finally because umask is process-global and other
-        # threads create files (FrameBuffer._open_frame) against it. (#45)
+        # Restored in a finally because umask is process-global: any thread
+        # that creates a file WITHOUT an explicit mode while this is narrowed
+        # would silently get 0o700-masked permissions instead of its own. Not
+        # FrameBuffer._open_frame, which an earlier draft of this comment named
+        # -- it passes an explicit 0o600 to os.open and is then fchmod'd, so the
+        # umask cannot reach it either way (see the 0600 note above). (#45, #64)
         prev_umask = os.umask(0o077)
         try:
             srv.bind(self.sock_path)
