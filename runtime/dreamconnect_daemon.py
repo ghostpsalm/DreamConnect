@@ -769,7 +769,19 @@ class ControlServer(threading.Thread):
         if os.path.exists(self.sock_path):
             os.unlink(self.sock_path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(self.sock_path)
+        # bind() publishes the inode at 0777 & ~umask, so the chmod below is
+        # always a beat late: launched by hand under the default umask 022 the
+        # socket is 0755 for that instant and any local user can connect() and
+        # inject input. Narrow the umask across the bind so the window is 0700
+        # however the daemon was started -- the shipped unit's UMask=0077
+        # already gives that, this makes it not depend on the launcher.
+        # Restored in a finally because umask is process-global and other
+        # threads create files (FrameBuffer._open_frame) against it. (#45)
+        prev_umask = os.umask(0o077)
+        try:
+            srv.bind(self.sock_path)
+        finally:
+            os.umask(prev_umask)
         # 0600, not 0666: the root SC JVM connects via DAC override. Don't rely
         # solely on the 0700 XDG_RUNTIME_DIR parent to gate access.
         os.chmod(self.sock_path, 0o600)

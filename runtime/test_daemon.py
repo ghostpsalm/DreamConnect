@@ -9,6 +9,7 @@ Run: python3 -m unittest runtime.test_daemon   (or: python3 runtime/test_daemon.
 import os
 import pwd
 import shutil
+import socket
 import stat
 import struct
 import subprocess
@@ -962,6 +963,162 @@ class TestFrameBufferEnsureStickyBitUnlink(unittest.TestCase):
         st = os.stat(self.shm_path)
         self.assertEqual(st.st_uid, 0)
         self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+
+
+class _StopAccept(Exception):
+    """Raised from the test socket's accept() to end ControlServer.run().
+
+    run()'s tail is `while True: srv.accept()`, so the only way to drive the
+    real method to completion synchronously -- no background thread to join,
+    nothing left blocked in accept() after the test -- is to make the first
+    accept() raise. run() wraps neither bind nor accept in try/except, so this
+    propagates to the caller unchanged.
+    """
+
+
+class _BindWatchingSocket(socket.socket):
+    """A real AF_UNIX socket that samples its own inode's mode mid-bind.
+
+    The window under test (issue #45) exists only BETWEEN bind() and the
+    following chmod, so it cannot be observed from outside: stat'ing the path
+    after run() has settled reports 0600 whether or not the window was ever
+    open, which is why this samples inside the bind call itself. The bind is
+    the real one -- the mode recorded is what the kernel actually gave the
+    inode, not a computed expectation.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bind_time_mode = None
+        self.listened = False
+
+    def bind(self, address):
+        super().bind(address)
+        self.bind_time_mode = stat.S_IMODE(os.stat(address).st_mode)
+
+    def listen(self, backlog=None):
+        self.listened = True
+        super().listen() if backlog is None else super().listen(backlog)
+
+    def accept(self):
+        raise _StopAccept
+
+
+class _SocketModuleShim:
+    """Stands in for the daemon's `socket` module, overriding only socket().
+
+    Assigning over the stdlib module's own `socket` attribute would change it
+    process-wide for the duration; delegating every other name to the real
+    module keeps the substitution local to `dreamconnect_daemon.socket`.
+    """
+
+    def __init__(self, real, factory):
+        self._real = real
+        self.socket = factory
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TestControlSocketBindMode(unittest.TestCase):
+    """The control socket must never be group- or world-connectable, not even
+    for the instant between bind() and chmod (issue #45).
+
+    Whoever can connect() to this socket can inject arbitrary input into the
+    session -- the grammar at ControlServer.handle() takes M/B/W/K/KS with no
+    authentication, because the 0600 mode IS the authentication. The shipped
+    unit sets `UMask=0077` (systemd/dreamconnect-daemon.service:29) so the
+    transient mode is 0700 there, but `dreamconnect_daemon.py:771-775` binds
+    and only then chmods, so a daemon started by hand under the default umask
+    022 publishes the socket at `0777 & ~umask` first. Issue #45, verbatim:
+    "another local user could `connect()` in that sub-millisecond gap and
+    inject input into the session", and the fix must hold "so the socket is
+    never briefly world-connectable regardless of how the daemon is launched".
+
+    Expected value is from that issue text plus the mode the code already
+    commits to as its end state (0600, dreamconnect_daemon.py:773-775): no
+    group and no other bits at any point -- `S_IMODE & 0o077 == 0`. It is not
+    an assertion that any particular one of the issue's three candidate fixes
+    was chosen; a umask around the bind, or a placeholder created 0600 first,
+    both satisfy it.
+
+    umask 0o022 is forced for the duration because it is the launch condition
+    the issue names ("manual launch, default umask 022"); the gate's own umask
+    is whatever the operator's shell had, which would make this pass or fail
+    by accident. It is restored in a finally.
+    """
+
+    def setUp(self):
+        # dir="/tmp" rather than the ambient TMPDIR: sun_path is 108 bytes and
+        # a long TMPDIR (a CI scratch path, a worktree) would fail the bind
+        # with "AF_UNIX path too long" -- a red for the wrong reason.
+        self.tmpdir = tempfile.mkdtemp(prefix="dreamconnect-test-sock-", dir="/tmp")
+        self.sock_path = os.path.join(self.tmpdir, "control.sock")
+        self.made = []
+
+        def factory(*args, **kwargs):
+            s = _BindWatchingSocket(*args, **kwargs)
+            self.made.append(s)
+            return s
+
+        self.real_socket_module = d.socket
+        d.socket = _SocketModuleShim(socket, factory)
+        self.server = d.ControlServer(self.sock_path, StubSession())
+
+    def tearDown(self):
+        d.socket = self.real_socket_module
+        for s in self.made:
+            s.close()
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_under_umask(self, umask):
+        """Drive the real ControlServer.run() to its accept() and return the
+        socket it bound."""
+        entered = os.umask(umask)
+        try:
+            with self.assertRaises(_StopAccept):
+                self.server.run()
+            # Read-modify-write: os has no getumask, so the only way to see
+            # what run() left behind is to set it again and read the old value.
+            self.umask_after_run = os.umask(umask)
+        finally:
+            os.umask(entered)
+        self.assertEqual(len(self.made), 1, "expected exactly one socket")
+        return self.made[0]
+
+    def test_socket_is_never_group_or_world_reachable_during_bind(self):
+        srv = self._run_under_umask(0o022)
+        self.assertIsNotNone(
+            srv.bind_time_mode, "bind() was never called on the control socket")
+        self.assertEqual(
+            srv.bind_time_mode & 0o077, 0o000,
+            f"control socket was mode {oct(srv.bind_time_mode)} in the window "
+            f"between bind() and chmod -- another local user could connect() "
+            f"there and inject input (issue #45)")
+
+    def test_run_leaves_the_process_umask_as_it_found_it(self):
+        # GUARD on the fix, not a red: os.umask is process-global and the
+        # daemon creates other things (the shm frame, FrameBuffer._open_frame)
+        # from other threads. A fix that narrows the umask and forgets to
+        # restore it changes every later creation in the process.
+        self._run_under_umask(0o022)
+        self.assertEqual(self.umask_after_run, 0o022)
+
+    def test_run_still_unlinks_a_stale_path_and_settles_at_0600(self):
+        # GUARD on the fix: the end state documented at
+        # dreamconnect_daemon.py:773-775 (0600, so the root SC JVM reaches it
+        # by DAC override and nobody else does) and the stale-path unlink at
+        # :769-770 both survive. A fix that binds an abstract socket, or one
+        # that leaves the placeholder it created, fails here.
+        with open(self.sock_path, "wb") as f:
+            f.write(b"stale socket from a previous run")
+
+        srv = self._run_under_umask(0o022)
+
+        st = os.stat(self.sock_path)
+        self.assertTrue(stat.S_ISSOCK(st.st_mode), "path is not a socket")
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        self.assertTrue(srv.listened, "socket was never put in listening state")
 
 
 if __name__ == "__main__":

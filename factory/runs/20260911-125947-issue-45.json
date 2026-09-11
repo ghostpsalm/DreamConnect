@@ -1,0 +1,141 @@
+{
+  "recorded_at": "2026-09-11T12:59:47Z",
+  "repo": "daemon-races",
+  "branch": "runtime/daemon-races",
+  "base": "5275a08052b564ad4fd781db42c8f244545d650b",
+  "window_start": "2026-09-11T18:29:57+10:00",
+  "head": "be979e98fd751b53378c2c61d966055f529e609b",
+  "issue": {
+    "number": 45,
+    "state": "OPEN",
+    "title": "daemon: control-socket bind()->chmod() TOCTOU under a permissive umask",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/45"
+  },
+  "commits": [
+    {
+      "sha": "be979e98fd751b53378c2c61d966055f529e609b",
+      "subject": "Daemon: narrow the umask across the control-socket bind (#45)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "3 files changed, 172 insertions(+), 2 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 132,
+      "output_tokens": 60894,
+      "cache_read_input_tokens": 19025355,
+      "cache_creation_input_tokens": 756740
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 4,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 42772,
+        "duration_ms": 103667,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 59356,
+        "duration_ms": 289887,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 38035,
+        "duration_ms": 57451,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 52680,
+        "duration_ms": 166379,
+        "models": []
+      }
+    },
+    "usage_blocks": 66,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "4fc5615f-ee8d-45cd-bf1c-6191d41a749e.jsonl",
+        "usage_blocks": 66
+      }
+    ],
+    "agent_wall_clock_ms": 617384,
+    "first_activity": "2026-09-11T08:31:16.529000+00:00",
+    "last_activity": "2026-09-11T12:59:37.763000+00:00",
+    "notification_tokens": 192843,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "Ruling recorded on the trusted channel: factory_pending_decisions.py --decide-finding finding-e34fef88baa4 --decision ACCEPT_RISK --owner Roger --decision-ref https://github.com/ghostpsalm/DreamConnect/issues/62 --source-snapshot tree:777353092c3540bf972e9c3e7c3bb5f761fee516. The docs are not waived - they are tracked as #62 and I will take them as a small commit on main. Run accept-finding then next, and offer /submit.",
+    "Yes - run /submit now. Gate, commit on runtime/daemon-races, push. No PR, no Co-Authored-By trailer.",
+    "A - already done, from the primary checkout, nothing deleted. #57's run state is ARCHIVED (moved, not removed) to /home/kogies/.factory/archives/dreamconnect/impl-57-completed/, including candidates/impl-57-18e6419e. factory/ now holds exactly: candidates hazards LEDGER.md LIFECYCLE.jsonl locks runs, and factory/candidates/ENFORCING.json is untouched. Also: #57 is merged to main as 2d20a0a, gate green, issue closed, and the two doc lines you reverted landed separately as 5275a08 closing #62. Start #45.",
+    "<task-notification>\n<task-id>a9d7fe1b27151a192</task-id>\n<tool-use-id>toolu_01JTkqY1D8PkaYdg2nuZYtRy</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a9d7fe1b27151a192.output</output-file>\n<status>completed</status>\n<summary>Agent \"Plan issue 45 socket TOCTOU fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: plan-ready\nACTION-ID: 6ea521fffcf94861a7a9703b8e7be660\nSLICES: 1\nINVOCATION-ID: inv-001-34ccddfe\nEVIDENCE REQ-001: The window is real at `runtime/dreamconnect_daemon.py:771-775` \u2014 `srv.bind(self.sock_path)` (772) then `os.chmod(self.sock_path, 0o600)` (775), nothing between; the created inode carries `0777 &amp; ~umask`. Plan decides one of the three offered fixes (umask 0o077 across the bind, restored in `finally`) and names the exact helper signature so the oracle can write the test first.\nEVIDENCE REQ-002: Severity/likelihood confirmed as stated: `systemd/dreamconnect-daemon.service:29` is `UMask=0077`, so under the shipped unit the transient mode is 0700 and no other user can connect; the exposure exists only on a manual launch inheriting umask 022. Mitigated further by the socket living in `/run/user/&lt;uid&gt;` (0700) \u2014 see the existing comment at `dreamconnect_daemon.py:773-774`.\n\n## Problem\nLaunched by hand rather than through its unit, the daemon's control socket exists world-connectable for the microseconds between `bind()` and `chmod 0600`. A hostile local user winning that race gets full input injection into the session. Defense-in-depth; no exposure under the shipped unit.\n\n## Seams (confirm before proceeding)\nOne: `runtime/dreamconnect_daemon.py` driven by `runtime/test_daemon.py` (the repo's `runtime/*.py` seam). No new seam, no D-Bus, no root.\n\n**Interfac",
+    "A - seam gate approved. factory_owner_decisions.py --approve-gate --run-id impl-45-cb64ac56 --gate seam --owner Roger --source-snapshot tree:9f075b4099cb1500aa95d33ff8602347f524934f was run from the primary checkout. Run confirm --approved and continue.",
+    "<task-notification>\n<task-id>a31b1b11a09770050</task-id>\n<tool-use-id>toolu_01LMbuz2GKun9vuXDXKRaJbr</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a31b1b11a09770050.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write failing test for issue 45\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: ea005da9d90146c797ad60000a61f355\nINVOCATION-ID: inv-002-729db25a\nEVIDENCE REQ-001: `python3 -m unittest -v test_daemon` (66 tests, 1 failure) \u2192 `runtime/test_daemon.py:1093` `AssertionError: 45 != 0 : control socket was mode 0o755 in the window between bind() and chmod` \u2014 the window is observed as a real kernel-assigned mode against unmodified `runtime/dreamconnect_daemon.py:771-775`, not computed. Scratch mutants (run once, discarded, never in the candidate): `os.umask(0o077)` around the bind with a `finally` restore \u2192 all 3 tests OK; `os.umask(0o007)` \u2192 still `FAIL ... mode 0o770`; umask set but not restored \u2192 `FAIL test_run_leaves_the_process_umask_as_it_found_it (63 != 18)`. So the test accepts the fix the issue prescribes and rejects a group-permissive or non-restoring version of it.\nEVIDENCE REQ-002: umask dependence measured, not assumed \u2014 the same bind under umask 022 yields `0o755`, and `systemd/dreamconnect-daemon.service:29` is `UMask=0077` (\u21920700, safe), so the test forces `os.umask(0o022)` in `_run_under_umask` (`test_daemon.py:1075-1087`) and restores it in a `finally`; without that the assertion would pass or fail on the operator's ambient umask. Severity Low stands: fixtures only, the race is not reproduced end-to-end.\n\n## Test authored\n- slice: 1 (only slice) \u00b7 seam: `ControlServer.run` in `runtime/dreamconnect_daemon.py`, driven by `run",
+    "<task-notification>\n<task-id>a3c896a9c6cdcd6ca</task-id>\n<tool-use-id>toolu_01FF6tkxbgapgv4LUKQohwRh</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a3c896a9c6cdcd6ca.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make issue 45 test green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: b7be29a532014c9d93e51f431c799592\nINVOCATION-ID: inv-003-d872d59b\nEVIDENCE REQ-001: `runtime/dreamconnect_daemon.py:771-784` now sets `prev_umask = os.umask(0o077)` before `srv.bind(self.sock_path)` and restores it in a `finally`. `python3 -m unittest test_daemon.TestControlSocketBindMode -v` went from `AssertionError: 45 != 0 : control socket was mode 0o755 in the window between bind() and chmod` (test_daemon.py:1093) to `Ran 3 tests in 0.001s / OK` \u2014 the mid-bind mode sampled inside the real `bind()` by `_BindWatchingSocket.bind` is now `0o700 &amp; ~0o077`, i.e. no group/other bits, under a forced umask 0o022.\nEVIDENCE REQ-002: The \"Suspected\" confidence is resolved to confirmed by observation, not restated: the pre-fix run reported the inode at `0o755` at bind time under umask 022, and `test_run_still_unlinks_a_stale_path_and_settles_at_0600` plus `test_run_leaves_the_process_umask_as_it_found_it` both pass, so the Low-severity fix is defense-in-depth only \u2014 the 0600 end state (`dreamconnect_daemon.py:786`), the stale-path unlink (`:769-770`) and the process umask (`os.umask` read back as `0o022`) are all unchanged. Full suite: `Ran 66 tests in 0.274s / OK`.\n\nSeam: `runtime/dreamconnect_daemon.py` `ControlServer.run`, tested through `runtime/test_daemon.py` (the `runtime/*.py` \u2194 `runtime/test_*.py` seam).\n\nChange: eight-line comment recording what the diff can",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-98f7c537b30b --outcome CONTINUE --owner Roger was run from the primary checkout. Run next and continue.",
+    "<task-notification>\n<task-id>a15e6250cdc37437c</task-id>\n<tool-use-id>toolu_01RCVyF96rinBnjbyU9pVkir</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a15e6250cdc37437c.output</output-file>\n<status>completed</status>\n<summary>Agent \"Verify issue 45 change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: 36c8615a1f76446190389990116ad384\nINVOCATION-ID: inv-004-de7b9247\nEVIDENCE REQ-001: `/home/kogies/.factory/worktrees/dreamconnect/daemon-races--candidates/impl-45-cb64ac56/inv-004-de7b9247/runtime/dreamconnect_daemon.py:780-784` \u2014 `prev_umask = os.umask(0o077)` / `try: srv.bind(self.sock_path)` / `finally: os.umask(prev_umask)`, i.e. the issue's first candidate fix. Independent red/green: with `git show ed6cb2f:runtime/dreamconnect_daemon.py` (pre-fix source) copied into a scratch tree alongside the same oracle tests, `umask 022; python3 -m unittest runtime.test_daemon.TestControlSocketBindMode` \u2192 `AssertionError: 45 != 0 : control socket was mode 0o755 in the window between bind() and chmod`, exit 1. At candidate HEAD the same command \u2192 `Ran 3 tests in 0.001s / OK`, exit 0. The mode is sampled by a real `socket.socket` subclass inside the real `bind()` (`test_daemon.py:995-997`), so it is the kernel-granted mode, not a computed expectation.\nEVIDENCE REQ-002: Severity/confidence metadata, not behaviour; verified as *not* exceeded rather than \"implemented\". Confidence \"Suspected\" resolved to confirmed by the 0o755 baseline observation above. Low severity held: end state still 0600 and stale path still unlinked (`test_run_still_unlinks_a_stale_path_and_settles_at_0600` OK, asserting `S_ISSOCK` and `S_IMODE == 0o600`), process umask restored (`test_run_leaves_the_proce",
+    "A - remediation requested, recorded from the primary checkout: factory_pending_decisions.py --decide-finding finding-218ad3960c7b --decision REQUEST_REMEDIATION --owner Roger --source-snapshot tree:cf04eb7b69cde58be39b7bf90d9da4470756c7b2. A comment that argues from a mechanism not in play is the same class this repo has been bitten by twice, so it gets fixed, not recorded. If the grant is refused because the run is at COMPLETE, say so plainly and I will switch to B and file the reword issue myself - do not quietly accept it.",
+    "B, and the reword issue is https://github.com/ghostpsalm/DreamConnect/issues/64 - put that number in the commit message. ACCEPT_RISK is recorded: factory_pending_decisions.py --decide-finding finding-218ad3960c7b --decision ACCEPT_RISK --owner Roger --decision-ref issue #64 --source-snapshot tree:cf04eb7b69cde58be39b7bf90d9da4470756c7b2. The reason text says plainly that this records where the fix went and does not call the comment correct. Run accept-finding and next, then offer /submit. And yes - file the driver gap; I am filing it on ghostpsalm/AI-Factory myself this tick, you do not need to.",
+    "Yes - run /submit now. Gate, commit on runtime/daemon-races, push. No PR, no Co-Authored-By trailer. Yes, correct the two stale STATUS.md lines in the same commit: #57 and #62 are merged to main, so STATUS naming them as open is the same stale-claim class the seraph just caught in that umask comment. Put #64 in the commit message as the tracked reword."
+  ],
+  "fence_decisions": {
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 124,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 53,
+    "block: a factory worker role executing the authoritative full gate": 243,
+    "block: recursive/forced delete": 199,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 83,
+    "ask: This edits a version number.": 71,
+    "ask: This would publish a GitHub release, which ships to real devices.": 65,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 59,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 189,
+    "block: editing the deployed factory directly": 238,
+    "block: writing to a file the harness owns": 34,
+    "block: touching a secret/credential file": 139,
+    "block: sending a secret/credential file to a network client": 1012,
+    "block: sending ~/.claude.json to a network client": 66,
+    "block: force push (never rewrite published history)": 34,
+    "block: editing an existing migration": 34,
+    "block: malformed hook input": 185,
+    "block: unbounded read of a 600-line source file": 105,
+    "block: writing an owner approval from inside a factory worktree": 204,
+    "block: writing an owner approval from a session with no recorded cwd": 34,
+    "block: running an owner-decision command from inside a factory worktree": 116,
+    "block: running an owner-decision command from a session with no recorded cwd": 34,
+    "block: a model-tool write to Factory acceptance authority state": 51,
+    "block: piping remote content straight to a shell": 1,
+    "block: hard reset discards work": 3,
+    "block: unbounded read of a 1326-line source file": 1,
+    "block: unbounded read of a 13294-line source file": 1,
+    "block: the driver's state file could not be read (/tmp/tmpb_7czqhr/line/factory/IMPLEMENT-STATE.j": 1
+  },
+  "status": "done",
+  "note": "Fixture-level proof only: the race (a hostile local user connecting between bind() and chmod on a hand-launched daemon) was never reproduced against a live Fedora session, and under the shipped unit's UMask=0077 it was never reachable. Targeted-test selection returned exit 1 / TEST_REGISTRY_ABSENT and stands as NEGATIVE_RESULT; the owner's CONTINUE was an override, not a pass. Breaker and reviewer were not required by the normal risk tier and did not run. Seraph filed one info finding (the finally-restore comment argues from a mechanism not in play) which the owner ruled ACCEPTED_RISK, tracked as #64 -- accepted, not fixed. The owner's REQUEST_REMEDIATION for that finding could not be spent: authorize-remediation refused with not_at_checkpoint because the run had already reached COMPLETE, the same refusal seen on #57; the owner is filing that driver gap on ghostpsalm/AI-Factory. One agent-build shell check skipped on this box (no local byte-buddy jar matching the pinned hash).",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "0"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}
