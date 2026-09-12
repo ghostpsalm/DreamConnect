@@ -9751,6 +9751,399 @@ test_register_label_survives_a_crlf_state_file() {
     "and still names everyone else after themselves"
 }
 
+# --- issue #30: "not there" and "could not tell" are different answers --------
+#
+# passwd_entry answers with stdout alone (`getent passwd "$name" || true`,
+# install-lib.sh:160-167), so an account that is genuinely gone and a lookup that
+# FAILED — a broken NSS module, a down LDAP/SSSD backend, getent missing — are
+# the same empty string. Issue #30: uninstall_host_account's #21 short-circuit
+# (install-lib.sh:1144) then reports "already gone" for an account that is still
+# there, install.sh deletes install.state, and a real account is orphaned with
+# linger and its marker still set and no state left to retry from.
+#
+# CONTRACT UNDER TEST — decided in the plan for this issue, ahead of any
+# implementation of it. The expected values below come from that contract and
+# from the fixtures' own bytes, never from what the shipped code does:
+#
+#   passwd_entry <name>
+#     stdout: the matching passwd(5) line verbatim, else empty
+#     exit 0: found
+#     exit 1: absent — the source answered; there is no such account; no stderr
+#     exit 2: lookup failed — empty stdout, a stderr line naming <name>
+#
+#   Classification of the real lookup: getent exit 0 with a line => 0. getent
+#   exit 2 is AMBIGUOUS — it is both its documented "key not found" and what a
+#   broken backend returns — so it is classified by a second probe of a key that
+#   must exist; the probe answering means the source is alive and the account is
+#   absent (1), the probe failing means the lookup is broken (2). Any other
+#   getent status => 2. Under DC_PASSWD_DB: match => 0, no match => 1, a file
+#   that cannot be read => 2.
+#
+#   Callers: status 1 keeps today's behaviour EXACTLY (this is the whole point of
+#   a three-way answer — nothing regresses for an account that is simply
+#   absent), status 2 refuses. Refusal wording is the builder's; nothing below
+#   asserts it beyond the account being named.
+#
+# The probe is deliberately not pinned. What it must NOT be is a read of
+# /etc/passwd: the display-host account is not always local (CREATED_ACCOUNT=0
+# is a supported adopted account, install-lib.sh:432-442) and an LDAP account is
+# absent from that file, so corroborating there reports "gone" for an account
+# userdel would still refuse to remove — issue #30 inverted, not fixed.
+
+# A stand-in for getent, first on PATH, so these tests drive the REAL lookup path
+# (DC_PASSWD_DB empty) without asking anything of this machine's NSS.
+#
+#   serving <db>  answers from a passwd(5) fixture: a field-1 (or field-3 uid)
+#                 match prints the line and exits 0, anything else exits 2 —
+#                 what the real getent(1) does for a key it could not find,
+#                 checked on this box:
+#                   $ getent passwd definitely-no-such-account-xyz; echo $?
+#                   2
+#   broken <rc>   exits <rc> for EVERY key, root included: the breaker's repro
+#                 of a broken NSS module or a down SSSD, where the source
+#                 answered nothing at all and absence was never established.
+#
+# Deliberately generic about argv — it answers any key it can and skips a
+# leading `-s <service>` — so which probe classifies getent's ambiguous exit 2
+# stays the builder's choice and is not frozen here.
+make_getent_shim() {  # dir serving|broken db|rc -> echoes the shim dir
+  local d="$1"
+  mkdir -p "$d"
+  rm -f "$d/rc" "$d/db"
+  case "$2" in
+    broken)  printf '%s\n' "${3:-2}" > "$d/rc" ;;
+    serving) printf '%s\n' "$3" > "$d/db" ;;
+    *) fail "make_getent_shim: unknown mode [$2]"; return 1 ;;
+  esac
+  cat > "$d/getent" <<'EOF'
+#!/usr/bin/env bash
+here="$(dirname "$0")"
+if [ -f "$here/rc" ]; then
+  echo "getent: Bad system call or backend failure" >&2
+  exit "$(cat "$here/rc")"
+fi
+db="$(cat "$here/db")"
+args=("$@")
+[ "${args[0]:-}" != "-s" ] || args=("${args[@]:2}")
+[ "${args[0]:-}" = passwd ] || exit 2
+key="${args[1]:-}"
+[ -n "$key" ] || { cat "$db"; exit 0; }
+line="$(awk -F: -v k="$key" '$1 == k || $3 == k { print; exit }' "$db")"
+[ -n "$line" ] || exit 2
+printf '%s\n' "$line"
+EOF
+  chmod +x "$d/getent"
+  echo "$d"
+}
+
+PE_OUT=""; PE_ERR=""; PE_RC=0
+try_passwd_entry() {  # shim_dir_or_empty passwd_db_or_empty name
+  local errf="$TMP/passwd-entry.err"
+  # bash clears its command hash only on a PATH assignment IN THE SHELL, and
+  # every shim here arrives as a prefix on a call instead; without this a shim
+  # from an earlier phase is reused in silence.
+  hash -r
+  PE_OUT="$(DC_PASSWD_DB="$2" PATH="${1:+$1:}$PATH" passwd_entry "$3" 2>"$errf")"
+  PE_RC=$?
+  PE_ERR="$(cat "$errf")"
+  return 0
+}
+
+# A dry ensure_host_account driven through the real (getent) lookup path, the
+# one run_ensure_dry cannot reach because it always sets DC_PASSWD_DB.
+run_ensure_dry_via_getent() {  # shim_dir accountsservice_dir name
+  hash -r
+  ENSURE_OUT="$(DC_DRY_RUN=1 DC_PASSWD_DB= DC_ACCOUNTSSERVICE_DIR="$2" \
+                PATH="$1:$PATH" ensure_host_account "$3" 2>&1)"
+  ENSURE_RC=$?
+  return 0
+}
+
+SETE_ERR=""; SETE_RC=0
+# Call sites are exercised in a `set -euo pipefail` shell because that is how
+# install.sh runs this library, and the difference matters here: a call site that
+# does not handle the new non-zero status does not refuse, it DIES mid-function —
+# same exit code, no message, no refusal. This suite runs without -e, so nothing
+# else in it can see that.
+run_under_set_e() {  # shim_dir_or_empty passwd_db state_file snippet
+  SETE_ERR="$(PATH="${1:+$1:}$PATH" DC_PASSWD_DB="$2" DC_STATE_FILE="$3" SUDO_USER= \
+              bash -c "set -euo pipefail; . '$LIB'; $4" 2>&1 >/dev/null)"
+  SETE_RC=$?
+  return 0
+}
+
+# The contract itself, as a table over the four inputs that can reach it.
+test_passwd_entry_tells_an_absent_account_from_a_failed_lookup() {
+  local live gone serving broken erroring
+  declare -F passwd_entry >/dev/null || { fail "passwd_entry() is not defined"; return 0; }
+  live="$(make_removal_passwd_db)"
+  gone="$(make_hand_deleted_passwd_db)"
+
+  # 1. Found. The expected line is the fixture's own bytes, copied from it.
+  serving="$(make_getent_shim "$TMP/getent-30-live" serving "$live")"
+  try_passwd_entry "$serving" "" dreamconnect-host
+  assert_eq "$PE_RC" "0" "a found account: passwd_entry exits 0"
+  assert_eq "$PE_OUT" \
+    "dreamconnect-host:x:987:987:DreamConnect display host:/var/lib/dreamconnect-host:/bin/bash" \
+    "a found account: the passwd line verbatim on stdout"
+  assert_eq "$PE_ERR" "" "a found account: nothing on stderr"
+
+  # 2. Absent, with the source alive: the answer IS "no such account".
+  serving="$(make_getent_shim "$TMP/getent-30-gone" serving "$gone")"
+  try_passwd_entry "$serving" "" dreamconnect-host
+  assert_eq "$PE_RC" "1" \
+    "an account the passwd source itself reports as absent: exit 1, distinct from a failed lookup"
+  assert_eq "$PE_OUT" "" "an absent account: empty stdout"
+  assert_eq "$PE_ERR" "" "an absent account: silent — absence is an answer, not an error"
+
+  # 3. Issue #30's box: the lookup failed, so absence was never established.
+  broken="$(make_getent_shim "$TMP/getent-30-broken" broken 2)"
+  try_passwd_entry "$broken" "" dreamconnect-host
+  assert_eq "$PE_RC" "2" \
+    "a lookup that FAILED (broken NSS/SSSD: getent exits 2 for every key, root included): exit 2, never 0 and never the absence answer"
+  assert_eq "$PE_OUT" "" "a failed lookup: empty stdout"
+  assert_contains "$PE_ERR" "dreamconnect-host" \
+    "a failed lookup: stderr names the account whose lookup failed"
+
+  # 4. Any other getent status is a failed lookup too, not an absence.
+  erroring="$(make_getent_shim "$TMP/getent-30-rc3" broken 3)"
+  try_passwd_entry "$erroring" "" dreamconnect-host
+  assert_eq "$PE_RC" "2" "getent exiting 3: still a failed lookup, exit 2"
+
+  # 5. The DC_PASSWD_DB fixture path answers on the same three-way scale.
+  try_passwd_entry "" "$live" dreamconnect-host
+  assert_eq "$PE_RC" "0" "DC_PASSWD_DB, entry present: exit 0"
+  try_passwd_entry "" "$gone" dreamconnect-host
+  assert_eq "$PE_RC" "1" "DC_PASSWD_DB, no matching entry: exit 1"
+  assert_eq "$PE_ERR" "" "DC_PASSWD_DB, no matching entry: silent"
+  try_passwd_entry "" "$TMP/passwd-there-is-no-such-file" dreamconnect-host
+  assert_eq "$PE_RC" "2" \
+    "DC_PASSWD_DB naming a file that cannot be read: the lookup failed, exit 2 — not 'the account is absent'"
+  assert_eq "$PE_OUT" "" "DC_PASSWD_DB unreadable: empty stdout"
+  assert_contains "$PE_ERR" "dreamconnect-host" \
+    "DC_PASSWD_DB unreadable: stderr names the account"
+}
+
+# The same failure at every site that looks an account up. Each phase pairs the
+# failed lookup with the absent one, because "refuse on 2" is only worth having
+# if "1" still behaves exactly as it does today: an implementation that refused
+# both would pass half of this and fail the control.
+test_a_failed_passwd_lookup_refuses_at_every_call_site() {
+  local live gone serving broken state asdir
+  declare -F passwd_entry >/dev/null || { fail "passwd_entry() is not defined"; return 0; }
+  require_ensure_host_account "failed lookup" || return 0
+  live="$(make_removal_passwd_db)"
+  gone="$(make_hand_deleted_passwd_db)"
+  broken="$(make_getent_shim "$TMP/getent-30-sites-broken" broken 2)"
+  state="$TMP/state-30-sites/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  # ensure_host_account. This is the sharp one: a failed lookup looks exactly
+  # like "absent" to it today, so it runs `useradd` over an account that may
+  # well exist — and on an adopted LDAP account (CREATED_ACCOUNT=0) that is a
+  # create attempt against someone else's identity.
+  asdir="$TMP/as-30-broken"; mkdir -p "$asdir"
+  run_ensure_dry_via_getent "$broken" "$asdir" dreamconnect-host
+  [ "$ENSURE_RC" -ne 127 ] || { fail "ensure_host_account: exit 127, not a result"; return 0; }
+  [ "$ENSURE_RC" -ne 0 ] || \
+    fail "ensure_host_account with a FAILED passwd lookup: exited 0 — it cannot know whether the account exists, so it must refuse"
+  assert_eq "$(dry_lines_for useradd)" "" \
+    "a failed lookup: no useradd — the account may already exist and this one cannot tell"
+  assert_eq "$(dry_lines_for usermod)" "" \
+    "a failed lookup: no usermod either — '-p *' on an existing account disables a password that is not ours"
+
+  # Control: absence still creates, exactly as it does today.
+  serving="$(make_getent_shim "$TMP/getent-30-sites-gone" serving "$gone")"
+  asdir="$TMP/as-30-gone"; mkdir -p "$asdir"
+  run_ensure_dry_via_getent "$serving" "$asdir" dreamconnect-host
+  assert_eq "$ENSURE_RC" "0" "control: an account the source reports absent is still created, exit 0"
+  assert_contains "$(dry_lines_for useradd)" "dreamconnect-host" \
+    "control: absence still reaches useradd — nothing about the absent case changes"
+
+  # host_account_removable. Already refuses an absent account, and must keep
+  # doing so with its own voice; a failed lookup must also not be reported to a
+  # caller as "no such account".
+  run_under_set_e "$broken" "" "$state" 'host_account_removable dreamconnect-host kogies'
+  [ "$SETE_RC" -ne 0 ] || \
+    fail "host_account_removable with a FAILED passwd lookup: exited 0 — it would authorise userdel -r on an account it could not look up"
+  assert_contains "$SETE_ERR" "dreamconnect-host" \
+    "a failed lookup: host_account_removable refuses in its own voice, naming the account"
+  serving="$(make_getent_shim "$TMP/getent-30-rem-gone" serving "$gone")"
+  run_under_set_e "$serving" "" "$state" 'host_account_removable dreamconnect-host kogies'
+  assert_eq "$SETE_RC" "1" "control: an absent account is still refused, exit 1"
+  assert_contains "$SETE_ERR" "dreamconnect-host" \
+    "control: and the refusal still SPEAKS — a caller killed by set -e on the new non-zero status exits the same way in silence"
+
+  # resolve_host_identity, the inline sibling of the same lookup.
+  run_under_set_e "$broken" "" "$state" 'resolve_host_identity dreamconnect-host kogies'
+  [ "$SETE_RC" -ne 0 ] || \
+    fail "resolve_host_identity with a FAILED passwd lookup: exited 0 — a fabricated identity points the root JVM at a socket nothing binds"
+  assert_contains "$SETE_ERR" "dreamconnect-host" \
+    "a failed lookup: resolve_host_identity refuses, naming the account"
+  serving="$(make_getent_shim "$TMP/getent-30-resolve" serving "$live")"
+  run_under_set_e "$serving" "" "$state" 'resolve_host_identity dreamconnect-host kogies'
+  assert_eq "$SETE_RC" "0" \
+    "control: an account that IS there still resolves, exit 0 — the identity path is not collateral"
+}
+
+# --- issue #30, slice 2: the call site the issue was filed about --------------
+#
+# Slice 1 gave passwd_entry a three-way answer. uninstall_host_account is the one
+# caller where reading "could not tell" as "not there" DELETES something:
+# install.sh's uninstall() clears install.state only when this function returns 0
+# (install.sh:239-254), so a failed lookup reported as success orphans an account
+# that is still there — linger enabled, GECOS marker and AccountsService marker
+# set — with no state left for a retry to find it by. Its short-circuit still
+# reads `[ -z "$(passwd_entry "$name")" ]` (install-lib.sh:1226), and a command
+# substitution discards the status that now carries the distinction.
+#
+# CONTRACT UNDER TEST, from this issue's plan and issue #30's own requirements;
+# the implementation follows it, not the reverse. Expected values below come from
+# that contract, from the breaker's repro quoted in the issue, and from the
+# fixtures' own bytes — never from what the shipped code does:
+#
+#   uninstall_host_account <name> <protected_user> [uid]
+#     passwd_entry says 1 (absent — the source ANSWERED): unchanged from today.
+#       Exit 0 having run none of the three commands, naming the account. Issue
+#       #21's fix is not narrowed by this one.
+#     passwd_entry says 2 (the lookup FAILED): non-zero, having run none of the
+#       three commands, and the output names the account. Absence was never
+#       established, so "nothing to remove" is a claim this function cannot make
+#       — and non-zero is what leaves install.state for the retry.
+#     passwd_entry says 0 (found): unchanged. The gate is consulted and a
+#       removable account is removed in full.
+#
+# The refusal's WORDING is the builder's; nothing below asserts it beyond the
+# account being named, and nothing below pins WHICH rail refuses — falling
+# through to host_account_removable's own refusal satisfies this contract exactly
+# as an explicit branch does.
+
+# uninstall_host_account driven through the REAL lookup path — DC_PASSWD_DB
+# empty, so passwd_entry runs getent — with the getent shim ahead of the
+# loginctl/userdel/systemctl shims on PATH. run_uninstall_dry and
+# run_uninstall_shimmed cannot reach it: both always set DC_PASSWD_DB, which
+# takes passwd_entry's fixture branch and never consults getent at all.
+run_uninstall_via_getent() {  # dry("1"|"") getent_dir shim_dir state_file name protected_user [uid]
+  local -a args=("$5" "$6")
+  [ "$#" -lt 7 ] || args+=("$7")
+  # try_passwd_entry's reason, unchanged: the shims arrive as a PATH prefix on a
+  # function call, which does not clear bash's command hash.
+  hash -r
+  UNINSTALL_OUT="$(DC_DRY_RUN="$1" DC_PASSWD_DB= DC_STATE_FILE="$4" SUDO_USER= \
+                   DC_MANAGER_POLL_INTERVAL=0.05 DC_BUS_POLL_INTERVAL=0.05 \
+                   PATH="$2:$3:$PATH" uninstall_host_account "${args[@]}" 2>&1)"
+  UNINSTALL_RC=$?
+  return 0
+}
+
+test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state() {
+  local live gone broken serving shims log state before
+  local sh ustart called rmline gate gline gtext rmtext gindent rmindent
+  require_uninstall_host_account "failed lookup" || return 0
+  live="$(make_removal_passwd_db)"
+  gone="$(make_hand_deleted_passwd_db)"
+  state="$TMP/state-30-uninstall/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  before="$(cat "$state")"
+
+  # 1. Issue #30's box, as the breaker reproduced it: getent exits 2 for every
+  #    key, root included, while the account it cannot look up is still there.
+  broken="$(make_getent_shim "$TMP/getent-30-uninstall-broken" broken 2)"
+  shims="$TMP/shims-30-uninstall-broken"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$broken" "$shims" "$state" dreamconnect-host kogies 987
+  [ "$UNINSTALL_RC" -ne 127 ] || { fail "failed lookup: exit 127, not a result"; return 0; }
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "uninstall_host_account with a FAILED passwd lookup: exited 0 — install.sh reads that as removed and deletes install.state (install.sh:250), orphaning an account that is still there with linger and its marker set and nothing left to retry from"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "a failed lookup: not one of disable-linger, terminate-user or userdel was executed"
+  assert_contains "$UNINSTALL_OUT" "dreamconnect-host" \
+    "a failed lookup: the output names the account whose lookup failed"
+  assert_eq "$(cat "$state")" "$before" \
+    "a failed lookup: uninstall_host_account leaves install.state exactly as it found it"
+
+  # 2. The same, dry: nothing may even be EMITTED, so nothing reached run().
+  shims="$TMP/shims-30-uninstall-broken-dry"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent 1 "$broken" "$shims" "$state" dreamconnect-host kogies 987
+  [ "$UNINSTALL_RC" -ne 0 ] || fail "a failed lookup (dry): exited 0"
+  assert_eq "$(uninstall_dry_all)" "" \
+    "a failed lookup (dry): no command is even emitted"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "a failed lookup (dry): nothing was executed either"
+
+  # 3. Control, issue #21: the source ANSWERED and the account is genuinely
+  #    gone. An implementation that refused every empty lookup passes phase 1
+  #    and fails here, having put issue #21's own repro back.
+  serving="$(make_getent_shim "$TMP/getent-30-uninstall-gone" serving "$gone")"
+  shims="$TMP/shims-30-uninstall-gone"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987
+  assert_eq "$UNINSTALL_RC" "0" \
+    "control: an account the passwd source itself reports absent is still nothing-to-remove, exit 0, so install.sh can still clear install.state"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "control: an absent account still runs none of the three commands"
+  assert_contains "$UNINSTALL_OUT" "dreamconnect-host" \
+    "control: and still names the account it found nothing to remove"
+
+  # 4. Control, the other end: an account that IS there is still removed in
+  #    full. Without this, an implementation that refused everything would be
+  #    green above.
+  serving="$(make_getent_shim "$TMP/getent-30-uninstall-live" serving "$live")"
+  shims="$TMP/shims-30-uninstall-live"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987
+  assert_eq "$UNINSTALL_RC" "0" "control: an account that IS there is removed, exit 0"
+  assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
+terminate-user
+userdel" "control: an account that IS there still gets the full removal, in order"
+
+  # 5. The fixture branch fails the same way, reached without a getent shim:
+  #    DC_PASSWD_DB naming a file that cannot be read is a lookup that could not
+  #    be performed, not an account that is absent.
+  shims="$TMP/shims-30-uninstall-nodb"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_shimmed "$TMP/passwd-there-is-no-such-file" "$state" "$shims" \
+    dreamconnect-host kogies 987
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "an unreadable passwd source: exited 0 — a lookup that could not be performed has not established that the account is gone"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "an unreadable passwd source: nothing was executed"
+
+  # 6. install.state itself. This function never touches the file — install.sh's
+  #    uninstall() deletes it, and only when this function returned 0
+  #    (install.sh:239-254) — so "a failed lookup leaves install.state intact so
+  #    removal can be retried" is the non-zero status asserted above PLUS that
+  #    gate still being there. install.sh cannot be executed from this suite
+  #    (root, real systemd, top-level work on sourcing), so this is a source-text
+  #    assertion, the technique every call-site test in this file uses. GREEN
+  #    today, and here for the regression: an unconditional
+  #    `rm -f "$(install_state_file)"` would undo this issue without install-lib.sh
+  #    changing at all.
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "state gate: no 'uninstall()' definition in install.sh"; return 0; }
+  called="$(first_code_line "$sh" '(^|[^[:alnum:]_])uninstall_host_account' "$ustart")"
+  [ -n "$called" ] || { fail "state gate: uninstall() never calls uninstall_host_account"; return 0; }
+  rmline="$(first_code_line "$sh" 'rm -f.*install_state_file' "$called")"
+  [ -n "$rmline" ] || {
+    fail "state gate: no 'rm -f \"\$(install_state_file)\"' after the uninstall_host_account call at install.sh:$called — the deletion this gate is about could not be found, so whether a failed removal preserves the state file is unverified"
+    return 0; }
+
+  # The nearest conditional between the call and the deletion, and the deletion
+  # nested inside it. Deliberately does not name the flag: which variable carries
+  # the outcome is layout, and only "the delete is not on the unconditional path"
+  # is contract.
+  gate="$(awk -v start="$called" -v end="$rmline" \
+    'NR > start && NR < end && $0 !~ /^[[:space:]]*#/ && $0 ~ /^[[:space:]]*(if|elif)[[:space:]]/ { n = NR; g = $0 }
+     END { if (n) printf "%s\t%s\n", n, g }' "$sh")"
+  gline="${gate%%$'\t'*}"; gtext="${gate#*$'\t'}"
+  [ -n "$gline" ] || {
+    fail "state gate: install.sh:$rmline deletes install.state with no conditional between it and the uninstall_host_account call at line $called — a failed removal (a passwd lookup that could not be performed, issue #30) would delete the only record that the account is ours, and no future --uninstall could ever retry it"
+    return 0; }
+  rmtext="$(awk -v n="$rmline" 'NR == n' "$sh")"
+  gindent="${gtext%%[![:space:]]*}"; rmindent="${rmtext%%[![:space:]]*}"
+  [ "${#rmindent}" -gt "${#gindent}" ] || fail \
+    "state gate: install.sh:$rmline is not inside the conditional at line $gline (indented ${#rmindent}, the conditional ${#gindent}) — the state-file deletion has to be gated on the removal having succeeded, or issue #30's failed lookup takes install.state with it"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10019,7 +10412,10 @@ for CURRENT in \
   test_install_sh_unpushes_dconf_environment_on_uninstall \
   test_install_sh_unpushes_dconf_environment_before_disabling_linger \
   test_install_sh_passes_the_uid_to_uninstall_host_account \
-  test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file
+  test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file \
+  test_passwd_entry_tells_an_absent_account_from_a_failed_lookup \
+  test_a_failed_passwd_lookup_refuses_at_every_call_site \
+  test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is
