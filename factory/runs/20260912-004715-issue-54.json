@@ -1,0 +1,153 @@
+{
+  "recorded_at": "2026-09-12T00:47:15Z",
+  "repo": "registry-refresh",
+  "branch": "backstage/registry-refresh",
+  "base": "404cde0121139dfa1288cf8fd109afe603559ef3",
+  "window_start": "2026-09-11T08:46:08+10:00",
+  "head": "0c4b81cf5b276c6a2b8c43aab9ace468a35b2d80",
+  "issue": {
+    "number": 54,
+    "state": "OPEN",
+    "title": "A backstage shell restart can leave a stale display in the session registry",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/54"
+  },
+  "commits": [
+    {
+      "sha": "0c4b81cf5b276c6a2b8c43aab9ace468a35b2d80",
+      "subject": "Discovery: re-register a session whose published display moved (#54)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "4 files changed, 467 insertions(+), 8 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 376,
+      "output_tokens": 320226,
+      "cache_read_input_tokens": 37301724,
+      "cache_creation_input_tokens": 1282857
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 7,
+    "by_agent": {
+      "architect": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 103854,
+        "duration_ms": 284885,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 145130,
+        "duration_ms": 503372,
+        "models": []
+      },
+      "builder": {
+        "spawns": 2,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 115116,
+        "duration_ms": 197980,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 71343,
+        "duration_ms": 199398,
+        "models": []
+      }
+    },
+    "usage_blocks": 188,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "e01942c5-5173-4320-9e0b-eb9f28b5cf3f.jsonl",
+        "usage_blocks": 188
+      }
+    ],
+    "agent_wall_clock_ms": 1185635,
+    "first_activity": "2026-09-10T22:49:00.462000+00:00",
+    "last_activity": "2026-09-12T00:47:13.945000+00:00",
+    "notification_tokens": 435443,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "Seam gate approved: factory_owner_decisions.py --approve-gate --run-id impl-54-c0e1aab3 --gate seam --owner Roger --source-snapshot tree:e06fe5fe04a575f70ff04d629cd4d19c33490d45, run from the primary checkout. Run next and start the oracle.",
+    "<task-notification>\n<task-id>a930757b7b2b37281</task-id>\n<tool-use-id>toolu_01RmGP9JyXy3jnmnc4q39f1n</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/a930757b7b2b37281.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write the red test for slice 1\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: 4730418b71c64820a77d5eca861dd154\nINVOCATION-ID: inv-002-ffa2e332\nEVIDENCE REQ-005: `runtime/test_discovery.py:190` (`test_a_reserved_uid_with_a_stale_display_is_refreshed`) asserts entry `:1` + published `:2` for the backstage uid yields `refresh == [992]`; errors today with `AttributeError: 'Plan' object has no attribute 'refresh'`.\nEVIDENCE REQ-006: Expected values taken from the entry/envfile formats, not from code-under-test: `display=&lt;v&gt;` at `install-lib.sh:1182`, `DISPLAY=&lt;v&gt;` at `install-lib.sh:1220`; literals `:1`/`:2`/`:3` are real fixture values (`test_install.sh:8627,8741,9175`).\nEVIDENCE REQ-007: Candidate diff is `runtime/test_discovery.py | 104 +` and nothing else (`git diff --stat`) \u2014 no `.path` unit, timer, polkit rule or helper. The acting half (restart argv) is slice 2, untouched here.\nEVIDENCE REQ-008: All 14 new tests are in `runtime/test_discovery.py`; failures name the discovery seam only: `AttributeError: module 'dreamconnect_discovery' has no attribute 'stale_registrations'` (\u00d77) and `TypeError: plan() got an unexpected keyword argument 'registered_displays'` (\u00d76).\n\n## Test authored\n- slice: 1 of 2 (Discovery rules) \u2014 architect plan lines 43, 19\u201321\n- seam: `dreamconnect_discovery.stale_registrations` / `plan()` / `Plan.refresh`\n- test: `/home/kogies/.factory/worktrees/dreamconnect/registry-refresh--candidates/impl-5",
+    "<task-notification>\n<task-id>ab95e4d40d93524c1</task-id>\n<tool-use-id>toolu_01C5ftkF1y1VxpVX5dpZSrjD</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/ab95e4d40d93524c1.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make slice 1 green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 3d5c3bc2be11482ebab63e8e2a2ce6aa\nINVOCATION-ID: inv-003-c6a6b8cf\nEVIDENCE REQ-005: `TestPlanRefresh.test_a_reserved_uid_with_a_stale_display_is_refreshed` (entry `:1`, published `:2`, uid 992) now passes \u2014 `Ran 38 tests ... OK` from `python3 runtime/test_discovery.py`. This is the decision half only; the actual restart that keeps the session out of REFUSED is slice 2 (sessiond) and is **not** implemented or observed here.\nEVIDENCE REQ-006: `stale_registrations` at `runtime/dreamconnect_discovery.py:79-100` compares the entry value against the published value and reports disagreement; `test_a_republished_display_makes_the_entry_stale` \u2192 `[992]`, `test_an_entry_that_still_matches_is_not_stale` \u2192 `[]`, both passing.\nEVIDENCE REQ-007: No file outside `runtime/dreamconnect_discovery.py` was touched \u2014 no `systemd/*.path`, no timer, no polkit, no helper. `git status --short` scope: one modified file. The supervisor-side restart is slice 2 and is not in this slice.\nEVIDENCE REQ-008: Rule lives in `runtime/dreamconnect_discovery.py` (`stale_registrations` :79, `Plan.refresh` :102-121, `plan()` wiring :164-181); tested by `runtime/test_discovery.py:142-243`. `runtime/dreamconnect_sessiond.py` is untouched this slice.\n\n**Test-file edits: none.** I made no edit to `runtime/test_discovery.py` or any other test file.\n\nWhat I did: added the pure rule `stale_registrations(register",
+    "<task-notification>\n<task-id>a74f9702a3b20b856</task-id>\n<tool-use-id>toolu_01JaPKGQdAtCxZUkX4bj6GH2</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/a74f9702a3b20b856.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write the red test for slice 2\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: f6d70ef2ec364e489fff71637d878991\nINVOCATION-ID: inv-004-944c9654\nEVIDENCE REQ-005: `runtime/test_sessiond.py:349` `test_a_republished_display_restarts_the_register_instance` \u2014 entry `display=:1`, envfile `DISPLAY=:2`, uid 992 \u2014 asserts `r.calls == [sd.refresh_argv(992)]`; errors today with `TypeError: Supervisor.__init__() got an unexpected keyword argument 'runtime_root'`. Fixtures only; no live-box REFUSED-to-green proof.\nEVIDENCE REQ-006: Expected values taken from the writers, not from Python: entry text mirrors `render_registry_entry`'s printf (`install-lib.sh:1181-1182`); envfile text mirrors `dreamconnect-backstage-env.sh:51`; path `&lt;root&gt;/&lt;uid&gt;/dreamconnect-display.env` from `runtime/dreamconnect-register.sh:97`; blank-is-unset from `Bridge.java:232`; anchoring from `install-lib.sh:1216` (\"an `XDISPLAY=` line is not a DISPLAY\").\nEVIDENCE REQ-007: `git diff --stat` in the candidate: `runtime/test_sessiond.py | 204 +` \u2014 one file, nothing else. No `systemd/*.path`, no timer, no polkit, no helper. The restart is issued through the existing injected runner (`dreamconnect_sessiond.py:208`).\nEVIDENCE REQ-008: All 14 new tests are in `runtime/test_sessiond.py:262-404` (the acting half); `runtime/dreamconnect_discovery.py` and `runtime/test_discovery.py` untouched \u2014 `python3 runtime/test_discovery.py` \u2192 `Ran 38 tests \u2026 OK`.\n\n## Test authore",
+    "<task-notification>\n<task-id>a57dbac38df0cf227</task-id>\n<tool-use-id>toolu_017gqvut3Brqg1XmFHNEh2xG</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/a57dbac38df0cf227.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make slice 2 green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>Only the implementation file changed; no test file touched.\n\n```\nSLICE: green\nACTION-ID: a53f320bdf854ed5843f8cc9af3bae8e\nINVOCATION-ID: inv-005-158d5910\nEVIDENCE REQ-005: `TestReconcileRefresh.test_a_republished_display_restarts_the_register_instance` (entry `:1`, envfile `:2`, backstage uid 992) now passes \u2014 supervisor log line observed: `re-registering uid 1002 (entry names :1, session publishes :2)`; `python3 runtime/test_sessiond.py` \u2192 `Ran 35 tests in 0.011s / OK` (was `FAILED (errors=14)` before the change).\nEVIDENCE REQ-006: `published_display()` at runtime/dreamconnect_sessiond.py:149-172 reads `DISPLAY=` from `&lt;runtime_root&gt;/&lt;uid&gt;/dreamconnect-display.env` each pass, anchored at line start (`line.startswith(\"DISPLAY=\")`), so `TestPublishedDisplay.test_an_xdisplay_line_is_not_a_display` passes rather than reading `XDISPLAY=:9`. `entry_display()` at :118-146 parses by key-before-first-`=`, last-wins, so `test_a_label_that_looks_like_a_display_is_still_a_label` returns `:1` not `:9`.\nEVIDENCE REQ-007: `refresh_argv()` at runtime/dreamconnect_sessiond.py:196-206 returns `[\"systemctl\", \"restart\", \"dreamconnect-register@992.service\"]` \u2014 asserted by `TestRefreshArgv.test_refresh_restarts_the_register_instance`, and `test_refresh_leaves_the_attach_unit_alone` confirms `attach@` is absent. No `.path` unit, timer, polkit rule or root helper added: `git status --porcelain` show",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-3f1bb79f14eb --outcome CONTINUE --owner Roger was run from the primary checkout. Run next and continue.",
+    "<task-notification>\n<task-id>a53019fb5ed504377</task-id>\n<tool-use-id>toolu_01LKGbVHdYsTXUb3RopzqGpP</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/a53019fb5ed504377.output</output-file>\n<status>killed</status>\n<summary>Agent \"Independently verify the change\" was stopped by Claude</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>The candidate's HEAD already contains the work as promoted commits. Let me find the real change boundary.</result>\n</task-notification>",
+    "<task-notification>\n<task-id>ab1e32815dac67fa8</task-id>\n<tool-use-id>toolu_01NmAMzHgeGrDnpohRBV9VAa</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-registry-refresh/e01942c5-5173-4320-9e0b-eb9f28b5cf3f/tasks/ab1e32815dac67fa8.output</output-file>\n<status>completed</status>\n<summary>Agent \"Independently verify the change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: 7a90ff2701704929ad9043b6a466bc99\nINVOCATION-ID: inv-006-af9b7873\n\nEVIDENCE REQ-005: `python3 runtime/test_sessiond.py` \u2192 `Ran 35 tests ... OK` (exit 0); log emitted `re-registering uid 992 (entry names :1, session publishes :2)`. Chain verified by inspection: `refresh_argv` \u2192 `systemd/dreamconnect-register@.service` `ExecStart=...dreamconnect-register.sh register %i` \u2192 `dreamconnect-register.sh:97,104` re-reads `/run/user/$uid/dreamconnect-display.env`. Fixture-level only; no live Fedora box.\nEVIDENCE REQ-006: `published_display` (dreamconnect_sessiond.py:153-174) matches `install-lib.sh:1220` (`sed -n 's/^DISPLAY=//p' | head -n 1`) exactly \u2014 anchored, first wins. `entry_display` (:124-150) splits on first `=`, last wins, matching `Bridge.java:228-232`. Entry is re-read every reconcile (`display_maps`, :262-278), not once at unit start.\nEVIDENCE REQ-007: `git diff --stat 404cde0 HEAD` \u2192 only `runtime/{dreamconnect_discovery,dreamconnect_sessiond,test_discovery,test_sessiond}.py` + `factory/*`. Nothing under `systemd/`, no `.path`, no `.timer`, no polkit, no helper. Refresh rides the existing `RECONCILE_INTERVAL_SECONDS = 30` loop (:323, :352).\nEVIDENCE REQ-008: decision in `dreamconnect_discovery.py` (`stale_registrations` :79-99, `Plan.refresh`, `plan` refresh filter :171-189); acting in `dreamconnect_sessiond.py` (`display_maps` :262-278, refresh loo",
+    "Fix them - your call is right. Tiny, and they sit where the next person will look. If the driver refuses the remediation grant because the run is at COMPLETE, say so plainly and stop rather than quietly switching to accept-finding; I will file them and rule against the issue like I did for #45/#64. That refusal is tracked upstream as ghostpsalm/AI-Factory#597 and #601.",
+    "File both as ONE issue against #54 - they are the same class, both are the code disagreeing with its own claim, and one issue is easier to act on than two. Then rule ACCEPT_RISK against it so the run can close, run the FULL gate, and offer /submit. Be explicit in the issue that neither can bite today: d394a14028a2 needs a leading-space key the sole writer never emits, and 99ff8621a2c7 needs an entry with two display lines, which cannot happen. I will fix both on main after the merge, the same way I fixed #64 - so write the issue as a two-line change, not a redesign.",
+    "Both recorded against #66: factory_pending_decisions.py --decide-finding finding-d394a14028a2 and finding-99ff8621a2c7, --decision ACCEPT_RISK --owner Roger --source-snapshot tree:5cc0900d72fe56788e8fde9a643104312966a62b, run from the primary checkout. Consume them, run the FULL gate, and report the real output - if it is red, say so with the output and do not offer /submit.",
+    "Yes - run /submit. Gate, commit on backstage/registry-refresh, push. No PR, no Co-Authored-By trailer. Report the real gate output; if it is red say so with the output rather than committing. Noted that only a real backstage shell restart proves the black screen goes away - say that plainly in the commit message too, so the limit travels with the code rather than living in this window."
+  ],
+  "fence_decisions": {
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 99,
+    "block: a factory worker role executing the authoritative full gate": 9126,
+    "block: a model-tool write to Factory acceptance authority state": 101,
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 409,
+    "block: running an owner-decision command from inside a factory worktree": 359,
+    "block: recursive/forced delete": 791,
+    "ask: This would publish a GitHub release, which ships to real devices.": 1622,
+    "ask: This edits a version number.": 2237,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 1678,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 261,
+    "block: editing the deployed factory directly": 4645,
+    "block: writing to a file the harness owns": 118,
+    "block: touching a secret/credential file": 1240,
+    "block: sending a secret/credential file to a network client": 4657,
+    "block: sending ~/.claude.json to a network client": 218,
+    "block: force push (never rewrite published history)": 124,
+    "block: editing an existing migration": 115,
+    "block: malformed hook input": 552,
+    "block: unbounded read of a 600-line source file": 341,
+    "block: writing an owner approval from inside a factory worktree": 666,
+    "block: writing an owner approval from a session with no recorded cwd": 493,
+    "block: running an owner-decision command from a session with no recorded cwd": 3536,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 8915,
+    "block: piping remote content straight to a shell": 17,
+    "block: hard reset discards work": 13,
+    "block: unbounded read of a 1326-line source file": 2,
+    "block: unbounded read of a 13294-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpb_7czqhr/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp/claude": 96,
+    "block: destructive SQL DDL": 3610,
+    "block: push --all (push the current branch only)": 4,
+    "block: git clean deletes untracked files": 4,
+    "block: TRUNCATE destroys data": 4,
+    "block: unqualified DELETE (no WHERE)": 4,
+    "block: disk-destructive command": 8,
+    "block: fork bomb": 4,
+    "block: world-writable recursive chmod": 4,
+    "block: reading ~/.claude.json, which holds a live credential": 4,
+    "block: writing to ~/.claude.json, which holds a live credential": 8,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp could ": 15
+  },
+  "status": "done",
+  "note": "Fixtures only. No live Fedora GNOME box: the real systemctl restart of dreamconnect-register@ and the black-screen recovery are unverified. Targeted-testing step exited 1 and was overridden by the owner (CONTINUE); the gate verdict stays recorded as NEGATIVE_RESULT. Two seraph info findings ACCEPTED_RISK, not fixed, filed as #66. Attended manager_display sessions stay unfixed, filed as #63. Breaker and reviewer were not in the normal-tier ladder, so no red team ran. Agent build suite skipped 1 check (no local byte-buddy jar).",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "0"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}
