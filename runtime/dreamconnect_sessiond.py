@@ -33,6 +33,12 @@ REGISTRY_DIR = "/run/dreamconnect/sessions"
 ATTACH_UNIT = "dreamconnect-attach@{uid}.service"
 REGISTER_UNIT = "dreamconnect-register@{uid}.service"
 
+# Where a session publishes the display it is actually on: the same file the
+# register unit reads (dreamconnect-register.sh:97) and the client drop-in
+# sources (systemd/dreamconnect-agent.conf:23).
+RUNTIME_ROOT = "/run/user"
+DISPLAY_ENVFILE = "dreamconnect-display.env"
+
 # Accounts whose registry slot somebody else owns. gdm and the greeter's
 # dynamic users never have a desktop worth offering; the backstage account is
 # managed by the installer and is added at runtime from install state.
@@ -115,6 +121,59 @@ def registered_uids(registry_dir=REGISTRY_DIR):
     return sorted(int(n) for n in names if n.isdigit())
 
 
+def entry_display(registry_dir, uid):
+    """The display one entry names, "" if it names none, None if there is no
+    entry at all.
+
+    Parsed the way the agent parses it (Bridge.java:228-232): a key is only what
+    precedes the *first* `=` on the line, and last wins. Both halves matter. The
+    label is free text that may itself contain `=` -- BootTests.java:1735 uses
+    `label=a=b` -- so a reader that looked for `display=` as a substring would
+    read a display off a label and restart register@ every pass for a session
+    that never moved.
+
+    A missing entry is None rather than an error because register@'s ExecStop
+    removes it, so it can vanish between the listdir and this read; on a 30s
+    timer that race is routine, and an exception would take every other
+    account's reconcile down with it. Blank is unset, as in #50.
+    """
+    try:
+        with open(os.path.join(registry_dir, str(uid))) as f:
+            text = f.read()
+    except OSError:
+        return None
+    display = ""
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key == "display":
+            display = value.strip()
+    return display
+
+
+def published_display(uid, runtime_root=RUNTIME_ROOT):
+    """The display that session publishes now, or None if it publishes nothing.
+
+    install-lib.sh's `session_display` (:1214-1222) in Python, and deliberately
+    the same rule: the first `DISPLAY=` line wins, anchored at the start of the
+    line so an `XDISPLAY=` line is not a DISPLAY. The two halves read one file
+    and must agree about which line is the answer, or the supervisor decides an
+    entry is stale against a value the registrar would never have written.
+
+    Anyone who simply logged in has no envfile; register_session falls back to
+    the user manager's display for them (dreamconnect-register.sh:104-112), so
+    absent is the normal case and not a fault.
+    """
+    path = os.path.join(runtime_root, str(uid), DISPLAY_ENVFILE)
+    try:
+        with open(path) as f:
+            for line in f:
+                if line.startswith("DISPLAY="):
+                    return line.partition("=")[2].strip()
+    except OSError:
+        return None
+    return None
+
+
 def unit_names(uid):
     """The two units that together make one session reachable."""
     return [ATTACH_UNIT.format(uid=uid), REGISTER_UNIT.format(uid=uid)]
@@ -133,12 +192,26 @@ def stop_argv(uid):
     return ["systemctl", "stop", *unit_names(uid)]
 
 
+def refresh_argv(uid):
+    """systemctl invocation to rewrite one uid's entry onto the display it
+    publishes now (#54).
+
+    `register@` only, unlike start and stop. The entry is what is wrong; the
+    daemon is running and correct, and restarting `attach@` alongside it would
+    drop a live operator mid-call to fix a label they cannot see. Restart rather
+    than stop-then-start so systemd holds the two halves together and a uid is
+    never left deregistered because the start failed on its own.
+    """
+    return ["systemctl", "restart", REGISTER_UNIT.format(uid=uid)]
+
+
 class Supervisor:
     """Applies plans. Split from the reconciler so the rules stay pure."""
 
     def __init__(self, registry_dir=REGISTRY_DIR, reserved_users=None,
-                 runner=None):
+                 runner=None, runtime_root=RUNTIME_ROOT):
         self.registry_dir = registry_dir
+        self.runtime_root = runtime_root
         if reserved_users is None:
             installed = host_account()
             reserved_users = DEFAULT_RESERVED_USERS + (
@@ -186,11 +259,31 @@ class Supervisor:
                 pass
         return uids
 
+    def display_maps(self, uids):
+        """{uid: display} as the entries record it, against what the sessions
+        publish now -- the two maps the stale-display rule compares.
+
+        Only uids that already hold an entry are read. A uid with no entry has
+        nothing that could have gone stale, and walking every /run/user on the
+        box twice a minute to learn that would cost more than the answer.
+        """
+        recorded, published = {}, {}
+        for uid in uids:
+            entry = entry_display(self.registry_dir, uid)
+            if entry:
+                recorded[uid] = entry
+            current = published_display(uid, self.runtime_root)
+            if current:
+                published[uid] = current
+        return recorded, published
+
     def reconcile(self):
         """One pass. Returns the plan applied, for logging and for tests."""
         sessions = self.list_sessions()
         current = registered_uids(self.registry_dir)
-        p = plan(sessions, current, self.reserved_uids(sessions))
+        recorded_displays, published_displays = self.display_maps(current)
+        p = plan(sessions, current, self.reserved_uids(sessions),
+                 recorded_displays, published_displays)
 
         for session in p.attach:
             log(f"attaching {session.user} (uid {session.uid}, session "
@@ -199,6 +292,15 @@ class Supervisor:
         for uid in p.release:
             log(f"releasing uid {uid} (no live desktop)")
             self._apply(stop_argv(uid), uid, "release")
+        # Last, after the attach and release decisions this pass already made
+        # from the registry have been acted on: a refresh's ExecStop
+        # deregisters before ExecStart rewrites, so the entry is briefly absent,
+        # and running it earlier would put that gap under the reads above.
+        for uid in p.refresh:
+            log(f"re-registering uid {uid} (entry names "
+                f"{recorded_displays.get(uid)}, session publishes "
+                f"{published_displays.get(uid)})")
+            self._apply(refresh_argv(uid), uid, "refresh")
         for uid, ids in p.conflicts:
             # Never resolved automatically: see dreamconnect_discovery.plan.
             log(f"uid {uid} has {len(ids)} desktops ({', '.join(ids)}); "

@@ -1,6 +1,6 @@
 ---
 progress: 81
-updated: 2026-09-11
+updated: 2026-09-12
 stage: Active
 status: building
 next: Work down the daemon/installer hardening backlog; #57 (torn area origin) and #62 (its doc rename) are merged, #45 (control-socket bind umask) is done on `runtime/daemon-races` and waiting, so #30/#32-#34 on the install seam are next.
@@ -9,7 +9,8 @@ flags:
   - There is no remote CI. `.github/workflows/ci.yml` exists in the working tree but is untracked and on no branch, so a push to GitHub still triggers nothing. Verification is local only: `.githooks/pre-commit` runs `./scripts/gate.sh` before every commit and every merge, and refuses the commit when it is red.
   - `core.hooksPath` is local git config, so a fresh clone is ungated until somebody runs `./scripts/install-hooks.sh`.
   - The physical GDM login screen cannot be bridged (mutter inhibits capture and input at the greeter). Autologin or grd Remote Login are the only reboot-reachability options.
-  - The control-socket bind umask (#45) is fixture-proven only. The race it closes — a hostile local user connecting in the instant between `bind()` and `chmod` on a hand-launched daemon — was never reproduced against a live session, and under the shipped unit's `UMask=0077` it was never reachable anyway. Its `finally`-restore comment argues from a mechanism not in play; the reword is tracked as #64.
+  - The control-socket bind umask (#45) is fixture-proven only. The race it closes — a hostile local user connecting in the instant between `bind()` and `chmod` on a hand-launched daemon — was never reproduced against a live session, and under the shipped unit's `UMask=0077` it was never reachable anyway. Its `finally`-restore comment argued from a mechanism not in play; corrected on main in 79f35b2 (#64).
+  - The supervisor's display refresh (#54) is fixture-proven only. That restarting `dreamconnect-register@<uid>` on a moved display actually clears the REFUSED black screen was never executed against a real `systemctl`; only a backstage shell restart on the Fedora box settles it.
   - `VK_SEPARATOR`'s keysym routing (#40) is fixture-proven only. That `KS 65452` lands a separator on a `us`/`pc` guest depends on Mutter finding a keycode for `XK_KP_Separator`, which no test can observe; a live key-logger run by the ROADMAP H1 method would settle it.
 ---
 
