@@ -1,0 +1,173 @@
+{
+  "recorded_at": "2026-09-10T22:51:33Z",
+  "repo": "daemon-races",
+  "branch": "runtime/daemon-races",
+  "base": "d5d4f5ab1a62bfc2923ac5abcdeee8b375d8fc33",
+  "window_start": "2026-09-06T21:40:39+10:00",
+  "head": "bfb6f0f0860cf0fc81a464a8926b65106e981de0",
+  "issue": {
+    "number": 57,
+    "state": "OPEN",
+    "title": "daemon: area_x/area_y can be read torn during a pointer-area update",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/57"
+  },
+  "commits": [
+    {
+      "sha": "bfb6f0f0860cf0fc81a464a8926b65106e981de0",
+      "subject": "Daemon: publish the capture-area origin as one tuple (#57)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "3 files changed, 125 insertions(+), 14 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 242,
+      "output_tokens": 108630,
+      "cache_read_input_tokens": 16943568,
+      "cache_creation_input_tokens": 1031587
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 4,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 45920,
+        "duration_ms": 121057,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 55366,
+        "duration_ms": 231498,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 48115,
+        "duration_ms": 100324,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 48217,
+        "duration_ms": 108706,
+        "models": []
+      }
+    },
+    "usage_blocks": 121,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "4fc5615f-ee8d-45cd-bf1c-6191d41a749e.jsonl",
+        "usage_blocks": 121
+      }
+    ],
+    "agent_wall_clock_ms": 561585,
+    "first_activity": "2026-09-06T21:22:40.817000+00:00",
+    "last_activity": "2026-09-10T22:51:31.687000+00:00",
+    "notification_tokens": 197618,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "<task-notification>\n<task-id>a48827a0321c383cb</task-id>\n<tool-use-id>toolu_01Hj7LgyvfMfwZ5ZAnr2H2Hh</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a48827a0321c383cb.output</output-file>\n<status>completed</status>\n<summary>Agent \"Plan issue 57 area pair fix\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: plan-ready\nACTION-ID: 1191971961e04bd58604c0a781dfe230\nSLICES: 1\nINVOCATION-ID: inv-001-37f965ff\nEVIDENCE REQ-001: Decided on the tuple shape, mirroring the #44 fix in `c1f67eb` (`self.geom = (w, h)`, daemon.py:206-213 + 656-657). Writers today are `runtime/dreamconnect_daemon.py:500`, `:516`, `:524`; the single reader is `:667-669` inside `with self._lock`, and no writer takes that lock \u2014 confirmed by grep: the only `_lock` uses are the five input methods at :667-685.\nEVIDENCE REQ-002: `git log --oneline` shows `c1f67eb Merge: publish stream geometry as one tuple (#44)` already merged with `area_x`/`area_y` untouched at `runtime/dreamconnect_daemon.py:200-201`; this plan is one commit against those three write sites and one read site, revertible alone.\n\n## Problem\nA ScreenConnect operator on a multi-monitor attended desktop (RecordArea) can have a click land in the wrong place. `motion_abs` subtracts the captured area's origin from the desktop coordinate, but that origin is two attributes written independently on the D-Bus thread while the socket thread loads them independently; a monitor-layout change between the two loads mis-shifts the pointer, and unlike #44's torn `GEOM` it does not self-correct.\n\n## Seams (confirm before proceeding)\nOne: `Session.motion_abs` (`runtime/*.py` seam), observed through the arguments handed to `_rd`/`bus.call_sync`. `ControlServer.handle(\"M ",
+    "A - approved. Seam and line are right. Run ~/.claude/scripts/factory_implement.py confirm --approved and continue.",
+    "Seam gate approved. factory_owner_decisions.py --approve-gate --run-id impl-57-18e6419e --gate seam --owner Roger was run from the primary checkout; source_snapshot tree:b6f71a4ffb38834850cd177ac6c78cf167def284. Run confirm --approved and continue.",
+    "<task-notification>\n<task-id>abed076adfa89fb48</task-id>\n<tool-use-id>toolu_01NYkQp7zAagtvFRKaE8qbq4</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/abed076adfa89fb48.output</output-file>\n<status>completed</status>\n<summary>Agent \"Write failing test for issue 57\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: d862744255e44f36a665f3c72f7b5806\nINVOCATION-ID: inv-002-35340c02\nEVIDENCE REQ-001: `python3 runtime/test_daemon.py TestAreaOriginIsAtomic` \u2192 exit 1, `AssertionError: (100.0, 400.0) not found in {(100.0, 300.0), (1380.0, 400.0)}` \u2014 the two-load reader at `runtime/dreamconnect_daemon.py:669` takes x from one published origin and y from the next. Scratch mutant applying the planned single-rebind read (`ax, ay = self.area_origin`) \u2192 `OK`; the test is satisfied by the tuple shape and by nothing weaker.\nEVIDENCE REQ-002: `git log --oneline` \u2192 `c1f67eb Merge: publish stream geometry as one tuple (#44)` already merged, with `area_x`/`area_y` still separate at `dreamconnect_daemon.py:200-201`. `git status --porcelain` \u2192 ` M runtime/test_daemon.py` only: this slice reverts alone.\n\n## Test authored\nslice: 1 (the only slice) \u2014 publish the capture-area origin as one attribute\nseam: `Session.motion_abs`, observed through the arguments handed to `_rd`\ntest: `/home/kogies/.factory/worktrees/dreamconnect/daemon-races--candidates/impl-57-18e6419e/inv-002-35340c02/runtime/test_daemon.py::TestAreaOriginIsAtomic::test_pointer_is_shifted_by_one_published_origin_never_a_mix_of_two` (double `FlickeringAreaSession`, :165)\nexpected value from: `ROADMAP.md:255` (\"Pointer coordinates are shifted by the area origin \u2026 into the stream's frame\") + `runtime/README.md:59` (`M &lt;x&gt; &",
+    "<task-notification>\n<task-id>ab4fa35ed09856d6a</task-id>\n<tool-use-id>toolu_01C4L9hpiFPkm3VqE2d631QJ</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/ab4fa35ed09856d6a.output</output-file>\n<status>completed</status>\n<summary>Agent \"Make issue 57 test green\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: f744d661891b4114b8a00417bc33359c\nINVOCATION-ID: inv-003-2fca9d93\nEVIDENCE REQ-001: `Session` now publishes the pair as one tuple, mirroring #44's `self.geom`. Writers: `runtime/dreamconnect_daemon.py:206` (`self.area_origin = (0, 0)` init), `:506` (virtual), `:522` (`self.area_origin = (x, y)` RecordArea), `:530` (RecordMonitor) \u2014 each a single rebind. Reader `motion_abs` at `:673` takes one load, `area_x, area_y = self.area_origin`, before the `_lock`/`_rd` call at `:674-676`. `python3 -m unittest runtime.test_daemon.TestAreaOriginIsAtomic -v` \u2192 `Ran 1 test in 0.000s / OK`; before the change the same command gave `AssertionError: (100.0, 400.0) not found in {(100.0, 300.0), (1380.0, 400.0)} ... the reader mixed 2 observations of a changing origin` at `runtime/test_daemon.py:257`.\nEVIDENCE REQ-002: Not a code requirement \u2014 it records why #57 was split from #44. Honoured by scope: `git status --porcelain` shows exactly `M runtime/dreamconnect_daemon.py` (21 insertions, 11 deletions), one change, revertible alone; #44's `self.geom` code at `:213`/`:662` is untouched.\n\nChange: `area_x`/`area_y` replaced by a single `area_origin` tuple. The init comment records why (paired publication across the D-Bus and socket threads, and that unlike a torn GEOM a mis-shifted click does not self-correct); the `motion_abs` comment records that reading `self.area_origin` twice would",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-02c833ab000a --outcome CONTINUE --owner Roger was run from the primary checkout. Run next and continue.",
+    "<task-notification>\n<task-id>a4804206b74614c90</task-id>\n<tool-use-id>toolu_01APfjiwPQAsVekRAbvU9Uds</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-daemon-races/4fc5615f-ee8d-45cd-bf1c-6191d41a749e/tasks/a4804206b74614c90.output</output-file>\n<status>completed</status>\n<summary>Agent \"Verify issue 57 change\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: b27d823501044acd8c7ff0f661e5eb57\nINVOCATION-ID: inv-004-8deb068b\nEVIDENCE REQ-001: `runtime/dreamconnect_daemon.py:207,507,523,531` are each a single rebind of `self.area_origin` (tuple); the sole reader `motion_abs` does one load at `:676` (`area_x, area_y = self.area_origin`) then uses the locals at `:679`. `grep -rn \"area_x|area_y\"` shows no remaining attribute reader in any `.py/.sh/.java`. Red/green proven independently: pre-fix daemon (`git show 09b0dca^:runtime/dreamconnect_daemon.py`) + new test \u2192 exit 1, `AssertionError: (100.0, 400.0) not found in {(100.0, 300.0), (1380.0, 400.0)} ... the reader mixed 2 observations`; candidate tree `python3 runtime/test_daemon.py` \u2192 `Ran 62 tests ... OK`, exit 0.\nEVIDENCE REQ-002: `git diff --stat 96e18cd^ HEAD` \u2192 exactly `runtime/dreamconnect_daemon.py | 32` and `runtime/test_daemon.py | 101`; nothing else. #44's `self.geom` is untouched (absent from the diff), so this branch reverts alone as the owner decision required.\n\nSpec \u2014 does it do what was asked? Both fix options in the issue were permitted; the tuple shape was taken, and it is the shape the oracle's test discriminates for (oracle report: locking-both-sides \"would not pass this test\"). PASS.\n\nStandards \u2014 Test authorship: oracle commit `72c98d9` touches `runtime/test_daemon.py` only (+101); builder commit `09b0dca` touches `runtime/dreamconnect_daemon.py` only (",
+    "A - fix it now. The remediation grant is written: factory_owner_decisions.py --request-remediation finding-e34fef88baa4 --owner Roger --source-snapshot tree:71e29b1a24a33cb56a74408c2565568f470c69f4 --decision-ref issue #57, run from the primary checkout. Run ~/.claude/scripts/factory_implement.py authorize-remediation and continue.",
+    "a",
+    "A - revert your two doc edits. I filed the doc rename as its own issue: https://github.com/ghostpsalm/DreamConnect/issues/62 (ROADMAP.md and docs/wayland-headless-capture.md still name area_x/area_y). Revert both files so the tree returns to the snapshot the driver expects (tree:777353092c3540bf972e9c3e7c3bb5f761fee516), then discharge finding-e34fef88baa4 with discharge-by-evidence --evidence tracker-issue --tracker-issue 62 --owner Roger --decision-ref https://github.com/ghostpsalm/DreamConnect/issues/62. Note the trusted channel for a finding ruling is factory_pending_decisions.py --decide-finding, not factory_owner_decisions.py - tell me the exact command and I run it from the primary checkout. Then /submit lands the daemon fix and I take #62 as a small separate commit on main.",
+    "Ruling recorded on the trusted channel: factory_pending_decisions.py --decide-finding finding-e34fef88baa4 --decision ACCEPT_RISK --owner Roger --decision-ref https://github.com/ghostpsalm/DreamConnect/issues/62 --source-snapshot tree:777353092c3540bf972e9c3e7c3bb5f761fee516. The docs are not waived - they are tracked as #62 and I will take them as a small commit on main. Run accept-finding then next, and offer /submit.",
+    "Yes - run /submit now. Gate, commit on runtime/daemon-races, push. No PR, no Co-Authored-By trailer."
+  ],
+  "fence_decisions": {
+    "ask: This edits a version number.": 120,
+    "ask: This would publish a GitHub release, which ships to real devices.": 48,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 59,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 48,
+    "block: recursive/forced delete": 360,
+    "block: editing the deployed factory directly": 336,
+    "block: writing to a file the harness owns": 48,
+    "block: touching a secret/credential file": 211,
+    "block: sending a secret/credential file to a network client": 1410,
+    "block: sending ~/.claude.json to a network client": 94,
+    "block: force push (never rewrite published history)": 49,
+    "block: editing an existing migration": 47,
+    "block: malformed hook input": 835,
+    "block: unbounded read of a 600-line source file": 160,
+    "block: writing an owner approval from inside a factory worktree": 282,
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 291,
+    "block: writing an owner approval from a session with no recorded cwd": 47,
+    "block: running an owner-decision command from inside a factory worktree": 235,
+    "block: running an owner-decision command from a session with no recorded cwd": 47,
+    "block: hard reset discards work": 23,
+    "block: unbounded read of a 1326-line source file": 21,
+    "block: unbounded read of a 13294-line source file": 23,
+    "block: a model-tool write to Factory acceptance authority state": 474,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 171,
+    "block: a factory worker role executing the authoritative full gate": 331,
+    "block: the driver's state file could not be read (/tmp/tmp77mk362_/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpgd6jm67x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1tr3h209/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 511-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpy36rdrxx/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpbx0ktpg1/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe7e84qdj/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpybbtyg7x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpsse8eplz/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1z4_a0v5/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpx_d702y0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpxxnc07yb/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe35g42t6/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpwzts2bk0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/binaryfacts/engine's c": 1,
+    "block: destructive SQL DDL": 1,
+    "block: the driver's state file could not be read (/tmp/tmpk8v8gm1d/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1zeajaia/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 115,
+    "block: the driver's state file could not be read (/tmp/tmpee5uzj_y/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 560-line source file": 1,
+    "block: the driver's state file could not be read (/tmp/tmpjtab0xx4/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpoyzracjn/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 1442-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpbgp3my3f/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpvg2kkxrw/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpb_b6so3x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpnge3ox46/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /home/kogie": 1,
+    "block: the driver's state file could not be read (/tmp/tmpywze8dmm/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: git clean deletes untracked files": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/Spi": 1,
+    "block: the root could not be established as controller-bound: the git relationship of /tmp/claude": 18,
+    "ask: version bump": 875,
+    "block: the driver's state file could not be read (/tmp/tmp_l8u3_hy/line/factory/IMPLEMENT-STATE.j": 1
+  },
+  "status": "done",
+  "note": "Fixture-level proof only: no live multi-monitor GNOME RecordArea session was exercised, so end-to-end pointer placement is unverified. Targeted-test selection returned exit 1 / TEST_REGISTRY_ABSENT and stands as NEGATIVE_RESULT; the owner's CONTINUE was an override, not a pass. Breaker and reviewer were not required by the normal risk tier and did not run. Seraph filed one low finding (stale doc field names) which the owner ruled ACCEPTED_RISK, tracked as #62 -- accepted, not fixed. One agent-build shell check skipped on this box (no locally available byte-buddy jar matching the pinned hash).",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "0"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}

@@ -548,48 +548,85 @@ public class BootTests {
     }
 
     /**
-     * The numpad separator key must press a numpad separator, not type a letter.
+     * The numpad separator key must press a numpad separator, not type a letter
+     * and not nothing — on every layout, including `us` and `pc`, where the
+     * evdev route #19 installed is dead.
      *
      * Expected value, from sources outside this codebase:
+     *   - The owner's decision on #40 (2026-09-08), verbatim: "Route
+     *     VK_SEPARATOR through the keysym table as `KS 0xFFAC`
+     *     (`XK_KP_Separator`). Layout-independence for this key comes from the
+     *     keysym, not from a physical position, because `symbols/us` and
+     *     `symbols/pc` bind nothing to evdev 121."
+     *   - XK_KP_Separator is 0xffac: /usr/include/X11/keysymdef.h:303 on this
+     *     machine reads `#define XK_KP_Separator 0xffac`, annotated there with
+     *     U+002C COMMA. 0xFFAC = 65452 decimal, and the control protocol writes
+     *     keysyms in decimal (runtime/README.md's `KS` row), so the wire must
+     *     read "KS 65452 <state>".
      *   - AWT names vk 0x6C "NumPad ," — KeyEvent.getKeyText(VK_SEPARATOR)
      *     returns that from the JDK's own awt resource bundle, and returns
      *     "NumPad ." for VK_DECIMAL. Separator is the comma key, decimal is the
-     *     dot key; AWT keeps them distinct.
-     *   - AwtEvdev's class javadoc puts the whole numpad on the evdev-keycode
-     *     route ("modifiers, whitespace/control, navigation, function row,
-     *     numpad, locks -> evdev keycode"), matching runtime/README.md's `K` row.
-     *     So this is a K line, not a KS line.
-     *   - The evdev numpad-comma key is KEY_KPCOMMA = 121
-     *     (/usr/include/linux/input-event-codes.h:198). Cross-check: xkb's
-     *     keycodes/evdev has `<I129> = 129;  // #define KEY_KPCOMMA 121` with
-     *     `alias <KPPT> = <I129>`, and symbols/hu binds `<KPPT>` to KP_Separator
-     *     on every level.
-     *   - Not KEY_KPDOT = 83 (same header, :159): that is the numpad dot, and
-     *     AwtEvdev already gives it to VK_DECIMAL. Reusing it would erase the
-     *     separator/decimal distinction AWT makes.
+     *     dot key; AWT keeps them distinct, and XK_KP_Separator (U+002C) is the
+     *     keysym for exactly the comma one — not XK_KP_Decimal 0xffae.
      *
-     * Regression being pinned (#19): with vk 0x6C in neither table, sendKey()
-     * used to fall through to a printable-ASCII fallback, which saw 108 in range
-     * and returned 108 — the keysym for 'l'. Pressing the numpad separator on the
-     * SC client typed an "l" on the guest. #36 deleted that fallback, so today
-     * the failure mode a missing table entry produces is a drop rather than a
-     * wrong character; either way this assertion demands the table entry.
+     * Why this single key leaves the evdev route the rest of the numpad keeps.
+     * #19 mapped it to KEY_KPCOMMA = 121
+     * (/usr/include/linux/input-event-codes.h:198), which is correct wherever a
+     * layout binds that position: xkb's keycodes/evdev has
+     * `<I129> = 129;  // #define KEY_KPCOMMA 121` with `alias <KPPT> = <I129>`,
+     * and symbols/hu binds `<KPPT>` to KP_Separator on every level. But
+     * symbols/us and symbols/pc bind nothing to it, so position-based injection
+     * lands on a keycode those layouts read as nothing: #19 turned a wrong
+     * character into no character. Asking Mutter for the *keysym* makes it find
+     * whatever keycode produces KP_Separator on the guest's own keymap instead.
+     * #40 records this as a deliberate, single-key exception to the
+     * numpad-goes-evdev rule stated in AwtEvdev's class javadoc — the exception
+     * is prose and no test can assert it; a reviewer must read it there.
+     *
+     * Regression still pinned (#19): vk 0x6C is numerically 108, the keysym for
+     * 'l'. With 0x6C in neither table, sendKey() used to fall through to a
+     * printable-ASCII fallback that saw 108 in range and returned it, so
+     * pressing the numpad separator typed an "l" on the guest. #36 deleted that
+     * fallback, so a missing entry now drops rather than mistypes — but the
+     * "never KS 108" assertion is worth more after this change, not less: KS is
+     * now this key's *expected* line shape, so a regression to 108 would look
+     * like a well-formed keysym line rather than an obviously wrong table.
      */
     private static void testRobotPeerSeparatorKey() {
+        // Machine-checked form of the "0x6C is also the 'l' keysym" claim above,
+        // so a JDK that moved VK_SEPARATOR reports itself rather than quietly
+        // making the #19 assertion at the bottom vacuous.
+        check(KeyEvent.VK_SEPARATOR == 0x6C,
+              "AWT VK_SEPARATOR is 0x6C = 108, the same int as the 'l' keysym (got 0x"
+              + Integer.toHexString(KeyEvent.VK_SEPARATOR) + ")");
+
+        // Which table claims the vk. Asserted directly, because the KS-first
+        // branch order in sendKey() would hide a leftover evdev entry from the
+        // wire assertions below (#38: exactly one table, never both).
+        check(AwtEvdev.keysym(KeyEvent.VK_SEPARATOR) == 65452,
+              "keysym-routed (#40): AwtEvdev.keysym(VK_SEPARATOR) == 65452 (XK_KP_Separator, "
+              + "0xFFAC) (got " + AwtEvdev.keysym(KeyEvent.VK_SEPARATOR) + ")");
+        check(AwtEvdev.keycode(KeyEvent.VK_SEPARATOR) == -1,
+              "and the evdev entry is gone, not merely shadowed: AwtEvdev.keycode(VK_SEPARATOR) "
+              + "== -1, no longer KEY_KPCOMMA 121 (got " + AwtEvdev.keycode(KeyEvent.VK_SEPARATOR) + ")");
+
         FakeDaemon d = new FakeDaemon();
         DreamConnectRobotPeer peer = new DreamConnectRobotPeer(d, null);
 
         peer.keyPress(KeyEvent.VK_SEPARATOR);
-        check("K 121 1".equals(d.last()),
-              "keyPress(VK_SEPARATOR) -> \"K 121 1\" (KEY_KPCOMMA), not the 'l' keysym \"KS 108 1\" (got \""
-              + d.last() + "\")");
+        check("KS 65452 1".equals(d.last()),
+              "keyPress(VK_SEPARATOR) -> \"KS 65452 1\" (XK_KP_Separator), not the layout-dead "
+              + "evdev line \"K 121 1\" (got \"" + d.last() + "\")");
 
         peer.keyRelease(KeyEvent.VK_SEPARATOR);
-        check("K 121 0".equals(d.last()),
-              "keyRelease(VK_SEPARATOR) -> \"K 121 0\" (got \"" + d.last() + "\")");
+        check("KS 65452 0".equals(d.last()),
+              "keyRelease(VK_SEPARATOR) -> \"KS 65452 0\" (got \"" + d.last() + "\")");
 
         check(d.sent.size() == 2,
               "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+
+        check(!d.sent.contains("KS 108 1") && !d.sent.contains("KS 108 0"),
+              "#19 stays fixed: the 'l' keysym 108 never reaches the wire (got " + d.sent + ")");
     }
 
     /**

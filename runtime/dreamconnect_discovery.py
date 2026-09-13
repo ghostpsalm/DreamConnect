@@ -76,25 +76,52 @@ def is_attachable(session):
             and session.state in LIVE_STATES)
 
 
+def stale_registrations(registered_displays, published_displays):
+    """uids whose entry names a display the session no longer publishes.
+
+    `registered_displays` — {uid: display} as the registry entry records it.
+    `published_displays`  — {uid: display} as the session publishes it now.
+
+    Stale means the two disagree, which needs both of them to exist and to say
+    something. A uid missing from either map tells us nothing: the
+    `manager_display` fallback registers without ever writing an envfile, so an
+    absent published value is the normal case for it, not drift. A blank value
+    is treated the same way rather than as a difference -- an unreadable or
+    half-written envfile would otherwise provoke a restart every reconcile, and
+    the reconcile runs on a timer, so that is a restart storm and not a one-off.
+    """
+    stale = []
+    for uid, entry in registered_displays.items():
+        published = published_displays.get(uid)
+        if not entry or not published:
+            continue
+        if entry != published:
+            stale.append(int(uid))
+    return sorted(stale)
+
+
 class Plan:
     """What the runner should do. Empty lists mean nothing to do."""
 
-    __slots__ = ("attach", "release", "conflicts")
+    __slots__ = ("attach", "release", "conflicts", "refresh")
 
-    def __init__(self, attach, release, conflicts):
+    def __init__(self, attach, release, conflicts, refresh=()):
         self.attach = attach        # [Session] to bring up and register
         self.release = release      # [uid] to stop and deregister
         self.conflicts = conflicts  # [(uid, [session_id, ...])] left alone
+        self.refresh = refresh      # [uid] to re-register onto a new display
 
     def __repr__(self):
         return (f"Plan(attach={[s.uid for s in self.attach]}, "
-                f"release={self.release}, conflicts={self.conflicts})")
+                f"release={self.release}, conflicts={self.conflicts}, "
+                f"refresh={list(self.refresh)})")
 
     def is_empty(self):
-        return not self.attach and not self.release
+        return not self.attach and not self.release and not self.refresh
 
 
-def plan(sessions, registered_uids, reserved_uids=()):
+def plan(sessions, registered_uids, reserved_uids=(),
+         registered_displays=None, published_displays=None):
     """Reconcile logind against the registry.
 
     `sessions`        — every logind session, unfiltered; filtering is our job.
@@ -104,6 +131,10 @@ def plan(sessions, registered_uids, reserved_uids=()):
                         installer manages, and any account whose daemon was
                         provisioned by hand. Managing those here would fight the
                         installer for one registry slot.
+    `registered_displays` / `published_displays` — {uid: display}, what the
+                        entry records against what the session publishes now.
+                        Omit both and no refresh is ever planned, so a caller
+                        that cannot read either is unaffected.
 
     Idempotent: a uid already registered and still live is neither attached nor
     released, so calling this on a timer is safe and re-running it changes
@@ -137,4 +168,22 @@ def plan(sessions, registered_uids, reserved_uids=()):
     # Revoking it would cut an operator off mid-call to punish an ambiguity.
     release = sorted(uid for uid in registered
                      if uid not in by_uid and uid not in reserved)
-    return Plan(attach, release, conflicts)
+
+    # Re-register a uid whose entry names a display it no longer publishes
+    # (#54): the shm and socket in the entry still match the client's static
+    # args, so the agent's known-wrong-fallback rule refuses the session
+    # outright instead of falling back, and the operator gets a black screen.
+    #
+    # Reserved uids are *included* here, unlike attach and release. That is not
+    # an oversight: the backstage account is reserved and is the account this
+    # happens to, because its shell restarting is what moves the display. What
+    # the installer owns is whether the entry exists, not which display it
+    # names.
+    conflicted = {uid for uid, _ in conflicts}
+    releasing = set(release)
+    refresh = [uid for uid in stale_registrations(registered_displays or {},
+                                                  published_displays or {})
+               if uid in registered
+               and uid not in conflicted
+               and uid not in releasing]
+    return Plan(attach, release, conflicts, refresh)

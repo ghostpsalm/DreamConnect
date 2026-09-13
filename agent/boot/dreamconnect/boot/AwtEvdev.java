@@ -22,6 +22,18 @@ import java.util.Map;
  *     KEY_A=30, not the X11 +8 keycode). These are physical/functional keys that
  *     mean the same thing on every layout, so position-based injection is right.
  *
+ * VK_SEPARATOR is the one deliberate exception to that second rule (#40): it is
+ * a numpad key and still goes through the keysym table, as XK_KP_Separator
+ * 0xFFAC. Position-based injection only works where the layout binds the
+ * position, and no layout has to: #19 mapped it to KEY_KPCOMMA 121, which
+ * symbols/hu binds (via `alias <KPPT> = <I129>`) but symbols/us and symbols/pc
+ * bind to nothing at all, so on the default layouts the evdev route is dead —
+ * the key produced no character rather than the wrong one. Asking Mutter for the
+ * keysym makes it find whatever keycode produces KP_Separator on the guest's own
+ * keymap, so layout-independence for this key comes from the symbol instead of
+ * from the position. The rest of the numpad keeps the evdev route: those
+ * positions are bound everywhere.
+ *
  * Gaps return -1 so the caller can drop the key: no fallback exists.
  */
 final class AwtEvdev {
@@ -87,7 +99,12 @@ final class AwtEvdev {
         m(KeyEvent.VK_NUMPAD8, 72); m(KeyEvent.VK_NUMPAD9, 73);
         m(KeyEvent.VK_MULTIPLY, 55); m(KeyEvent.VK_ADD, 78);
         m(KeyEvent.VK_SUBTRACT, 74); m(KeyEvent.VK_DECIMAL, 83);
-        m(KeyEvent.VK_DIVIDE, 98); m(KeyEvent.VK_SEPARATOR, 121); // KEY_KPCOMMA
+        m(KeyEvent.VK_DIVIDE, 98);
+        // The numpad's one keysym key — see the class javadoc for why this
+        // position cannot be injected by keycode. XK_KP_Separator (U+002C
+        // COMMA), not XK_KP_Decimal 0xFFAE: AWT keeps the comma key
+        // (VK_SEPARATOR, "NumPad ,") distinct from the dot key (VK_DECIMAL).
+        k(KeyEvent.VK_SEPARATOR, 0xFFAC);
     }
 
     /** AWT virtual keycode -> evdev keycode, or -1 if unmapped. */
