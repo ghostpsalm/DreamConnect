@@ -428,6 +428,39 @@ class Session:
             log(f"desktop-area query failed: {e}")
             return None
 
+    def stop(self):
+        """Release the RemoteDesktop session this daemon holds (#55).
+
+        Mutter conjures a virtual monitor per RecordVirtual session and drops it
+        only when that session ends, so a daemon that exits or restarts without
+        this leaks one monitor per start: the X screen grows, gnome-shell puts
+        its top bar on a monitor we do not capture, and the operator sees a
+        black half-screen next to a desktop with no top bar. Observed live after
+        25 restarts — a 2560x720 screen for a 1280x720 session.
+
+        Both the in-process restart (start() re-entered by _recover and the
+        stall watchdog) and process exit release through here, so the two cannot
+        drift into two different ideas of what releasing means.
+
+        Failure is tolerated on purpose: the commonest reason we are here is
+        that Mutter already closed the session, and refusing to recover from
+        that would trade a leaked monitor for a dead bridge. Never raises — exit
+        still has to unblank the screen and drop the wake lock. The identifiers
+        are cleared either way, so a later stop can never aim at a corpse, and
+        a stop with nothing held makes no D-Bus call at all: a Stop on a null
+        path is an error the caller could not act on anyway.
+        """
+        if not self.rd_path:
+            return
+        try:
+            self._rd("Stop")
+        except Exception as e:  # noqa: BLE001
+            log(f"session would not stop ({e}); continuing")
+        self.rd_path = None
+        self.sc_path = None
+        self.stream_path = None
+        self.node_id = None
+
     def start(self):
         # Drop any subscriptions from a previous session — start() is re-entered
         # on recovery, and the old rd_path/stream_path are gone, so leaving them
@@ -448,26 +481,24 @@ class Session:
         self._sub_ids = []
 
         # Stop the session this daemon already holds before creating its
-        # replacement. Mutter conjures a virtual monitor per RecordVirtual
-        # session and drops it only when that session ends, so skipping this
-        # leaks one monitor per restart: the X screen grows, gnome-shell puts
-        # its top bar on a monitor we do not capture, and the operator sees a
-        # black half-screen next to a desktop with no top bar. Observed live
-        # after 25 restarts — a 2560x720 screen for a 1280x720 session (#55).
+        # replacement, or Mutter keeps its virtual monitor alongside the new
+        # one (#55). Same release the exit path uses — see stop().
         #
-        # Failure is tolerated on purpose: the commonest reason we are here is
-        # that Mutter already closed the session, and refusing to recover from
-        # that would trade a leaked monitor for a dead bridge. The identifiers
-        # are cleared either way, so a later stop can never aim at a corpse.
-        if self.rd_path:
-            try:
-                self._rd("Stop")
-            except Exception as e:  # noqa: BLE001
-                log(f"previous session would not stop ({e}); continuing")
-            self.rd_path = None
-            self.sc_path = None
-            self.stream_path = None
-            self.node_id = None
+        # This reaches only what *this* process holds. A monitor stranded by a
+        # daemon that died without stopping (SIGKILL, crash, or any build from
+        # before this fix) cannot be reclaimed from here, and reusing it instead
+        # of creating one was ruled out for the same reason: mutter 50.1 offers
+        # no way to reach another peer's session. `org.gnome.Mutter.ScreenCast`
+        # and `.RemoteDesktop` expose CreateSession and nothing else; session
+        # objects live on per-client paths that introspecting the root node does
+        # not list (it advertises only the static "Session"/"Stream" type nodes);
+        # and DisplayConfig can enumerate monitors (GetCurrentState) or lay out
+        # existing ones (ApplyMonitorsConfig) but has no remove. Restarting the
+        # backstage session is still the only cure for an already-stranded
+        # monitor. Whether Mutter drops one itself when the owning peer's bus
+        # name vanishes is untested — it would take a live backstage box:
+        # RecordVirtual, SIGKILL the holder, then `xdpyinfo | grep dimensions`.
+        self.stop()
 
         self.rd_path = self.bus.call_sync(
             RD_DEST, RD_PATH, RD_IFACE, "CreateSession", None, None,
@@ -883,6 +914,35 @@ class ControlServer(threading.Thread):
         return f"ERR unknown cmd {cmd}"
 
 
+def shutdown(session):
+    """Release everything this process holds, on the way out (#55).
+
+    Contract: set_blank(False), then _release_wake_lock(), then stop() — in
+    that order, each guarded on its own so a failing step cannot skip the ones
+    after it. Takes any session that answers those three, so both modes exit
+    the same way, and for such a session it never raises into the caller.
+
+    The guard covers the calls, not the lookups: the three attributes are
+    resolved when the tuple below is built, so a session missing one raises
+    before anything is released. That is left loud on purpose — it can only be
+    a wiring mistake, never a bus that is going away, and swallowing it would
+    turn it into a silent failure to release exactly what this exists to
+    release.
+    """
+    # Each step is guarded on its own rather than the sequence as a whole: on
+    # the way out the bus is frequently already going away, so an unblank that
+    # raises is an ordinary exit, and a single try around all three would let
+    # it skip stop() — the step whose absence grows the X screen by one virtual
+    # monitor per restart (#55).
+    for release in (lambda: session.set_blank(False),
+                    session._release_wake_lock,
+                    session.stop):
+        try:
+            release()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--monitor", default="HDMI-2")
@@ -997,14 +1057,13 @@ def main():
         # mode releases an Xvfb and an RDP client instead of a Mutter session;
         # leaving either behind would hold the private display against the next
         # start.
-        release = session.stop if args.greeter else (lambda: session._rd("Stop"))
-        for cleanup in (lambda: session.set_blank(False),
-                        session._release_wake_lock,
-                        release):
-            try:
-                cleanup()
-            except Exception:  # noqa: BLE001
-                pass
+        # Both session kinds release through stop(): GreeterSession's kills the
+        # Xvfb and the RDP client, Session's ends the Mutter session so Mutter
+        # drops the virtual monitor it conjured (#55). The exit path used to
+        # call _rd("Stop") inline instead, which stopped nothing Mutter would
+        # act on when no session had ever been created, and left the monitor
+        # behind for the next start to sit beside.
+        shutdown(session)
 
 
 if __name__ == "__main__":

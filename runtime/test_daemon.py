@@ -783,6 +783,204 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          % stopped)
 
 
+class TestSessionStopReleasesTheMutterSession(unittest.TestCase):
+    """Issue #55, the half that survives a *process* restart.
+
+    `systemctl --user restart dreamconnect-daemon` must leave the X screen at
+    exactly the configured backstage resolution, which means the daemon has to
+    release its RemoteDesktop session on the way out, not only when start() is
+    re-entered in-process. Releasing it is one named thing — Session.stop() —
+    so the exit path and the restart path cannot drift into two different
+    "release the session" routines, which is how the exit path came to be an
+    untested inline lambda.
+
+    Contract being pinned (each clause is asserted below):
+      * issues RD Stop on self.rd_path iff it is set;
+      * logs and swallows a Stop that raises;
+      * always clears rd_path / sc_path / stream_path / node_id;
+      * idempotent — two calls produce one Stop;
+      * never raises.
+    """
+
+    def _session(self, bus):
+        # Backstage/virtual: the mode that makes Mutter conjure the monitor
+        # whose leak the operator saw as a black second display.
+        return d.Session(bus, None, None, virtual=(1280, 720))
+
+    def test_stop_issues_one_stop_aimed_at_the_session_it_holds(self):
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        held = s.rd_path
+        s.node_id = 42  # as PipeWireStreamAdded would have left it
+
+        s.stop()
+
+        self.assertEqual(bus.stops(), [held],
+                         "stop() must Stop the RemoteDesktop session this daemon "
+                         "holds (%s) — that Stop is the only thing that makes "
+                         "Mutter drop the virtual monitor it conjured" % held)
+        self.assertIsNone(s.rd_path, "and clears the session it no longer holds")
+        self.assertIsNone(s.sc_path, "including the ScreenCast session")
+        self.assertIsNone(s.stream_path, "and the stream")
+        self.assertIsNone(s.node_id, "and the PipeWire node id")
+
+    def test_stop_is_idempotent(self):
+        # The exit path and a recovery can both reach stop() for the same
+        # session; a second Stop is aimed at a session Mutter has already
+        # destroyed, and the identifiers must not still name it.
+        bus = FakeBus()
+        s = self._session(bus)
+        s.start()
+        held = s.rd_path
+
+        s.stop()
+        s.stop()
+
+        self.assertEqual(bus.stops(), [held],
+                         "two stop() calls issue one Stop: the second has no "
+                         "session to release")
+
+    def test_stop_without_a_session_does_not_touch_the_bus(self):
+        # The shape of the bug this slice exists to remove: the exit path
+        # called Stop unconditionally, so a daemon that died before start()
+        # ever succeeded aimed a Stop at a null path and failed silently.
+        bus = FakeBus()
+        s = self._session(bus)
+        self.assertIsNone(s.rd_path, "precondition: no session has been created")
+
+        s.stop()
+
+        self.assertEqual(bus.calls, [],
+                         "stop() with no session held makes no D-Bus call at all "
+                         "— there is nothing to stop, and a Stop on a null path "
+                         "is an error the caller cannot act on")
+
+    def test_a_raising_stop_is_swallowed_and_the_session_still_released(self):
+        # Mutter having already closed the session is the *commonest* reason we
+        # are stopping, so a raising Stop is normal, not exceptional. It must
+        # not escape into a shutdown sequence that still has to blank the
+        # screen and drop the wake lock.
+        bus = FakeBus(fail_on=("Stop",))
+        s = self._session(bus)
+        s.start()
+        stopped = s.rd_path
+
+        s.stop()  # must not raise
+
+        self.assertIsNone(s.rd_path,
+                          "a Stop that raises still clears the identifiers")
+        bus.calls.clear()
+        s.start()
+        self.assertEqual(bus.stops(), [],
+                         "so the next start has nothing to stop — aiming a later "
+                         "Stop at %s would be aiming at a corpse" % stopped)
+
+
+class _ExitingSession:
+    """A session double shaped like the interface the exit path is specified
+    against: set_blank(on), _release_wake_lock(), stop().
+
+    Both real kinds answer exactly these three, which is why the exit path can
+    be one routine rather than a branch on the mode: Session releases a Mutter
+    session, and GreeterSession's set_blank/_release_wake_lock are deliberate
+    no-ops (dreamconnect_greeter.py:524-528) while its stop() kills the Xvfb and
+    the RDP client. `raising` names the steps that fail, because on the way out
+    a failing step is ordinary — the bus may already be going away.
+    """
+
+    def __init__(self, raising=()):
+        self.calls = []        # method names, in the order they were called
+        self.blank_args = []   # what set_blank was asked for
+        self._raising = set(raising)
+
+    def _record(self, name):
+        self.calls.append(name)
+        if name in self._raising:
+            raise RuntimeError("fake session: %s failed on the way out" % name)
+
+    def set_blank(self, on):
+        self.blank_args.append(on)
+        self._record("set_blank")
+
+    def _release_wake_lock(self):
+        self._record("_release_wake_lock")
+
+    def stop(self):
+        self._record("stop")
+
+
+class TestShutdownReleasesEverythingOnProcessExit(unittest.TestCase):
+    """Issue #55's requirement: after `systemctl --user restart
+    dreamconnect-daemon` the X screen must still be exactly the configured
+    backstage resolution — so the *process* exit has to release the Mutter
+    session, not only start() re-entered in-process.
+
+    Contract being pinned (each clause is asserted below):
+      * set_blank(False), then _release_wake_lock(), then stop();
+      * each step guarded on its own, so a failing one cannot skip the rest;
+      * never raises;
+      * one routine for both modes — it needs only those three methods.
+
+    Order is load-bearing in both directions. Unblank and drop the wake lock
+    first, or a stop/restart while the panel is blanked leaves the box dark and
+    awake with nobody left to restore it. Release the session last, because
+    that is the step whose absence grows the X screen by one virtual monitor
+    per restart.
+    """
+
+    def test_the_release_order_is_unblank_then_wake_lock_then_session(self):
+        s = _ExitingSession()
+
+        d.shutdown(s)
+
+        self.assertEqual(s.calls, ["set_blank", "_release_wake_lock", "stop"],
+                         "the local state the daemon imposed on the box is "
+                         "undone before the session that carries it is released")
+        self.assertEqual(s.blank_args, [False],
+                         "and the blank is lifted, not re-applied on the way out")
+
+    def test_a_failing_step_still_leaves_the_session_released(self):
+        # The shape of the leak this slice exists to remove: guard the sequence
+        # once instead of guarding each step, and the first failure — an
+        # unblank against a bus that is already going away is a normal way to
+        # exit — skips stop(), Mutter keeps the virtual monitor it conjured,
+        # and the next start sits beside it. That is the 2560x720 screen.
+        s = _ExitingSession(raising=("set_blank", "_release_wake_lock"))
+
+        d.shutdown(s)  # must not raise
+
+        self.assertEqual(s.calls, ["set_blank", "_release_wake_lock", "stop"],
+                         "every step is attempted; an earlier failure must not "
+                         "cost us the session release")
+
+    def test_a_raising_stop_does_not_escape_the_exit_path(self):
+        # Mutter having already closed the session is the commonest reason we
+        # are here, so a raising Stop is normal. It must not turn a clean exit
+        # into a traceback.
+        s = _ExitingSession(raising=("stop",))
+
+        d.shutdown(s)  # must not raise
+
+        self.assertEqual(s.calls, ["set_blank", "_release_wake_lock", "stop"])
+
+    def test_a_real_session_exits_with_one_stop_aimed_at_what_it_holds(self):
+        # The same exit driven against a real backstage Session, so the claim
+        # is about the Mutter traffic and not only about a double: exactly one
+        # Stop, aimed at the RemoteDesktop session this daemon created, is what
+        # makes Mutter drop the monitor before the replacement process starts.
+        bus = FakeBus()
+        s = d.Session(bus, None, None, virtual=(1280, 720))
+        s.start()
+        held = s.rd_path
+
+        d.shutdown(s)
+
+        self.assertEqual(bus.stops(), [held],
+                         "process exit releases the session it holds (%s) exactly "
+                         "once — no Stop, and the restart leaves a second virtual "
+                         "monitor behind" % held)
+        self.assertIsNone(s.rd_path, "and holds nothing afterwards")
 
 
 class TestHeadlessCaptureFallback(unittest.TestCase):
