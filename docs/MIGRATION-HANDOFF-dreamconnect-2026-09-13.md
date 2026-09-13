@@ -301,3 +301,55 @@ target before they can be finished:
 
 Nothing about the old host's shutdown waits on that. It is the first thing to
 settle on arrival.
+
+---
+
+## Appendix — `.github/workflows/ci.yml`, verbatim
+
+This file exists on the old host, untracked, and would be lost with it. Pushing
+it needs a token with `workflow` scope, which the automation credential does not
+have — so its contents are recorded here instead. A fenced block in a docs file
+is not a workflow file, so this commits nothing GitHub will refuse.
+
+On the new box, write this to `.github/workflows/ci.yml` and commit it with a
+credential that has `workflow` scope. Landing it gives the repo remote CI for the
+first time, which is the single biggest gap in the project's verification story:
+every branch merged this week was gated locally and by nothing else.
+
+```yaml
+name: gate
+
+# Runs the repo gate (./run-tests.sh) on every PR and on pushes to main, so a
+# green tick actually means the Java boot tests, the Python daemon tests, and
+# the installer shell tests all passed. Before this, nothing verified a PR —
+# branches merged UNVERIFIED. Keep this in step with run-tests.sh's needs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # BootTests compiles agent/boot + agent/test and needs java.desktop
+      # internals (--add-exports in run-tests.sh); a full JDK provides them.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # runtime/dreamconnect_daemon.py imports gi + requires the Gst 1.0
+      # typelib at module load, so test_daemon.py can't import without them.
+      - name: Install PyGObject + GStreamer introspection
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base
+
+      - name: Gate
+        run: ./run-tests.sh
+```
