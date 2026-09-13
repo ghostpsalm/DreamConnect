@@ -27,7 +27,43 @@ CODE_REVIEW_*.md
 
 # factory loop run state — local only, never committed. runs/ and hazards/
 # are tracked deliberately (see /submit): don't broaden this back to /factory/.
+#
+# Listed one by one rather than as /factory/ with exceptions, because the two
+# that ARE tracked are the point: runs/ is the record a later reader consults,
+# and hazards/ is what a run learned the hard way. A blanket ignore with
+# negations is one typo away from losing both. Everything else here is this
+# box's state for a run in progress — absolute paths, live status, role
+# transcripts — and a worktree shows ~25 of them, which is enough noise for a
+# stray `git add -A` to commit the lot.
 /factory/CHECKPOINT.md
+/factory/ACTIONS.jsonl
+/factory/ACTIVE-TIME.jsonl
+/factory/AUTHORSHIP.jsonl
+/factory/BOUNDS.jsonl
+/factory/CONTROLLER-STATE.json
+/factory/ENFORCEMENT.jsonl
+/factory/EVIDENCE.jsonl
+/factory/FINDINGS.jsonl
+/factory/GATE-RUNS.jsonl
+/factory/HEARTBEATS.jsonl
+/factory/IMPLEMENT-STATE.json
+/factory/ISSUE-INPUT.json
+/factory/LAUNCHES.jsonl
+/factory/LAUNCH-WAIT.json
+/factory/OWNER-DECISIONS.jsonl
+/factory/PENDING-DECISIONS.jsonl
+/factory/PROGRESS.jsonl
+/factory/RECONCILIATION.json
+/factory/TELEMETRY.jsonl
+/factory/candidates/
+/factory/context-packs/
+/factory/decision-consumption/
+/factory/gate-runs/
+/factory/invocations/
+/factory/locks/
+/factory/receipts/
+/factory/role-responses/
+/factory/supervisors/
 # Line lifecycle state: absolute worktree paths on THIS machine and a live
 # RUNNING/READY status per line. Local for the same reason CHECKPOINT.md is —
 # it describes this box, not the repo, and every parallel line would rewrite it.

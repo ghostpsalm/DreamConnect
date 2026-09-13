@@ -139,6 +139,110 @@ class TestConflicts(unittest.TestCase):
         self.assertEqual([s.uid for s in p.attach], [1000])
 
 
+class TestStaleRegistrations(unittest.TestCase):
+    """An entry naming a display the session no longer publishes (issue #54).
+
+    The registry entry records `display=<v>` (install-lib.sh:1182) written once
+    at register-unit start; the session republishes `DISPLAY=<v>`
+    (install-lib.sh:1220, runtime/dreamconnect-backstage-env.sh:51) every time
+    its Xwayland comes back on a new number. When those two disagree the shm and
+    socket still match the drop-in, so the agent's known-wrong-fallback rule
+    fires and the session is REFUSED (black) rather than falling back.
+
+    Displays are real published values: `:1`/`:2` as in test_install.sh:8627 and
+    :8741, `:7` as in test_install.sh:9175.
+    """
+
+    def test_a_republished_display_makes_the_entry_stale(self):
+        # The whole issue: entry says :1, the session now publishes :2.
+        self.assertEqual(
+            disc.stale_registrations({992: ":1"}, {992: ":2"}), [992])
+
+    def test_an_entry_that_still_matches_is_not_stale(self):
+        self.assertEqual(
+            disc.stale_registrations({992: ":1"}, {992: ":1"}), [])
+
+    def test_a_uid_that_publishes_nothing_is_not_stale(self):
+        # The manager_display fallback registers without an envfile: there is
+        # nothing to compare against, so there is nothing to conclude.
+        self.assertEqual(disc.stale_registrations({1000: ":1"}, {}), [])
+
+    def test_a_uid_with_no_entry_is_not_stale(self):
+        self.assertEqual(disc.stale_registrations({}, {1000: ":2"}), [])
+
+    def test_a_blank_published_value_is_not_stale(self):
+        # An unreadable or half-written envfile must not provoke a restart.
+        self.assertEqual(disc.stale_registrations({992: ":1"}, {992: ""}), [])
+
+    def test_a_blank_entry_value_is_not_stale(self):
+        self.assertEqual(disc.stale_registrations({992: ""}, {992: ":2"}), [])
+
+    def test_stale_uids_come_back_sorted(self):
+        stale = disc.stale_registrations({1001: ":7", 992: ":1", 1000: ":3"},
+                                         {1001: ":9", 992: ":2", 1000: ":3"})
+        self.assertEqual(stale, [992, 1001])
+
+
+class TestPlanRefresh(unittest.TestCase):
+    """plan() carries the stale-display rule through to the supervisor."""
+
+    def test_a_reserved_uid_with_a_stale_display_is_refreshed(self):
+        # The backstage account is reserved -- never attached, never released --
+        # and is the entire point of the issue, so refresh must NOT skip it.
+        p = disc.plan([sess("40", 992, user="backstage", seat="")],
+                      registered_uids=[992], reserved_uids=[992],
+                      registered_displays={992: ":1"},
+                      published_displays={992: ":2"})
+        self.assertEqual(list(p.refresh), [992])
+        self.assertEqual(p.attach, [])
+        self.assertEqual(p.release, [])
+
+    def test_an_ordinary_registered_session_is_refreshed_too(self):
+        p = disc.plan([sess("18", 1000)], registered_uids=[1000],
+                      registered_displays={1000: ":1"},
+                      published_displays={1000: ":3"})
+        self.assertEqual(list(p.refresh), [1000])
+
+    def test_a_conflicted_uid_is_not_refreshed(self):
+        # Two desktops on one uid: re-registering would pick a display for a
+        # session we already refuse to choose between.
+        p = disc.plan([sess("18", 1000), sess("34", 1000)],
+                      registered_uids=[1000],
+                      registered_displays={1000: ":1"},
+                      published_displays={1000: ":2"})
+        self.assertEqual(list(p.refresh), [])
+
+    def test_a_uid_being_released_is_not_refreshed(self):
+        # The entry is going away this pass; restarting register@ for it races
+        # its own deregistration.
+        p = disc.plan([], registered_uids=[1000],
+                      registered_displays={1000: ":1"},
+                      published_displays={1000: ":2"})
+        self.assertEqual(p.release, [1000])
+        self.assertEqual(list(p.refresh), [])
+
+    def test_a_matching_display_produces_no_refresh(self):
+        p = disc.plan([sess("40", 992, user="backstage")],
+                      registered_uids=[992], reserved_uids=[992],
+                      registered_displays={992: ":1"},
+                      published_displays={992: ":1"})
+        self.assertTrue(p.is_empty())
+
+    def test_callers_that_pass_no_display_maps_get_no_refresh(self):
+        p = disc.plan([sess("18", 1000)], registered_uids=[1000])
+        self.assertEqual(list(p.refresh), [])
+        self.assertTrue(p.is_empty())
+
+    def test_a_plan_holding_only_a_refresh_is_not_empty(self):
+        # is_empty() gates whether the supervisor does anything at all; a plan
+        # that only needs a refresh must not read as nothing to do.
+        p = disc.plan([sess("40", 992, user="backstage")],
+                      registered_uids=[992], reserved_uids=[992],
+                      registered_displays={992: ":1"},
+                      published_displays={992: ":2"})
+        self.assertFalse(p.is_empty())
+
+
 class TestIdempotence(unittest.TestCase):
     """The runner reconciles on a timer as well as on signals."""
 

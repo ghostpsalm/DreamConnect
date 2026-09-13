@@ -235,8 +235,11 @@ Character keys (letters, digits, punctuation) now inject as a **base X11 keysym*
 via Mutter's `NotifyKeyboardKeysym`, which resolves the keycode on the *guest's*
 layout — so the right character lands on US, QWERTZ, AZERTY, etc. Modifiers and
 functional keys (F-row, nav, numpad, locks) stay evdev (position-based, correct
-on every layout); an operator-held Shift/Ctrl/Alt injected as an evdev modifier
-combines correctly with the keysym. **Empirically verified** with a focused
+on every layout *where the layout binds the position*); an operator-held
+Shift/Ctrl/Alt injected as an evdev modifier combines correctly with the keysym.
+The numpad comma `VK_SEPARATOR` is the single exception and goes by keysym
+(`XK_KP_Separator` 0xFFAC, #40): `symbols/us` and `symbols/pc` bind nothing to
+its evdev position, so position-based injection is dead there. **Empirically verified** with a focused
 key-logger: on German, evdev-21 gave `z` (the QWERTZ swap bug) while keysym `y`
 gave `y`; on US, `a`/`A`/`@`/`5`/`;`/Ctrl+C all correct via the new path.
 
@@ -252,7 +255,7 @@ The daemon now captures the **whole logical desktop** via `RecordArea` over the
 bounding box of all logical monitors — auto-enabled when more than one monitor is
 present (or forced with `--all-monitors`), falling back to the proven
 single-monitor `RecordMonitor` otherwise. Pointer coordinates are shifted by the
-area origin (`area_x/area_y`) into the stream's frame; for a single monitor / an
+area origin (`area_origin`) into the stream's frame; for a single monitor / an
 origin-anchored layout that's a no-op. The bounding box honours per-monitor scale
 and 90/270 rotation. **Verified** on this single-monitor box that `RecordArea`
 over `(0,0) 1920×1080` captures live at the right geometry, identical to

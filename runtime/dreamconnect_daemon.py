@@ -197,8 +197,14 @@ class Session:
         # instead of a physical connector — the backstage/headless mode, which
         # needs no monitor, no dummy plug and no login. None = physical capture.
         self.virtual = virtual
-        self.area_x = 0  # origin of the captured area in desktop coords (RecordArea)
-        self.area_y = 0
+        # Origin of the captured area in desktop coords (RecordArea), as one
+        # (x, y) tuple for the same reason .geom below is one pair: start()
+        # publishes it on the D-Bus thread and motion_abs reads it on the
+        # socket thread, and two separate stores are not one update — a pointer
+        # move landing between them would subtract the new x from one layout
+        # and the old y from another (#57). Worse than a torn GEOM: that
+        # self-corrects on the next frame, a mis-shifted click does not.
+        self.area_origin = (0, 0)
         self.frame = frame
         self.rd_path = None
         self.sc_path = None
@@ -479,8 +485,9 @@ class Session:
 
         # Backstage/headless: RecordVirtual takes no connector — Mutter conjures
         # the monitor, so this works with GetCurrentState reporting zero monitors
-        # (no panel, no dummy plug). The output is origin-anchored, so area_x/y
-        # stay 0 and the pointer maths below is a no-op, same as RecordMonitor.
+        # (no panel, no dummy plug). The output is origin-anchored, so the area
+        # origin stays (0, 0) and the pointer maths below is a no-op, same as
+        # RecordMonitor.
         props = {"cursor-mode": GLib.Variant("u", 1)}
 
         # A session with no monitors can only be captured virtually. RecordArea
@@ -497,7 +504,7 @@ class Session:
                 f"{self.virtual[0]}x{self.virtual[1]}")
 
         if self.virtual:
-            self.area_x = self.area_y = 0
+            self.area_origin = (0, 0)
             self.stream_path = self.bus.call_sync(
                 SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordVirtual",
                 GLib.Variant("(a{sv})", (props,)),
@@ -513,7 +520,7 @@ class Session:
         area = self._desktop_area()
         if area and (self.all_monitors or area[4] > 1):
             x, y, w, h, n = area
-            self.area_x, self.area_y = x, y
+            self.area_origin = (x, y)
             self.stream_path = self.bus.call_sync(
                 SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordArea",
                 GLib.Variant("(iiiia{sv})", (x, y, w, h, props)),
@@ -521,7 +528,7 @@ class Session:
             log(f"ScreenCast session {self.sc_path} stream {self.stream_path} "
                 f"area ({x},{y}) {w}x{h} spanning {n} monitor(s)")
         else:
-            self.area_x = self.area_y = 0
+            self.area_origin = (0, 0)
             self.stream_path = self.bus.call_sync(
                 SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordMonitor",
                 GLib.Variant("(sa{sv})", (self.monitor, props)),
@@ -661,12 +668,15 @@ class Session:
     # ---- input injection (called from the socket thread) -------------------
     def motion_abs(self, x, y):
         # Coordinates are relative to the captured stream. For RecordArea the
-        # stream origin is the area's top-left (area_x/area_y), so shift the
-        # desktop coordinate SC gives us into the stream's frame; for
-        # RecordMonitor area_x/area_y are 0 and this is a no-op.
+        # stream origin is the area's top-left, so shift the desktop coordinate
+        # SC gives us into the stream's frame; for RecordMonitor the origin is
+        # (0, 0) and this is a no-op. One load of the published pair, unpacked
+        # afterwards: reading self.area_origin twice would reintroduce the tear
+        # the single attribute exists to prevent (#57).
+        area_x, area_y = self.area_origin
         with self._lock:
             self._rd("NotifyPointerMotionAbsolute",
-                     (self.stream_path, x - self.area_x, y - self.area_y), "(sdd)")
+                     (self.stream_path, x - area_x, y - area_y), "(sdd)")
 
     def button(self, evdev_button, state):
         with self._lock:
@@ -759,7 +769,23 @@ class ControlServer(threading.Thread):
         if os.path.exists(self.sock_path):
             os.unlink(self.sock_path)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(self.sock_path)
+        # bind() publishes the inode at 0777 & ~umask, so the chmod below is
+        # always a beat late: launched by hand under the default umask 022 the
+        # socket is 0755 for that instant and any local user can connect() and
+        # inject input. Narrow the umask across the bind so the window is 0700
+        # however the daemon was started -- the shipped unit's UMask=0077
+        # already gives that, this makes it not depend on the launcher.
+        # Restored in a finally because umask is process-global: any thread
+        # that creates a file WITHOUT an explicit mode while this is narrowed
+        # would silently get 0o700-masked permissions instead of its own. Not
+        # FrameBuffer._open_frame, which an earlier draft of this comment named
+        # -- it passes an explicit 0o600 to os.open and is then fchmod'd, so the
+        # umask cannot reach it either way (see the 0600 note above). (#45, #64)
+        prev_umask = os.umask(0o077)
+        try:
+            srv.bind(self.sock_path)
+        finally:
+            os.umask(prev_umask)
         # 0600, not 0666: the root SC JVM connects via DAC override. Don't rely
         # solely on the 0700 XDG_RUNTIME_DIR parent to gate access.
         os.chmod(self.sock_path, 0o600)
