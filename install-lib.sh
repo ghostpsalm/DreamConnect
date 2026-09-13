@@ -129,18 +129,26 @@ valid_home_dir() {  # path
 # that isn't in the passwd source is a hard error, because a fabricated uid would
 # point the root JVM at a socket path nothing will ever bind.
 #
-# DC_PASSWD_DB, if set, is read as a passwd(5) file instead of getent passwd, so
-# the tests can resolve accounts this machine does not have.
+# The lookup goes through passwd_entry, which is the one place that knows how to
+# tell an absent account from a lookup that failed (and which honours
+# DC_PASSWD_DB, so the tests can resolve accounts this machine does not have).
 resolve_host_identity() {
-  local name="${1:-}" entry uid home
+  local name="${1:-}" entry uid home rc=0
   [ -n "$name" ] || name="${2:-}"
   [ -n "$name" ] || { echo "error: resolve_host_identity: no account and no fallback user" >&2; return 1; }
-  if [ -n "${DC_PASSWD_DB:-}" ]; then
-    entry="$(awk -F: -v n="$name" '$1 == n { print; exit }' "$DC_PASSWD_DB")"
-  else
-    entry="$(getent passwd "$name" || true)"
-  fi
-  [ -n "$entry" ] || { echo "error: no such account: $name" >&2; return 1; }
+  # `|| rc=$?` and not a bare assignment: install.sh runs this library under
+  # `set -euo pipefail`, where a non-zero command substitution in an assignment
+  # kills the caller outright — same exit status as a refusal, but without the
+  # message that says which account and why.
+  entry="$(passwd_entry "$name")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "error: no such account: $name" >&2; return 1 ;;
+    # A failed lookup is not an absence, and the uid is exactly what must not be
+    # guessed here: a fabricated one points the root JVM at a socket path nothing
+    # will ever bind.
+    *) echo "error: cannot resolve account $name: the passwd lookup failed" >&2; return 1 ;;
+  esac
   uid="$(echo "$entry" | cut -d: -f3)"
   home="$(echo "$entry" | cut -d: -f6)"
   # The home is validated HERE, while it is still a variable. Once it is pasted
@@ -154,16 +162,70 @@ resolve_host_identity() {
   echo "$name $uid $home /run/user/$uid/dreamconnect.sock"
 }
 
-# One passwd(5) entry, matched on the whole name, printed verbatim (empty when
-# there is no such account). Same convention resolve_host_identity uses:
-# DC_PASSWD_DB, if set, is read as a passwd file instead of getent passwd.
+# One passwd(5) entry, matched on the whole name, printed verbatim, and a status
+# that says which of three things happened:
+#
+#   0  found — the entry is on stdout
+#   1  absent — the passwd source answered and there is no such account; empty
+#      stdout and nothing on stderr, because absence is an answer, not an error
+#   2  the lookup itself FAILED — a broken NSS module, a down LDAP/SSSD backend,
+#      no getent at all; empty stdout and a stderr line naming the account
+#
+# The third status is issue #30. This function used to answer with stdout alone,
+# so "not there" and "could not tell" were the same empty string and every caller
+# read both as absence: uninstall_host_account reported a live account as already
+# gone and install.sh then deleted install.state, and ensure_host_account ran
+# useradd over an account that may well already exist.
+#
+# getent's exit 2 is the ambiguity itself — it is both its documented "key not
+# found" and what a backend that answered nothing returns — so it is classified
+# by a second lookup of a key every usable passwd source must hold. root
+# answering means the source is alive and this account really is gone; root not
+# answering means nothing was established. The probe is deliberately NOT `getent
+# -s files`, and deliberately not a read of /etc/passwd: the display-host account
+# can be one the installer adopted rather than created (CREATED_ACCOUNT=0) and so
+# can live in LDAP or SSSD, and corroborating against the local file would report
+# it absent while userdel still refuses to remove it — issue #30 inverted.
+#
+# Residual hole, not closable through getent: SSSD down while `files` is healthy
+# leaves the root probe answering, so an LDAP host account still classifies as
+# absent. Narrowing it needs a per-source answer getent does not expose, and the
+# only local alternative is the /etc/passwd read ruled out above.
+#
+# DC_PASSWD_DB, if set, is read as a passwd file instead of getent passwd (a test
+# fixture only, never a production path) and answers on the same three-way scale.
 passwd_entry() {
-  local name="$1"
+  local name="$1" entry rc=0
   if [ -n "${DC_PASSWD_DB:-}" ]; then
-    awk -F: -v n="$name" '$1 == n { print; exit }' "$DC_PASSWD_DB"
-  else
-    getent passwd "$name" || true
+    # Readability is checked ahead of awk rather than read off its status: awk's
+    # own fatal message names the FILE, and a caller refusing a removal has to be
+    # able to say which account's lookup it was that failed.
+    [ -r "$DC_PASSWD_DB" ] || {
+      echo "error: passwd lookup for $name failed: cannot read $DC_PASSWD_DB" >&2; return 2; }
+    entry="$(awk -F: -v n="$name" '$1 == n { print; exit }' "$DC_PASSWD_DB")" || {
+      echo "error: passwd lookup for $name failed: could not read $DC_PASSWD_DB" >&2; return 2; }
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry"
+    return 0
   fi
+  # getent's stderr is left alone: on a genuinely degraded box its one line names
+  # the backend that failed, which is the whole diagnosis. The probe's is not —
+  # it is an internal classification step, and its noise would read as a second,
+  # unrelated failure.
+  entry="$(getent passwd "$name")" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$entry" ]; then
+    printf '%s\n' "$entry"
+    return 0
+  fi
+  # Only exit 2 can mean absence. Every other status (1, 3, 126/127, a signal)
+  # and a success with no output are states getent does not use for a key it
+  # looked up and did not find, so none of them establish that the account is
+  # gone.
+  if [ "$rc" -eq 2 ] && getent passwd root >/dev/null 2>&1; then
+    return 1
+  fi
+  echo "error: passwd lookup for $name failed: the passwd source did not answer" >&2
+  return 2
 }
 
 # --- install state ----------------------------------------------------------
@@ -220,10 +282,22 @@ read_install_state() {
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     key="${line%%=*}"; value="${line#*=}"
-    # A state file written or edited on Windows carries CR, which would ride
-    # along into an account name, a uid, and the picker label derived from it.
-    # Stripped here so every consumer gets the same clean value.
-    value="${value%$'\r'}"
+    # A state file written or edited on Windows carries CR, and a hand-edited one
+    # carries whatever spacing the operator typed — which would ride along into
+    # an account name, a uid, and the picker label derived from it. Both ends of
+    # BOTH halves are trimmed: padding on the key ("HOST_ACCOUNT = dchost")
+    # matches no case arm below, so the whole record would read as "nothing
+    # recorded" and host_account_installable would take the fresh-box branch on a
+    # box that already has a host account.
+    #
+    # [:space:] covers CR, so this subsumes the old `%$'\r'` strip. It is done
+    # with the ends-only expansions rather than `tr -d '[:space:]'` because inner
+    # whitespace is data, not padding: a recorded "dc host" must stay distinct
+    # from "dchost" for the refusal message to be worth reading. A value that is
+    # only whitespace trims to empty, which every consumer already treats as
+    # unset — the right reading, since " " is not an account.
+    key="${key#"${key%%[![:space:]]*}"}";       key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
     case "$key" in
       HOST_ACCOUNT)    HOST_ACCOUNT="$value" ;;
       HOST_UID)        HOST_UID="$value" ;;
@@ -239,7 +313,7 @@ read_install_state() {
 # human's home directory. The caller passes the account to protect in; this
 # function detects nothing by itself.
 host_account_removable() {  # name protected_user
-  local name="${1:-}" protected="${2:-}" entry uid home gecos
+  local name="${1:-}" protected="${2:-}" entry uid home gecos rc=0
   local marker="DreamConnect display host"
   local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
 
@@ -261,9 +335,19 @@ host_account_removable() {  # name protected_user
       echo "refusing to remove $name: reserved account name (root/user/local)" >&2; return 1 ;;
   esac
 
-  entry="$(passwd_entry "$name")"
-  [ -n "$entry" ] || {
-    echo "refusing to remove $name: no such account in the passwd source" >&2; return 1; }
+  # Guarded for the reason resolve_host_identity spells out: this library runs
+  # under `set -euo pipefail`, and a rail that dies instead of refusing gives its
+  # caller the same status with none of the words.
+  entry="$(passwd_entry "$name")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "refusing to remove $name: no such account in the passwd source" >&2; return 1 ;;
+    # Distinct from absence on purpose. Every rail below reads a field of $entry,
+    # and there is no entry: a lookup that failed has not established that this
+    # account is gone, and `userdel -r` is not a thing to attempt on a guess.
+    *) echo "refusing to remove $name: the passwd lookup failed, so whether it exists is unknown" >&2
+       return 1 ;;
+  esac
   uid="$(echo "$entry" | cut -d: -f3)"
   gecos="$(echo "$entry" | cut -d: -f5)"
   home="$(echo "$entry" | cut -d: -f6)"
@@ -286,8 +370,12 @@ host_account_removable() {  # name protected_user
   fi
 
   read_install_state
+  # Both names through %q, for the reason spelled out at the installable
+  # mismatch below: this is the other refusal that juxtaposes two names, and a
+  # recorded one that differs only by inner whitespace reads as the given one.
   [ "$HOST_ACCOUNT" = "$name" ] || {
-    echo "refusing to remove $name: install state records host account '$HOST_ACCOUNT'" >&2; return 1; }
+    printf "refusing to remove %q: install state records host account '%q'\n" \
+      "$name" "$HOST_ACCOUNT" >&2; return 1; }
   [ "$CREATED_ACCOUNT" = "1" ] || {
     echo "refusing to remove $name: install state says the installer did not create it" >&2; return 1; }
 
@@ -357,8 +445,18 @@ host_account_installable() {  # requested_or_empty
     return 0
   fi
 
+  # The one message that prints two names side by side, and read_install_state
+  # only trims the ENDS of a recorded value — inner whitespace is data and
+  # survives on purpose. So a hand-edited or Windows-edited state file can make
+  # this refusal name "dchost" and "dc host", which a terminal renders as the
+  # same string, and the operator cannot tell a mistyped account from a padded
+  # state file. %q makes the difference visible ("dc\ host"). ${var@Q} was ruled
+  # out: it only quotes ('dc host'), which the literal quotes here already did,
+  # so it reveals nothing. A name without whitespace passes through %q
+  # unchanged, so the ordinary refusal reads exactly as it did.
   [ "$requested" = "$HOST_ACCOUNT" ] || {
-    echo "error: refusing to install under '$requested': install state records display-host account '$HOST_ACCOUNT'; run ./install.sh --uninstall first" >&2
+    printf "error: refusing to install under '%q': install state records display-host account '%q'; run ./install.sh --uninstall first\n" \
+      "$requested" "$HOST_ACCOUNT" >&2
     return 1; }
 
   echo "$requested"
@@ -379,7 +477,7 @@ host_account_installable() {  # requested_or_empty
 # write_install_state's CREATED_ACCOUNT, which is rail 5 of the userdel gate, so
 # a value left over from a previous call would decide the wrong thing.
 ensure_host_account() {  # name
-  local name="${1:-}" dir tmp conf
+  local name="${1:-}" dir tmp conf rc=0
 
   # root is in every passwd source, so the create half is skipped and the marker
   # half stamps SystemAccount=true onto .../AccountsService/users/root, hiding
@@ -403,7 +501,17 @@ ensure_host_account() {  # name
 
   dir="${DC_ACCOUNTSSERVICE_DIR:-/var/lib/AccountsService/users}"
 
-  if [ -z "$(passwd_entry "$name")" ]; then
+  # A lookup that FAILED is not "no such account", and the difference decides
+  # whether useradd runs: on a box whose NSS or SSSD is down, creating over an
+  # account that may already be there is a create attempt against someone else's
+  # identity, and the usermod that follows would disable a password that is not
+  # ours. Nothing is written until the source has actually answered.
+  passwd_entry "$name" >/dev/null || rc=$?
+  [ "$rc" -ne 2 ] || {
+    echo "error: refusing to create display-host account '$name': the passwd lookup failed, so it may already exist" >&2
+    return 1; }
+
+  if [ "$rc" -eq 1 ]; then
     # The comment is one argument: split, the GECOS becomes "DreamConnect" and
     # host_account_removable() would refuse to remove the account we created.
     run useradd --system --create-home --comment "DreamConnect display host" "$name"
@@ -1104,7 +1212,7 @@ remove_no_idle_lock() {  # name home
 # brings the account's manager straight back up; the user has to be terminated
 # before userdel, or a still-running session holds its files open.
 uninstall_host_account() {  # name protected_user uid
-  local name="$1" protected="${2:-}" uid="${3:-}"
+  local name="$1" protected="${2:-}" uid="${3:-}" rc=0
 
   # The account issue #21 is about: removed outside this tool before --uninstall
   # ever ran. host_account_removable would refuse it — correctly, for a caller
@@ -1115,9 +1223,30 @@ uninstall_host_account() {  # name protected_user uid
   # commands below, all of which are meaningless on an account that is not there.
   # A name that is EMPTY is not this case — it names no account to be absent —
   # and falls through to the refusal it has always had.
-  if [ -n "$name" ] && [ -z "$(passwd_entry "$name")" ]; then
-    echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
-    return 0
+  #
+  # The STATUS decides it, never the emptiness of stdout. This short-circuit used
+  # to read `[ -z "$(passwd_entry "$name")" ]`, and a command substitution throws
+  # the status away: "no such account" and "the lookup could not be performed"
+  # arrive as the same empty string, so a box with a broken NSS module or a down
+  # LDAP/SSSD backend took the exit-0 path for an account that is still there
+  # (issue #30). install.sh clears install.state only on our 0, so that answer
+  # orphaned a live account — linger and markers still set — with no record left
+  # to retry the removal from.
+  if [ -n "$name" ]; then
+    passwd_entry "$name" >/dev/null || rc=$?
+    case "$rc" in
+      1)
+        echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
+        return 0 ;;
+      # Not a refusal by host_account_removable's rails and not an absence: the
+      # question was never answered. Nothing destructive is attempted, and the
+      # non-zero status is what keeps install.state alive for a retry once the
+      # passwd source is healthy again. passwd_entry has already named the
+      # account and the failure on stderr; this line says what it cost.
+      2)
+        echo "refusing to remove '$name': the passwd lookup failed, so whether the account is still there was never established; leaving the install state in place to retry" >&2
+        return 1 ;;
+    esac
   fi
 
   host_account_removable "$name" "$protected" || return 1

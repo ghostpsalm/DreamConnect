@@ -90,14 +90,27 @@ uninstall() {
   if [ -n "$HOST_ACCOUNT" ]; then
     target_name="$HOST_ACCOUNT"
     target_uid="$HOST_UID"
-    target_home="$(passwd_entry "$target_name" | cut -d: -f6)"
+    # `|| true` on the pipeline: passwd_entry now exits non-zero for an account
+    # that is absent (1) as well as one it could not look up (2), and under
+    # `set -o pipefail` an unguarded assignment would abort --uninstall on
+    # exactly the hand-deleted account it exists to clean up after. An empty
+    # home is what every path below already expects when there is no entry, and
+    # the decision that genuinely needs the two apart is
+    # uninstall_host_account's, which makes it for itself.
+    target_home="$(passwd_entry "$target_name" | cut -d: -f6 || true)"
   else
     # Classic mode has no state file, so the detected session is the only thing
     # that says whose install to revert — here it really is required.
     [ -n "$PROTECTED_USER" ] || die "could not detect a graphical session user; set DREAMCONNECT_USER= (or use DREAMCONNECT_HOST_ACCOUNT for unattended installs)"
     target_name="$PROTECTED_USER"
     target_uid="$(id -u "$target_name")"
-    target_home="$(getent passwd "$target_name" | cut -d: -f6)"
+    # Through passwd_entry, not a second copy of the getent pattern, so the one
+    # place that classifies a failed lookup is the only place that does it. Not
+    # `|| true` like the branch above: this name came from a live session, so
+    # neither absence nor a failed lookup is a state to carry on from — and
+    # under pipefail today it aborted here anyway, silently.
+    target_home="$(passwd_entry "$target_name" | cut -d: -f6)" \
+      || die "could not look up $target_name in the passwd source"
   fi
   local target_run_user=(sudo -u "$target_name" env "XDG_RUNTIME_DIR=/run/user/$target_uid" \
                           "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$target_uid/bus")

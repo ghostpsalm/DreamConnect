@@ -1,9 +1,9 @@
 ---
 progress: 81
-updated: 2026-09-12
+updated: 2026-09-13
 stage: Active
-status: building
-next: Work down the daemon/installer hardening backlog; #57 (torn area origin) and #62 (its doc rename) are merged, #45 (control-socket bind umask) is done on `runtime/daemon-races` and waiting, so #30/#32-#34 on the install seam are next.
+status: draining for migration
+next: Migration drain, 2026-09-13. Merged: #57 and #62 (area origin + its doc rename), #45 (control-socket bind umask), #54 (registry refresh on a moved display), #40, #43, #49, #41, #33, #30. Parked as DRAFT PRs for the target VM: #46 (PR 73, slice 1 of 4 - do NOT merge before slice 3 removes the duplicate pinned hash), #55 (PR 72, clean-restart half only, crash path outstanding), #63 (PR 74, slice 1, never reviewed). In flight and unfinished: #32 on this branch. Next work after migration: #32, then #34, then #65.
 flags:
   - Verified end to end on exactly one configuration — Fedora, GNOME 49+, one live ScreenConnect session. Other distros and desktops are untested, and KDE/wlroots are out of scope by design.
   - There is no remote CI. `.github/workflows/ci.yml` exists in the working tree but is untracked and on no branch, so a push to GitHub still triggers nothing. Verification is local only: `.githooks/pre-commit` runs `./scripts/gate.sh` before every commit and every merge, and refuses the commit when it is red.
