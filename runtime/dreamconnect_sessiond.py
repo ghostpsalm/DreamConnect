@@ -174,6 +174,72 @@ def published_display(uid, runtime_root=RUNTIME_ROOT):
     return None
 
 
+# How long one user manager gets to answer. Short on purpose: this read happens
+# once per registered uid on every reconcile pass, so the worst case is paid on
+# a 30s timer, and a session whose manager cannot answer in five seconds is not
+# one whose display label we can usefully correct anyway.
+MANAGER_ENV_TIMEOUT_SECONDS = 5
+
+
+def _manager_env_command(argv, timeout=None):
+    """The real runner for `manager_display`. Separate from
+    `Supervisor._run_command` because that one is fixed at a 60s timeout, which
+    is a fine bound for a systemctl action and far too long to block a reconcile
+    on a read.
+    """
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+
+
+def manager_display(uid, run=None, account=None):
+    """The DISPLAY that account's systemd user manager holds, or None (#63).
+
+    The second value the stale-display rule needs for a session that publishes
+    no envfile. `dreamconnect-register.sh`'s `manager_display` (:80-90) in
+    Python, and it must stay the same rule: the two halves disagreeing shows up
+    as a restart every reconcile pass, not as an error.
+
+    This is root reaching into a user-owned session, which is why #54 stopped
+    short of it, so the reach is kept to the narrowest shape that answers the
+    question: `runuser -u <account>` drops to that account first, nothing is
+    read back but the manager's own environment listing, and the call is bounded
+    at MANAGER_ENV_TIMEOUT_SECONDS -- a wedged user manager must cost one uid's
+    answer, not the reconcile loop that every other account is waiting in.
+
+    `sed -n 's/^DISPLAY=//p' | head -n 1`, exactly: anchored at the start of the
+    line and first match wins. Not a substring search -- GNOME_SETUP_DISPLAY and
+    WAYLAND_DISPLAY sit in the same output, and reading either as the display
+    would name a value the registrar would never have written, which the
+    supervisor would then "fix" by restarting register@ forever.
+
+    None, never an exception, for every way this can fail to produce an answer:
+    no such account, the command failing, or no DISPLAY line at all (a session
+    that has not got one yet). The shell says the same with `return 1`, and the
+    caller's rule already treats a missing second value as "nothing to compare".
+    """
+    import pwd
+
+    if run is None:
+        run = _manager_env_command
+    if account is None:
+        account = pwd.getpwuid
+    try:
+        name = account(uid).pw_name
+    except KeyError:
+        return None
+    result = run([
+        "runuser", "-u", name, "--",
+        "env", f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+        "systemctl", "--user", "show-environment"],
+        timeout=MANAGER_ENV_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("DISPLAY="):
+            return line.partition("=")[2].strip()
+    return None
+
+
 def unit_names(uid):
     """The two units that together make one session reachable."""
     return [ATTACH_UNIT.format(uid=uid), REGISTER_UNIT.format(uid=uid)]
@@ -209,7 +275,8 @@ class Supervisor:
     """Applies plans. Split from the reconciler so the rules stay pure."""
 
     def __init__(self, registry_dir=REGISTRY_DIR, reserved_users=None,
-                 runner=None, runtime_root=RUNTIME_ROOT):
+                 runner=None, runtime_root=RUNTIME_ROOT,
+                 manager_display_reader=None):
         self.registry_dir = registry_dir
         self.runtime_root = runtime_root
         if reserved_users is None:
@@ -219,6 +286,10 @@ class Supervisor:
         self.reserved_users = tuple(reserved_users)
         # Injected so tests can drive a full reconcile without touching systemd.
         self._run = runner or self._run_command
+        # Injected for a stronger reason than the runner: this one runs a
+        # subprocess inside whatever account the fixture names, so a test that
+        # did not override it could reach a real session on the box running it.
+        self._manager_display = manager_display_reader or manager_display
 
     @staticmethod
     def _run_command(argv):
@@ -266,6 +337,20 @@ class Supervisor:
         Only uids that already hold an entry are read. A uid with no entry has
         nothing that could have gone stale, and walking every /run/user on the
         box twice a minute to learn that would cost more than the answer.
+
+        Two sources, in the registrar's own order: the envfile first, and that
+        account's user manager only when the envfile yields nothing
+        (dreamconnect-register.sh:101-115). The order is not ours to pick -- we
+        compare against whichever value the registrar would have written, so
+        asking the manager first would "fix" a backstage entry onto a display
+        its own shell never published, every pass. Blank counts as nothing here
+        for the same reason it does there.
+
+        The manager is asked only for a uid whose entry already names a display,
+        which is what keeps root's reach into a user-owned session (#63) down to
+        the sessions that could actually be stale: without a recorded display
+        there is no comparison to make, so the answer would be bought and thrown
+        away.
         """
         recorded, published = {}, {}
         for uid in uids:
@@ -273,6 +358,8 @@ class Supervisor:
             if entry:
                 recorded[uid] = entry
             current = published_display(uid, self.runtime_root)
+            if not current and entry:
+                current = self._manager_display(uid)
             if current:
                 published[uid] = current
         return recorded, published
