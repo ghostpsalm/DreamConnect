@@ -32,7 +32,9 @@ number would misrepresent cost.
 | 2026-09-04T10:42:54Z | issue-29 | done | #29 | 1 commits | - | 52m | out 84,930 - cache-read 9,703,725 - agents 277,224 total across 4 spawns | bounces=0 guard_tests=1 |
 | 2026-09-10T01:48:11Z | issue-49 | done | #49 | 1 commits | - | 4585m | out 83,678 - cache-read 8,135,961 - agents 209,103 total across 4 spawns | bounces=0 guard_tests=0 laps=0 |
 | 2026-09-10T22:11:17Z | issue-40 | done | #40 | 1 commits | - | 5808m | out 153,427 - cache-read 19,317,031 - agents 234,111 total across 4 spawns | bounces=0 guard_tests=1 |
+| 2026-09-10T22:11:24Z | issue-33 | done | #33 | 1 commits | - | 5100m | out 135,263 - cache-read 22,785,551 - agents 343,818 total across 6 spawns | - |
 | 2026-09-10T22:51:33Z | issue-57 | done | #57 | 1 commits | - | 5849m | out 108,630 - cache-read 16,943,568 - agents 197,618 total across 4 spawns | bounces=0 guard_tests=0 laps=0 |
 | 2026-09-11T12:59:47Z | issue-45 | done | #45 | 1 commits | - | 268m | out 60,894 - cache-read 19,025,355 - agents 192,843 total across 4 spawns | bounces=0 guard_tests=0 laps=0 |
 | 2026-09-11T22:25:07Z | issue-41 | done | #41 | 1 commits | - | 2676m | out 259,519 - cache-read 71,172,245 - agents 596,694 total across 9 spawns | bounces=0 guard_tests=0 laps=1 |
+| 2026-09-12T00:44:37Z | issue-30 | done | #30 | 1 commits | - | 1593m | out 183,824 - cache-read 63,808,894 - agents 515,416 total across 7 spawns | - |
 | 2026-09-12T00:47:15Z | issue-54 | done | #54 | 1 commits | - | 1558m | out 320,226 - cache-read 37,301,724 - agents 435,443 total across 7 spawns | bounces=0 guard_tests=0 laps=0 |
