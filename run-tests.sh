@@ -10,7 +10,17 @@ echo "== Java boot tests =="
 out="$(mktemp -d)"; trap 'rm -rf "$out"' EXIT
 javac "${EXPORTS[@]}" -d "$out" \
   $(find "$HERE/agent/boot" "$HERE/agent/test" -name '*.java')
-java "${EXPORTS[@]}" -cp "$out" dreamconnect.boot.BootTests
+# Deferred, not aborted (#41). BootTests counts every failure it sees -- a failed
+# check() and, since #41, a test that throws -- and exits 1 once at the end. A bare
+# invocation here would meet `set -e` and kill the whole script at this line, so the
+# Python and installer sections below would never run and whoever reads the output
+# could not tell "one Java test failed" from "two thirds of the gate never executed".
+# Capturing the status and failing at the bottom keeps the gate just as red while
+# letting it finish reporting. `|| java_status=$?` rather than `if ! java ...`
+# because the status itself is wanted, not merely the fact of failure; the `|| `
+# form is also what keeps `set -e` from firing on this command.
+java_status=0
+java "${EXPORTS[@]}" -cp "$out" dreamconnect.boot.BootTests || java_status=$?
 
 echo
 echo "== Python daemon tests =="
@@ -38,4 +48,13 @@ echo "== Agent build shell tests =="
 bash "$HERE/agent/test_build.sh"
 
 echo
+# The deferred half of the Java section. Compared with `[ ... ]`, not `(( ))`:
+# java_status is only ever assigned from `$?`, but arithmetic under `set -u` aborts
+# the shell outright on anything unexpected, which is the one way this line could
+# turn a red gate into a differently-shaped red that no longer names the suite.
+if [ "$java_status" -ne 0 ]; then
+  echo "FAILED: the Java boot tests (exit $java_status) -- see '== Java boot tests ==' above"
+  exit "$java_status"
+fi
+
 echo "ALL TESTS PASSED"

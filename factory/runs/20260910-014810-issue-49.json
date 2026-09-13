@@ -1,0 +1,160 @@
+{
+  "recorded_at": "2026-09-10T01:48:11Z",
+  "repo": "build-integrity-2",
+  "branch": "agent/build-integrity-2",
+  "base": "d5d4f5ab1a62bfc2923ac5abcdeee8b375d8fc33",
+  "window_start": "2026-09-06T21:40:39+10:00",
+  "head": "c495024c72becce53383d9ab626a43b6ccd1a46e",
+  "issue": {
+    "number": 49,
+    "state": "OPEN",
+    "title": "agent/build.sh: sha256sum -c mis-parses a jar path containing backslash/newline, deleting a good jar",
+    "url": "https://github.com/ghostpsalm/DreamConnect/issues/49"
+  },
+  "commits": [
+    {
+      "sha": "c495024c72becce53383d9ab626a43b6ccd1a46e",
+      "subject": "Agent: hash the ByteBuddy jar directly instead of parsing a checksum line (#49)"
+    }
+  ],
+  "commit_count": 1,
+  "diffstat": "2 files changed, 152 insertions(+), 5 deletions(-)",
+  "ci": {},
+  "tokens": {
+    "available": true,
+    "scoped": true,
+    "parent_thread": {
+      "input_tokens": 156,
+      "output_tokens": 83678,
+      "cache_read_input_tokens": 8135961,
+      "cache_creation_input_tokens": 899565
+    },
+    "subagents": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0
+    },
+    "subagent_spawns": 4,
+    "by_agent": {
+      "architect": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 45085,
+        "duration_ms": 140931,
+        "models": []
+      },
+      "oracle": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 63662,
+        "duration_ms": 294048,
+        "models": []
+      },
+      "builder": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 48160,
+        "duration_ms": 99744,
+        "models": []
+      },
+      "seraph": {
+        "spawns": 1,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 52196,
+        "duration_ms": 151626,
+        "models": []
+      }
+    },
+    "usage_blocks": 78,
+    "skipped_no_timestamp": 0,
+    "transcripts": [
+      {
+        "file": "c074718a-6042-435c-beda-b51357e884a8.jsonl",
+        "usage_blocks": 78
+      }
+    ],
+    "agent_wall_clock_ms": 686349,
+    "first_activity": "2026-09-06T21:22:50.273000+00:00",
+    "last_activity": "2026-09-10T01:48:08.986000+00:00",
+    "notification_tokens": 209103,
+    "attribution": "this session, by CLAUDE_CODE_SESSION_ID",
+    "suspect": false
+  },
+  "asks": [
+    "/implement 49",
+    "Owner decision recorded. D enforcement is now true for this line: factory_owner_decisions.py --set-enforcing true --owner Roger --decision-ref https://github.com/ghostpsalm/DreamConnect/issues/59 was run from the primary checkout, and factory/candidates/ENFORCING.json in this worktree says enforcing=true. Run ~/.claude/scripts/factory_implement.py next and continue the run.",
+    "<task-notification>\n<task-id>a97a720a5a7f4c998</task-id>\n<tool-use-id>toolu_01VupNEKcR2cMGVq9icoeiTt</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a97a720a5a7f4c998.output</output-file>\n<status>completed</status>\n<summary>Agent \"Architect plan for issue 49\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: plan-ready\nACTION-ID: 2b0be69966fd4fb6a48be51cf17e1066\nSLICES: 1\nINVOCATION-ID: inv-001-fdb96abb\nEVIDENCE REQ-001: `agent/build.sh:42` is `if ! echo \"$BB_SHA256  $BB_JAR\" | sha256sum -c -; then` with `rm -f \"$BB_JAR\"` at :43 \u2014 the parse the plan removes. Slice 1 replaces it with a redirect-and-compare (no filename ever crosses the line format).\nEVIDENCE REQ-002: the idiom already exists at `agent/test_build.sh:131` \u2014 `[ \"$(sha256sum &lt; \"$cand\" | cut -d' ' -f1)\" = \"$BB_SHA256\" ] || continue` (also :139).\nEVIDENCE REQ-003: reproduced on coreutils 9.10. Newline in path: `echo \"$h  $d/f.jar\" | sha256sum -c -` \u2192 `FAILED open or read`, `WARNING: 1 line is improperly formatted`, rc=1, while the direct compare rc=0. **Backslash does not reproduce here**: the same pipeline on `/tmp/.../we\\ird/f.jar` printed `\\/tmp/...we\\\\ird/f.jar: OK`, rc=0 \u2014 GNU unescapes only when the line *starts* with `\\`, so the issue's stated backslash trigger is cosmetic on this coreutils; the newline case is the real one. The bug class and fix stand; the test must use a newline.\n\n## Problem\n`agent/build.sh`'s pinned-hash check routes the jar path through `sha256sum -c`'s line format. If the checkout sits under a path containing a newline, the line misparses, the pipeline exits 1 exactly as a genuine mismatch does, and the mismatch branch deletes a good jar and reports it as rejected \u2014 the same \"nonzero",
+    "1 - approved. The plan matches the issue's intent. Run ~/.claude/scripts/factory_implement.py confirm --approved and continue.",
+    "Seam gate approved. factory_owner_decisions.py --approve-gate --run-id impl-49-318f63ee --gate seam --owner Roger was run from the primary checkout; source_snapshot tree:b6f71a4ffb38834850cd177ac6c78cf167def284. Run confirm --approved and continue.",
+    "<task-notification>\n<task-id>aba74db4cc80c41a6</task-id>\n<tool-use-id>toolu_01VhpkstNRZB5dEtPpAXGQGF</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/aba74db4cc80c41a6.output</output-file>\n<status>completed</status>\n<summary>Agent \"Oracle red test for issue 49\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>RED: confirmed\nACTION-ID: 2298ece2dfdc43e496881d0de5f6810a\nINVOCATION-ID: inv-002-1cd4dfa5\nEVIDENCE REQ-001: Test asserts the parse's *observable absence*, not a chosen implementation. `agent/test_build.sh:341` Case E puts the sandbox under a newline-containing parent (`:332 awkward_parent`) and asserts output must not contain `FAILED open or read` / `improperly formatted` / `No such file or directory` (`:361-367`). Against unmodified `agent/build.sh:42` this failed 4 assertions, real output: `sha256sum: /tmp/tmp.sLZoRzBg5J/awk: No such file or directory` + `WARNING: 1 line is improperly formatted`, and the jar name never appears.\nEVIDENCE REQ-002: The idiom exists at `agent/test_build.sh:131` \u2014 `[ \"$(sha256sum &lt; \"$cand\" | cut -d' ' -f1)\" = \"$BB_SHA256\" ] || continue`. I did not assert that literal form; a hand-rolled compare, `--status`, or any hash-the-file-directly route satisfies Case E, so the test constrains behaviour rather than the snippet.\nEVIDENCE REQ-003: Confirmed on coreutils 9.10 by direct reproduction before writing the test (comment `agent/test_build.sh:305-320` records it). **Correction to the issue**: backslash does *not* reproduce \u2014 GNU unescapes only when the line starts with `\\`, so a test written to the issue's literal wording would pass pre-fix. Newline is the real trigger; severity stays Low (`$BB_JAR` is `$HERE/lib/...`, not attacker-controlled).\n\nCo",
+    "<task-notification>\n<task-id>a6a8123db12db750f</task-id>\n<tool-use-id>toolu_018AMsdvJMbck2ixTSb2aGFk</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/a6a8123db12db750f.output</output-file>\n<status>completed</status>\n<summary>Agent \"Builder green for issue 49\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>SLICE: green\nACTION-ID: 8fc38325310642b1b0173e291263dcac\nINVOCATION-ID: inv-003-d89b76dd\nEVIDENCE REQ-001: `agent/build.sh:49-52` now hashes the file directly \u2014 `if ! BB_ACTUAL=\"$(sha256sum &lt; \"$BB_JAR\" | cut -d' ' -f1)\" || [ -z \"$BB_ACTUAL\" ]` followed by a plain `[ \"$BB_ACTUAL\" != \"$BB_SHA256\" ]` compare at :57; the `echo \"$BB_SHA256  $BB_JAR\" | sha256sum -c -` pipeline is gone (`git diff --stat`: `agent/build.sh | 20 +++-`, 1 file changed). `test_a_path_the_checksum_line_format_cannot_parse_is_still_a_real_verification` went from `FAILED` (4 assertions, incl. `expected output NOT to contain [No such file or directory]`) to `PASS`.\nEVIDENCE REQ-002: the idiom matches `agent/test_build.sh:141` (`[ \"$(sha256sum &lt; \"$cand\" | cut -d' ' -f1)\" = \"$BB_SHA256\" ]`) \u2014 stdin redirect + `cut -d' ' -f1`, same as the new build.sh line; cited in the new comment at `agent/build.sh:44`.\nEVIDENCE REQ-003: severity/provenance is a filing note, not code, so nothing implements it; what I can evidence is that the confirmed parsing behaviour is real on this box \u2014 before the change the suite printed `sha256sum: /tmp/tmp.S2WAjLnnQl/awk: No such file or directory` / `FAILED open or read` / `WARNING: 1 line is improperly formatted` for a jar at a path containing a newline, i.e. a truncated path was checked and the jar never hashed, yet build.sh reported `removed the rejected jar`.\n\nSeam: `agent/build",
+    "Decided. factory_pending_decisions.py --decide --pending-decision-id pd-cf6e739ebf20 --outcome CONTINUE --owner Roger was run from the primary checkout. Run next and continue.",
+    "<task-notification>\n<task-id>af7deaed64641b3b4</task-id>\n<tool-use-id>toolu_012ZrCuig4XDNaeDkAUXcuZh</tool-use-id>\n<output-file>/tmp/claude-1000/-home-kogies--factory-worktrees-dreamconnect-build-integrity-2/c074718a-6042-435c-beda-b51357e884a8/tasks/af7deaed64641b3b4.output</output-file>\n<status>completed</status>\n<summary>Agent \"Seraph verification for issue 49\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>STATUS: pass\nACTION-ID: 571bfab0ffb34a4e98601a91cb816b29\nINVOCATION-ID: inv-004-bcf7561d\nEVIDENCE REQ-001: `agent/build.sh:49` is now `if ! BB_ACTUAL=\"$(sha256sum &lt; \"$BB_JAR\" | cut -d' ' -f1)\" || [ -z \"$BB_ACTUAL\" ]` with a plain `[ \"$BB_ACTUAL\" != \"$BB_SHA256\" ]` at :57; `git show 3060150 -- agent/build.sh` shows `-if ! echo \"$BB_SHA256  $BB_JAR\" | sha256sum -c -; then` removed. `grep -c 'sha256sum -c' agent/build.sh` \u2192 0. Red proven: same test file against pre-fix `build.sh` (`git show 3060150^:agent/build.sh`) \u2192 `7 assertion failure(s)`, EXIT=1, incl. `expected output NOT to contain [No such file or directory]`; post-fix `bash agent/test_build.sh` \u2192 all 7 PASS, EXIT=0.\nEVIDENCE REQ-002: `agent/test_build.sh:141` \u2014 `[ \"$(sha256sum &lt; \"$cand\" | cut -d' ' -f1)\" = \"$BB_SHA256\" ] || continue`. Line 141 lies outside every changed hunk (`git show 517ad7e -U0 | grep '^@@'` \u2192 90,111,117,301-417,455), so it is pre-existing, not written to justify the fix.\nEVIDENCE REQ-003: reproduced independently on `sha256sum (GNU coreutils) 9.10`: newline in path \u2192 `FAILED open or read` / `WARNING: 1 line is improperly formatted`, rc=1; mid-path backslash \u2192 `...back\\\\slash/f.jar: OK`, rc=0. So the issue's literal backslash trigger does **not** reproduce; the oracle's comment at `agent/test_build.sh:319-324` states exactly this and tests the newline instead. Severity/provenance is a filing ",
+    "/submit"
+  ],
+  "fence_decisions": {
+    "ask: This edits a version number.": 68,
+    "ask: This would publish a GitHub release, which ships to real devices.": 25,
+    "ask: This would publish a crate to a registry, which ships to real devices.": 28,
+    "ask: This posts to the release endpoint, which ships an update to real devices.": 25,
+    "block: recursive/forced delete": 204,
+    "block: editing the deployed factory directly": 175,
+    "block: writing to a file the harness owns": 25,
+    "block: touching a secret/credential file": 114,
+    "block: sending a secret/credential file to a network client": 750,
+    "block: sending ~/.claude.json to a network client": 50,
+    "block: force push (never rewrite published history)": 25,
+    "block: editing an existing migration": 24,
+    "block: malformed hook input": 672,
+    "block: unbounded read of a 600-line source file": 88,
+    "block: writing an owner approval from inside a factory worktree": 144,
+    "ask: recording an owner decision: This writes into the owner-decision channel, which is the pro": 170,
+    "block: writing an owner approval from a session with no recorded cwd": 24,
+    "block: running an owner-decision command from inside a factory worktree": 138,
+    "block: running an owner-decision command from a session with no recorded cwd": 24,
+    "block: hard reset discards work": 17,
+    "block: unbounded read of a 1326-line source file": 17,
+    "block: unbounded read of a 13294-line source file": 19,
+    "block: a model-tool write to Factory acceptance authority state": 391,
+    "block: The authoritative full gate is a control-plane operation and this process is not the contr": 123,
+    "block: a factory worker role executing the authoritative full gate": 172,
+    "block: the driver's state file could not be read (/tmp/tmp77mk362_/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpgd6jm67x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1tr3h209/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 511-line source file": 2,
+    "block: the driver's state file could not be read (/tmp/tmpy36rdrxx/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpbx0ktpg1/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe7e84qdj/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpybbtyg7x/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpsse8eplz/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1z4_a0v5/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpx_d702y0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpxxnc07yb/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpe35g42t6/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpwzts2bk0/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/binaryfacts/engine's c": 1,
+    "block: destructive SQL DDL": 1,
+    "block: the driver's state file could not be read (/tmp/tmpk8v8gm1d/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmp1zeajaia/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the root could not be established as controller-bound: /home/kogies/.factory/worktrees/ars": 30,
+    "block: the driver's state file could not be read (/tmp/tmpee5uzj_y/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 560-line source file": 1,
+    "block: the driver's state file could not be read (/tmp/tmpjtab0xx4/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: the driver's state file could not be read (/tmp/tmpoyzracjn/line/factory/IMPLEMENT-STATE.j": 1,
+    "block: unbounded read of a 1442-line source file": 2
+  },
+  "status": "done",
+  "note": "No breaker ran: risk tier 'normal' drew architect/oracle/builder/seraph only. Seraph pass. Targeted-test selection was owner-decided CONTINUE (pd-cf6e739ebf20, TEST_REGISTRY_ABSENT) \u2014 the full gate is this path's only coverage. Gate green, exit 0, but with 1 SKIP: test_a_correctly_hashed_cached_jar_still_builds needs a local byte-buddy-1.18.11.jar and had none in this worktree; the builder ran it with DC_BYTEBUDDY_JAR set and it passed there. The unhashable-jar case relies on chmod 000 and self-skips as root. No CI: .github/workflows is untracked, so the push triggers nothing. Issue #49 names a backslash trigger that does not reproduce on coreutils 9.10; the tests use a newline instead.",
+  "outcome": {
+    "bounces": "0",
+    "guard_tests": "0",
+    "laps": "0"
+  },
+  "model_verdicts": [],
+  "model_mismatches": []
+}

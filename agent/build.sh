@@ -36,10 +36,28 @@ if ! command -v sha256sum >/dev/null 2>&1; then
   exit 1
 fi
 
+# Hash the file directly instead of piping "<hash>  <path>" into `sha256sum -c`.
+# That line format is a parser: it reads the filename back out using coreutils'
+# own escaping rules, so a $BB_JAR holding a newline is split and the check runs
+# against a truncated name -- exit 1, identical to a real mismatch, and the jar
+# never hashed at all. Redirecting the file in means sha256sum is handed no path
+# to parse. (Same idiom agent/test_build.sh already uses for its fixture jar.)
+#
+# Failing to hash is not a mismatch: an unreadable file or an I/O error says
+# nothing about the bytes, so it lands where a missing sha256sum lands above --
+# fail closed, keep the jar, claim nothing about it.
+if ! BB_ACTUAL="$(sha256sum < "$BB_JAR" | cut -d' ' -f1)" || [ -z "$BB_ACTUAL" ]; then
+  echo "could not read $BB_JAR, cannot verify it" >&2
+  exit 1
+fi
+
 # On mismatch, drop the rejected jar as well as failing: the cache is keyed on
 # the file merely existing, so leaving a truncated or poisoned copy in lib/
 # would make every later run reject that same stale file forever.
-if ! echo "$BB_SHA256  $BB_JAR" | sha256sum -c -; then
+if [ "$BB_ACTUAL" != "$BB_SHA256" ]; then
+  echo "SHA-256 mismatch for $BB_JAR" >&2
+  echo "  expected $BB_SHA256" >&2
+  echo "  actual   $BB_ACTUAL" >&2
   rm -f "$BB_JAR"
   echo "removed the rejected jar; re-run to fetch it again" >&2
   exit 1
