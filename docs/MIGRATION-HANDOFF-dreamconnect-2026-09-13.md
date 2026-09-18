@@ -1,5 +1,12 @@
 # Migration handoff — DreamConnect — 2026-09-13
 
+> **Superseded 2026-09-18.** The Factory this handoff describes (the `factory_implement.py`
+> driver, its lines, checkpoints, seraph/breaker/oracle roles and `OWNER_DECISION` parking) was
+> retired when Factory-Lite became the Factory. The parked runs named below cannot be resumed;
+> the work they hold is on their branches. To continue any of it, run
+> `python3 ~/.claude/scripts/factory.py run --repo <this repo> --issue <n>` on a fresh ticket.
+> The old Factory is at tag `rollback/pre-vnext-original-factory` in the ars-aifactory repo.
+
 State: **DRAINED — SAFE TO MIGRATE**, with one gap noted at the end.
 
 This file is the handoff. It is committed to the repository on purpose: the target
