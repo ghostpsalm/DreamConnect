@@ -17,13 +17,12 @@
 # runs, so a check that only fires on the download path defends against nothing
 # the issue names: verification has to be unconditional.
 #
-# Where the expected hash comes from (independent of any implementation):
-#     https://repo1.maven.org/maven2/net/bytebuddy/byte-buddy/1.18.11/\
-#         byte-buddy-1.18.11.jar.sha256
-#     fetched 2026-08-01 -> e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435\
-#         cbdd180f6ffdb821
-#     Maven Central's own sidecar, byte for byte identical to `sha256sum` of the
-#     jar today's builds already link against.
+# Where the expected hash comes from (independent of any implementation): the
+# pin lives once, in agent/build.sh's own BYTEBUDDY_VERSION/BB_SHA256/BB_URL
+# constants -- Maven Central's own .sha256 sidecar, byte for byte identical to
+# `sha256sum` of the jar today's builds already link against -- and this suite
+# reads it live via agent/fixture-lib.sh (issue #46) rather than transcribing
+# a second copy that could drift from the one build.sh actually enforces.
 #
 # Safety rails:
 #   * every case runs against a copy of agent/ in a mktemp -d, so the real
@@ -32,16 +31,18 @@
 #     reach the network, and an implementation that tried to re-fetch instead of
 #     failing would be caught rather than silently going online in CI.
 #
-# Run:  bash agent/test_build.sh      (also wired into ./run-tests.sh)
+# Run:  bash agent/test_build.sh      (also wired into ./run-tests.sh, after
+#       agent/fetch-fixture.sh has warmed agent/lib/ -- see run-tests.sh)
 set -uo pipefail
 
 [ "$(id -u)" -eq 0 ] && { echo "refusing to run as root"; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"          # the real agent/ directory
 BUILD_SH="$HERE/build.sh"
-BB_VERSION="1.18.11"
+source "$HERE/fixture-lib.sh"
+BB_VERSION="$(bb_version "$BUILD_SH")" || exit 1
+BB_SHA256="$(bb_sha256 "$BUILD_SH")" || exit 1
 BB_JAR_NAME="byte-buddy-$BB_VERSION.jar"
-BB_SHA256="e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435cbdd180f6ffdb821"
 REAL_CACHE="$HERE/lib/$BB_JAR_NAME"
 NET_MARKER="NETWORK-BLOCKED-BY-TEST"
 
@@ -417,11 +418,17 @@ test_a_jar_that_cannot_be_hashed_is_not_reported_as_rejected() {
 
 # Case B -- the same check must not reject a jar that is what it claims to be.
 # Guards the degenerate 'fix' of always failing, and a mistyped pinned hash.
+#
+# This is the happy-path case issue #46 is about: on a clean checkout with no
+# pre-populated cache, an unmet fixture dependency must never be a silent
+# SKIP -- run-tests.sh warms this cache with agent/fetch-fixture.sh precisely
+# so this case always runs, and a build.sh that can never succeed has nowhere
+# left to hide.
 test_a_correctly_hashed_cached_jar_still_builds() {
   local sb src t
   src="$(fixture_jar)" || {
-    skip "no locally available byte-buddy-$BB_VERSION.jar matching the pinned hash" \
-         "(set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME, or build once to populate agent/lib/)"
+    fail "correctly hashed cached jar: no locally available byte-buddy-$BB_VERSION.jar matching the pinned hash" \
+         "(run agent/fetch-fixture.sh, or set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME)"
     return 0
   }
   for t in javac jar unzip; do

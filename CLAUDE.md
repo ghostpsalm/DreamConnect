@@ -68,6 +68,15 @@ drive `useradd`/`userdel` and `dconf` and a test that forgets a fixture override
 reach the real machine; and fixtures are overridden through `DC_*` environment variables
 (`DC_DRY_RUN`, `DC_RUNTIME_DIR_ROOT`, `DC_BUS_POLL_INTERVAL`, …) rather than by patching paths inline.
 
+**One narrow, documented exception to hermeticity** (#46): `agent/test_build.sh`'s happy-path case
+needs a real, correctly-hashed ByteBuddy jar, and `curl` is stubbed inside that suite to keep it
+hermetic. `run-tests.sh` runs `agent/fetch-fixture.sh` before that suite to fetch and pin-verify the
+jar into `agent/lib/` — the same cache `agent/build.sh` itself reads — once per box; a box that already
+has a verified copy makes no network call. This is the only place in the gate that touches the network,
+and it happens outside every test, never inside one. The pin (version, URL, SHA-256) is read live out
+of `agent/build.sh`'s own constants by `agent/fixture-lib.sh`, never restated, so a mistyped pin fails
+the fetch as loudly as it would fail a real build.
+
 ## Conventions
 
 **Commits**: `Area: imperative summary`, sentence case after the colon, issue number in parentheses

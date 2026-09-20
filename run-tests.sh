@@ -44,6 +44,22 @@ echo "== Installer shell tests =="
 bash "$HERE/test_install.sh"
 
 echo
+echo "== Agent fixture pin tests =="
+bash "$HERE/agent/test_fixture_lib.sh"
+
+echo
+echo "== Agent fixture fetch tests =="
+bash "$HERE/agent/test_fetch_fixture.sh"
+
+echo
+echo "== Agent fixture fetch (warm the cache) =="
+# The one sanctioned network access in this otherwise hermetic gate (see
+# CLAUDE.md's Seams section): fetches and pin-verifies the real ByteBuddy jar
+# into agent/lib/ once per box, so agent/test_build.sh's happy-path case below
+# always has a fixture to run against instead of silently skipping (#46).
+bash "$HERE/agent/fetch-fixture.sh" >/dev/null
+
+echo
 echo "== Agent build shell tests =="
 bash "$HERE/agent/test_build.sh"
 
