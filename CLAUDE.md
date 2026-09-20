@@ -47,6 +47,27 @@ that can disagree with the one that actually executes.
 
 **Green before committing.**
 
+**The suite is hermetic, with exactly one sanctioned exception (#46).** `run-tests.sh` calls
+`scripts/fetch-test-fixtures.sh` once per box, before the agent-build suite, to put a verified
+`byte-buddy-<version>.jar` in `${XDG_CACHE_HOME:-~/.cache}/dreamconnect/fixtures` and export its path
+as `DC_BYTEBUDDY_JAR`. Every later run is a cache hit with no network access; a box that cannot reach
+the network sets `DC_BYTEBUDDY_JAR` itself and the fetcher verifies that instead, and never deletes
+it. `DC_FIXTURE_CACHE_DIR` moves the cache, which is how the fetcher's own tests stay hermetic
+against a directory that is otherwise machine-wide. No test may reach the network —
+`agent/test_build.sh` keeps its `curl` stub, and the fetch lives in the runner where it is visible
+rather than inside a test helper.
+
+It exists because the only case proving `agent/build.sh` can *succeed* needs a real jar, `agent/lib/`
+is gitignored, and that case used to `SKIP` on every clean checkout — so a `build.sh` that never built
+anything still printed `ALL TESTS PASSED`. An unmet jar fixture is now a **failure**, never a skip.
+
+**The ByteBuddy pins live in exactly one place**: `BYTEBUDDY_VERSION`, `BB_SHA256` and `BB_URL` in
+`agent/build.sh`. `agent/fixture-lib.sh` reads them out of that file with `sed` (never sourcing it —
+sourcing a build runs the build). Do not transcribe a second copy anywhere, not even into a test or a
+comment: two constants can disagree, and a pinned hash that disagrees with the one real installs use
+is the exact failure #43 exists to catch. If the constant cannot be read, the fetcher fails loudly and
+never falls back.
+
 **There is no CI.** `.github/workflows/ci.yml` exists in the working tree but is **untracked and on no
 branch**, so GitHub has never run it and a push triggers nothing. The gate above is the only check
 that exists. Do not describe a push here as verified by CI; if the workflow is ever committed, correct
@@ -62,6 +83,7 @@ real system.
 | `install-lib.sh` | sourced by `test_install.sh` | Holds **definitions only**, so sourcing must stay free of side effects. `install.sh` itself cannot be unit-tested: it demands root and does top-level work before anything is callable. |
 | `runtime/*.py` | `runtime/test_*.py` | Command parsing and session logic, separated from D-Bus and PipeWire I/O |
 | `agent/boot/` | `agent/test/`, run by `BootTests` | Bootstrap classes compiled with `--add-exports java.desktop/...` |
+| `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
 
 Two rails in `test_install.sh` that must not be removed: it **refuses to run as root**, because slices
 drive `useradd`/`userdel` and `dconf` and a test that forgets a fixture override must not be able to
