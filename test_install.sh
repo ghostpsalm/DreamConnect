@@ -318,7 +318,8 @@ assert_refused() {  # label
 
 test_library_defines_the_state_and_removal_functions() {
   local fn
-  for fn in write_install_state read_install_state host_account_removable; do
+  for fn in write_install_state read_install_state host_account_removable \
+            sweep_stale_install_state_tmp; do
     declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
   done
 }
@@ -447,6 +448,115 @@ test_write_install_state_survives_a_write_killed_part_way_through() {
   read_install_state
   assert_eq "$HOST_ACCOUNT"    "dreamconnect-host" "interrupted write: HOST_ACCOUNT still recorded"
   assert_eq "$CREATED_ACCOUNT" "1"                 "interrupted write: CREATED_ACCOUNT still recorded"
+}
+
+# The other half of that interruption (#34): the writer dies between its mktemp
+# and its mv, so the temp file it staged is orphaned under a random suffix
+# nothing ever computes again. Same real SIGXFSZ kill as the test above — the
+# file has to be left by an actual interrupted writer, not planted by hand, or
+# this proves nothing about the window it claims to cover.
+test_an_interrupted_write_leaves_a_temp_file_that_the_next_write_clears() {
+  local state dir strays rc
+  local DC_STATE_FILE="$TMP/state-tmp-sweep/install.state"
+  state="$DC_STATE_FILE"
+  dir="$(dirname "$state")"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  rc="$(bash -c '
+    exec 2>/dev/null
+    ulimit -c 0; ulimit -f 0
+    . "$1"
+    ( DC_STATE_FILE="$2" write_install_state dreamconnect-host2 986 0 0 >/dev/null 2>&1 )
+    echo "$?"
+  ' _ "$LIB" "$state")"
+  [ "${rc:-0}" -gt 128 ] || fail "precondition: the writer was not killed mid-write (rc=$rc)"
+
+  # Counted rather than named: mktemp picked the suffix, so the test cannot know
+  # it, which is the whole reason nothing else in the installer can clean it up.
+  strays="$(find "$dir" -maxdepth 1 -name 'install.state.??????' | wc -l)"
+  assert_eq "$strays" "1" "precondition: the killed write orphaned its temp file"
+
+  write_install_state dreamconnect-host 987 1 1
+  strays="$(find "$dir" -maxdepth 1 -name 'install.state.??????' | wc -l)"
+  assert_eq "$strays" "0" "a later write_install_state clears the orphaned temp file"
+  assert_file_exists "$state" "the sweep leaves the real state file in place"
+}
+
+# The sweep in isolation, against hand-placed fixtures: exactly the mktemp shape
+# goes, and every sibling that is not that shape stays — install.lock above all,
+# which a concurrent run may be holding.
+test_sweep_stale_install_state_tmp_removes_only_mktemp_siblings() {
+  local dir keep
+  local DC_STATE_FILE="$TMP/state-sweep-only/install.state"
+  dir="$(dirname "$DC_STATE_FILE")"
+  write_state_fixture "$DC_STATE_FILE" dreamconnect-host 987 1 1
+  mkdir -p "$dir"
+  : > "$dir/install.state.AbC123"
+  : > "$dir/install.state.000000"
+  : > "$dir/install.lock"
+  : > "$dir/install.state.bak"      # too short for the six ?
+  : > "$dir/install.state.1234567"  # too long
+
+  sweep_stale_install_state_tmp
+
+  assert_file_absent "$dir/install.state.AbC123" "the sweep removes a stale mktemp sibling"
+  assert_file_absent "$dir/install.state.000000" "the sweep removes every stale mktemp sibling"
+  for keep in install.state install.lock install.state.bak install.state.1234567; do
+    assert_file_exists "$dir/$keep" "the sweep leaves $keep alone"
+  done
+  assert_eq "$(head -1 "$DC_STATE_FILE")" "HOST_ACCOUNT=dreamconnect-host" \
+    "the sweep does not touch the state file's contents"
+}
+
+# An empty directory, and one that does not exist at all (a fresh box, where
+# write_install_state sweeps before its own mkdir has ever run): the glob matches
+# nothing and stays literal with nullglob off, so without the per-entry `[ -e ]`
+# guard this would `rm -f` the pattern itself. Must be silent and exit 0.
+# The uninstall path's call site, which no behaviour test can reach: install.sh
+# demands root and does top-level work, so the only thing that can assert the
+# sweep is wired there is the file itself. This is the repository's standing
+# convention for exactly that case (`first_code_line`, see the wait_for_user_bus
+# tests below), and without it deleting the call at install.sh's uninstall
+# branch leaves this whole suite green — the helper keeps its own two tests and
+# the second place it has to run simply stops running.
+#
+# Ordering matters as much as presence. The sweep must sit AFTER the lock is
+# taken, because a sweep racing another run's `mktemp` would delete a temp file
+# that run is about to rename into place; and BEFORE `read_install_state`, so a
+# run refused by the lock has swept nothing (#32's own reasoning, one line up).
+test_uninstall_sweeps_stale_temp_files_under_the_lock_before_reading_state() {
+  local sh lock sweep read_state
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  lock="$(first_code_line "$sh" 'acquire_install_lock "uninstall"')"
+  [ -n "$lock" ] || { fail "uninstall sweep: no acquire_install_lock \"uninstall\" line in install.sh"; return 0; }
+  sweep="$(first_code_line "$sh" '(^|[^[:alnum:]_])sweep_stale_install_state_tmp' "$lock")"
+  [ -n "$sweep" ] || {
+    fail "uninstall sweep: install.sh never calls sweep_stale_install_state_tmp on the uninstall path — a temp file orphaned by an interrupted write is swept on the install path only, and issue #34 is half fixed"
+    return 0; }
+  read_state="$(first_code_line "$sh" '(^|[^[:alnum:]_])read_install_state' "$lock")"
+  [ -n "$read_state" ] || { fail "uninstall sweep: no read_install_state after the lock"; return 0; }
+
+  [ "$lock" -lt "$sweep" ] || \
+    fail "uninstall sweep: the sweep (line $sweep) must come AFTER the lock (line $lock) — sweeping unlocked can delete a temp file another run is about to rename into place"
+  [ "$sweep" -lt "$read_state" ] || \
+    fail "uninstall sweep: the sweep (line $sweep) must come BEFORE read_install_state (line $read_state)"
+}
+
+test_sweep_stale_install_state_tmp_is_quiet_when_there_is_nothing_to_sweep() {
+  local out rc
+  out="$(DC_STATE_FILE="$TMP/state-sweep-missing/install.state" \
+         sweep_stale_install_state_tmp 2>&1)"; rc=$?
+  assert_eq "$rc" "0"  "sweeping a missing directory exits 0"
+  assert_eq "$out" ""  "sweeping a missing directory says nothing"
+
+  mkdir -p "$TMP/state-sweep-empty"
+  out="$(DC_STATE_FILE="$TMP/state-sweep-empty/install.state" \
+         sweep_stale_install_state_tmp 2>&1)"; rc=$?
+  assert_eq "$rc" "0"  "sweeping an empty directory exits 0"
+  assert_eq "$out" ""  "sweeping an empty directory says nothing"
 }
 
 test_install_state_round_trips_all_four_values() {
@@ -10494,6 +10604,10 @@ for CURRENT in \
   test_write_install_state_overwrites_rather_than_appends \
   test_write_install_state_never_downgrades_created_account_for_the_same_account \
   test_write_install_state_survives_a_write_killed_part_way_through \
+  test_an_interrupted_write_leaves_a_temp_file_that_the_next_write_clears \
+  test_sweep_stale_install_state_tmp_removes_only_mktemp_siblings \
+  test_sweep_stale_install_state_tmp_is_quiet_when_there_is_nothing_to_sweep \
+  test_uninstall_sweeps_stale_temp_files_under_the_lock_before_reading_state \
   test_install_state_round_trips_all_four_values \
   test_read_install_state_resets_to_safe_defaults_when_absent \
   test_read_install_state_trims_whitespace_around_keys_and_values \

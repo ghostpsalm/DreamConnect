@@ -95,6 +95,12 @@ uninstall() {
   # install.state disappears.
   acquire_install_lock "uninstall" \
     || die "another dreamconnect install or uninstall is running; wait for it to finish and re-run (nothing was removed)"
+  # The other place install.state is legitimately mutated, so the other place a
+  # temp file orphaned by an interrupted write can be cleared (#34). Under the
+  # lock, and unconditional rather than gated on HOST_ACCOUNT: a stray sibling
+  # can predate this run's mode, and the uninstall below only ever `rm -f`s the
+  # literal install.state path.
+  sweep_stale_install_state_tmp
   # Safe defaults when there is no state file — i.e. DREAMCONNECT_HOST_ACCOUNT
   # was never used, and everything below reverts the desktop user's install.
   read_install_state
