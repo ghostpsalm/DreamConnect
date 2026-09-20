@@ -14,6 +14,22 @@ run() {
   if [ "${DC_DRY_RUN:-}" = "1" ]; then echo "DRY: $*"; else "$@"; fi
 }
 
+# Run a command, capturing its combined stdout+stderr. On success, stay as
+# quiet as a plain `"$@" >/dev/null` would be. On failure, print everything
+# that was captured to stderr before returning 1, so a stage marker or an
+# error detail that only ever went to stdout (sha256sum -c's "<path>: FAILED"
+# line, for one) isn't lost the way it is when a caller redirects stdout away
+# unconditionally (#47).
+run_logged() {  # cmd...
+  local out rc
+  out="$("$@" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "$out" >&2
+    return 1
+  fi
+  return 0
+}
+
 # --- detect the desktop user + uid ------------------------------------------
 detect_user() {
   if [ -n "${DREAMCONNECT_USER:-}" ]; then echo "$DREAMCONNECT_USER"; return; fi

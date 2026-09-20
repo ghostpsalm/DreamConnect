@@ -85,7 +85,7 @@ test_sourcing_is_side_effect_free() {
 # after sourcing; these are the units slices 2-7 test against tmp fixtures.
 test_library_defines_the_installer_functions() {
   local fn
-  for fn in die detect_user detect_pm pm_install detect_monitor run; do
+  for fn in die detect_user detect_pm pm_install detect_monitor run run_logged; do
     declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
   done
 }
@@ -108,6 +108,27 @@ test_run_suppresses_execution_when_dry() {
   assert_contains "$out" "DRY:" "run with DC_DRY_RUN=1 announces the dry run"
   assert_contains "$out" "touch" "dry-run output names the command"
   assert_contains "$out" "$f" "dry-run output names the arguments"
+}
+
+# issue #47: a successful command's captured output must never surface.
+test_run_logged_is_silent_on_success() {
+  local out rc
+  out="$(run_logged bash -c 'echo to-stdout; echo to-stderr >&2' 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "run_logged returns 0 when the command succeeds"
+  assert_eq "$out" "" "run_logged prints nothing on success"
+}
+
+# issue #47: install.sh discarding build.sh's stdout lost sha256sum -c's
+# "<path>: FAILED" line — the one naming the rejected file — because that line
+# goes to stdout, not stderr. run_logged must not lose it either.
+test_run_logged_prints_captured_output_to_stderr_on_failure() {
+  local out err rc
+  out="$(run_logged bash -c 'echo stdout-detail: byte-buddy.jar FAILED; exit 1' 2>/dev/null)"; rc=$?
+  err="$(run_logged bash -c 'echo stdout-detail: byte-buddy.jar FAILED; exit 1' 2>&1 1>/dev/null)"
+  assert_eq "$rc" "1" "run_logged returns 1 when the command fails"
+  assert_eq "$out" "" "run_logged's own stdout stays empty on failure"
+  assert_contains "$err" "stdout-detail: byte-buddy.jar FAILED" \
+    "run_logged surfaces the failing command's stdout-only detail on stderr"
 }
 
 # --- slice 2: resolve_host_identity ------------------------------------------
@@ -10485,6 +10506,8 @@ for CURRENT in \
   test_library_defines_the_installer_functions \
   test_run_executes_the_command_by_default \
   test_run_suppresses_execution_when_dry \
+  test_run_logged_is_silent_on_success \
+  test_run_logged_prints_captured_output_to_stderr_on_failure \
   test_resolve_host_identity_defaults_to_fallback_user \
   test_resolve_host_identity_prefers_the_named_account \
   test_resolve_host_identity_socket_is_run_user_uid_dreamconnect_sock \
