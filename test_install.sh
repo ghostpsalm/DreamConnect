@@ -657,6 +657,177 @@ test_host_account_removable_refuses_a_wrong_gecos_marker() {
   done
 }
 
+# --- issue #32: the one-host-account lock ------------------------------------
+#
+# acquire_install_lock/release_install_lock serialise install.sh's whole
+# guard-check-through-write-state span (host_account_installable's read
+# through write_install_state's write, with ensure_host_account's useradd
+# inside it) so two concurrent runs cannot both pass the one-host-account guard
+# and both create an account. All of these skip with a note, rather than fail,
+# on a box with no flock — that coverage genuinely was not exercised there.
+
+test_library_defines_the_install_lock_functions() {
+  local fn
+  for fn in install_lock_file acquire_install_lock release_install_lock; do
+    declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
+  done
+}
+
+test_install_lock_file_defaults_and_honours_override() {
+  local out
+  out="$(unset DC_LOCK_FILE; install_lock_file)"
+  assert_eq "$out" "/etc/dreamconnect/install.lock" "install_lock_file defaults under /etc/dreamconnect"
+  out="$(DC_LOCK_FILE="$TMP/custom.lock" install_lock_file)"
+  assert_eq "$out" "$TMP/custom.lock" "install_lock_file honours DC_LOCK_FILE"
+}
+
+# (a) acquire_install_lock takes a REAL kernel flock, not merely a variable this
+# process set for itself: an independent `flock -n` probe against the same path
+# must see it held for as long as the acquiring subshell is alive.
+test_acquire_install_lock_holds_a_real_flock() {
+  local DC_LOCK_FILE rc
+  command -v flock >/dev/null 2>&1 || {
+    echo "  SKIP: flock not on PATH — this coverage was not exercised"
+    SKIPPED=$((SKIPPED + 1)); return 0; }
+  DC_LOCK_FILE="$TMP/lock-basic/install.lock"
+  (
+    acquire_install_lock || exit 1
+    flock -n "$DC_LOCK_FILE" true && exit 2
+    exit 0
+  )
+  rc=$?
+  assert_eq "$rc" "0" "acquire_install_lock holds a real, externally-visible flock"
+  assert_file_exists "$DC_LOCK_FILE" "acquire_install_lock creates the lock file"
+}
+
+# (b) Contention: a second acquirer must refuse immediately (non-blocking),
+# name the lock path on stderr, and return non-zero — never block waiting.
+test_acquire_install_lock_refuses_immediately_on_contention() {
+  local lock out rc start end
+  command -v flock >/dev/null 2>&1 || {
+    echo "  SKIP: flock not on PATH — this coverage was not exercised"
+    SKIPPED=$((SKIPPED + 1)); return 0; }
+  lock="$TMP/lock-contended/install.lock"
+  mkdir -p "$(dirname "$lock")"
+  exec 8>"$lock"
+  if ! flock -n 8; then
+    fail "precondition: could not take the lock this test needs held"
+    exec 8>&-; return 0
+  fi
+
+  start="$(date +%s%3N)"
+  out="$(DC_LOCK_FILE="$lock" bash -c '. "$1"; acquire_install_lock' _ "$LIB" 2>&1)"
+  rc=$?
+  end="$(date +%s%3N)"
+
+  exec 8>&-
+  rm -f "$lock"
+
+  assert_eq "$rc" "1" "acquire_install_lock returns non-zero when the lock is already held"
+  assert_contains "$out" "$lock" "the refusal names the contended lock path"
+  [ "$((end - start))" -le 2000 ] \
+    || fail "acquire_install_lock took $((end - start))ms against a held lock — it blocked instead of failing fast"
+}
+
+# (c) release_install_lock frees the lock for a later acquirer.
+test_release_install_lock_frees_the_lock_for_a_later_acquire() {
+  local lock out rc
+  command -v flock >/dev/null 2>&1 || {
+    echo "  SKIP: flock not on PATH — this coverage was not exercised"
+    SKIPPED=$((SKIPPED + 1)); return 0; }
+  lock="$TMP/lock-release/install.lock"
+  out="$(DC_LOCK_FILE="$lock" bash -c '
+    . "$1"
+    acquire_install_lock || exit 1
+    release_install_lock
+    flock -n "$2" true || exit 1
+  ' _ "$LIB" "$lock" 2>&1)"
+  rc=$?
+  assert_eq "$rc" "0" "release_install_lock frees the lock for a later acquire (output: $out)"
+}
+
+# (d) No flock on PATH: refuse cleanly, name flock as the missing dependency,
+# and create no lock file — rather than silently proceeding unlocked.
+test_acquire_install_lock_refuses_cleanly_without_flock() {
+  local lock rc out
+  lock="$TMP/lock-noflock/install.lock"
+  mkdir -p "$TMP/no-flock-path"
+  out="$( ( DC_LOCK_FILE="$lock"; PATH="$TMP/no-flock-path"; acquire_install_lock ) 2>&1 )"
+  rc=$?
+  assert_eq "$rc" "1" "acquire_install_lock refuses when flock is not on PATH"
+  assert_contains "$out" "flock" "the refusal names flock as the missing dependency"
+  assert_file_absent "$lock" "no lock file is created when flock is unavailable"
+}
+
+# --- issue #32: the install-path call site ------------------------------------
+# Static, not behavioural — install.sh cannot be executed here (root). Proves
+# the SPAN is wired the way the owner's decision requires: locked before the
+# guard, released only after the state write, and ensure_host_account's
+# useradd inside that span rather than outside it.
+test_install_sh_holds_the_lock_across_the_one_host_account_span() {
+  local sh guard acquired created write_start released stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  guard="$(first_code_line "$sh" '(^|[^[:alnum:]_])host_account_installable')"
+  [ -n "$guard" ] || { fail "lock span: install.sh never calls host_account_installable"; return 0; }
+
+  acquired="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock')"
+  [ -n "$acquired" ] || {
+    fail "lock span: install.sh never calls acquire_install_lock — issue #32's race is unguarded"
+    return 0; }
+  [ "$acquired" -lt "$guard" ] || \
+    fail "lock span: acquire_install_lock (line $acquired) must run BEFORE host_account_installable (line $guard), or a concurrent run can still pass the guard first"
+
+  stmt="$(logical_statement_at "$sh" "$acquired")"
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || \
+    fail "lock span: install.sh:$acquired must handle a failed acquire_install_lock with '|| die <message>', not swallow it. Statement was: [$stmt]"
+
+  created="$(first_code_line "$sh" '(^|[^[:alnum:]_])ensure_host_account' "$guard")"
+  [ -n "$created" ] || { fail "lock span: install.sh never calls ensure_host_account after the guard"; return 0; }
+
+  write_start="$(first_code_line "$sh" '(^|[^[:alnum:]_])write_install_state' "$guard")"
+  [ -n "$write_start" ] || { fail "lock span: install.sh never calls write_install_state after the guard"; return 0; }
+
+  released="$(first_code_line "$sh" '(^|[^[:alnum:]_])release_install_lock' "$write_start")"
+  [ -n "$released" ] || {
+    fail "lock span: install.sh never calls release_install_lock after write_install_state (line $write_start) — the lock would be held for the rest of the install"
+    return 0; }
+
+  [ "$acquired" -lt "$created" ] && [ "$created" -lt "$released" ] || \
+    fail "lock span: ensure_host_account (line $created) must fall between acquire_install_lock (line $acquired) and release_install_lock (line $released) — that useradd is exactly what a narrower lock would leave two runs racing over"
+}
+
+# --- issue #32: the uninstall-path call site ----------------------------------
+test_uninstall_acquires_the_lock_before_reading_install_state() {
+  local sh ustart uend reads acquired stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall lock: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "uninstall lock: could not find the end of uninstall() in install.sh"; return 0; }
+
+  reads="$(first_code_line "$sh" '(^|[^[:alnum:]_])read_install_state' "$ustart")"
+  [ -n "$reads" ] || { fail "uninstall lock: uninstall() never calls read_install_state"; return 0; }
+  [ "$reads" -lt "$uend" ] || { fail "uninstall lock: the read_install_state call is outside uninstall()"; return 0; }
+
+  acquired="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock' "$ustart")"
+  [ -n "$acquired" ] || {
+    fail "uninstall lock: uninstall() never calls acquire_install_lock — issue #32's read-to-write race in uninstall() is unguarded"
+    return 0; }
+  [ "$acquired" -lt "$uend" ] || { fail "uninstall lock: the acquire_install_lock call is outside uninstall()"; return 0; }
+  [ "$acquired" -lt "$reads" ] || \
+    fail "uninstall lock: acquire_install_lock (line $acquired) must run BEFORE read_install_state (line $reads), or a concurrent run can read state before this one has locked it"
+
+  stmt="$(logical_statement_at "$sh" "$acquired")"
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || \
+    fail "uninstall lock: install.sh:$acquired must handle a failed acquire_install_lock with '|| die <message>'. Statement was: [$stmt]"
+}
+
 # --- slice 4: ensure_host_account --------------------------------------------
 #
 # Issue #18, slice 2 of the CODE list: "ensure_host_account: create-if-absent +
@@ -10222,6 +10393,14 @@ for CURRENT in \
   test_host_account_removable_refuses_when_state_file_is_absent \
   test_host_account_removable_refuses_when_state_names_another_account \
   test_host_account_removable_refuses_a_wrong_gecos_marker \
+  test_library_defines_the_install_lock_functions \
+  test_install_lock_file_defaults_and_honours_override \
+  test_acquire_install_lock_holds_a_real_flock \
+  test_acquire_install_lock_refuses_immediately_on_contention \
+  test_release_install_lock_frees_the_lock_for_a_later_acquire \
+  test_acquire_install_lock_refuses_cleanly_without_flock \
+  test_install_sh_holds_the_lock_across_the_one_host_account_span \
+  test_uninstall_acquires_the_lock_before_reading_install_state \
   test_library_defines_ensure_host_account \
   test_ensure_host_account_creates_a_system_account_with_the_marker \
   test_ensure_host_account_grants_no_supplementary_groups \

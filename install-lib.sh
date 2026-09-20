@@ -462,6 +462,71 @@ host_account_installable() {  # requested_or_empty
   echo "$requested"
 }
 
+# --- the one-host-account lock (issue #32) -----------------------------------
+# There was no lock between host_account_installable's READ of install.state
+# and write_install_state's WRITE of it, so two concurrent install.sh runs
+# naming different accounts could both read "nothing recorded", both pass the
+# guard above, both create their own account, and race write_install_state for
+# the single slot -- stranding the loser's account exactly as the guard exists
+# to prevent, just via a race instead of a sequential re-run.
+#
+# DC_LOCK_FILE, if set, replaces the real path, so the tests can drive this
+# without root and without ever touching /etc.
+install_lock_file() { echo "${DC_LOCK_FILE:-/etc/dreamconnect/install.lock}"; }
+
+# Acquire the lock, non-blocking, for the rest of THIS PROCESS's life: opened
+# via `exec {VAR}>file`, bash's auto-fd form, which -- like ACCOUNT_WAS_CREATED
+# and HOST_ACCOUNT elsewhere in this file -- is set in the CALLER's scope, so
+# the fd (and the flock held on it) survives back out of this function instead
+# of closing the moment it returns.
+#
+# The span this is meant to guard is deliberately WIDE: install.sh's whole
+# one-host-account guard-check-through-write-state sequence, WITH
+# ensure_host_account's useradd inside it. Narrowing this to just
+# install.state's own read and write would still let two concurrent runs both
+# pass host_account_installable and both reach useradd before either called
+# write_install_state -- serialising who wins the slot while doing nothing
+# about the actual race this issue is about, which is two runs each CREATING an
+# account. The longer hold is the point; do not narrow it back down for
+# tidiness.
+#
+# Non-blocking and fail-fast, not queued (owner decision, issue #32):
+# install.sh already requires root, so a second concurrent run is a mistake to
+# refuse, not a queue to wait on -- blocking here would hang a root session
+# with no output and no way to tell a slow lock from a wedged one.
+acquire_install_lock() {
+  local lock dir
+  command -v flock >/dev/null 2>&1 || {
+    echo "error: refusing to proceed: flock (util-linux) is required to serialise against a concurrent install.sh and is not on PATH" >&2
+    return 1; }
+  lock="$(install_lock_file)"
+  dir="$(dirname "$lock")"
+  mkdir -p "$dir" || {
+    echo "error: refusing to proceed: could not create $dir for the install lock" >&2
+    return 1; }
+  # shellcheck disable=SC2261  # the {VAR} auto-fd form is exactly what is wanted here
+  exec {INSTALL_LOCK_FD}>"$lock" || {
+    echo "error: refusing to proceed: could not open the install lock file $lock" >&2
+    return 1; }
+  if ! flock -n "$INSTALL_LOCK_FD"; then
+    exec {INSTALL_LOCK_FD}>&-
+    unset INSTALL_LOCK_FD
+    echo "error: another install.sh is already running (could not acquire the lock at $lock); refusing to run concurrently" >&2
+    return 1
+  fi
+}
+
+# The install path's explicit release, called once write_install_state is done
+# so the lock does not also serialise the slower, unrelated dependency/build
+# work that follows. A no-op if the lock was never acquired. uninstall() never
+# calls this -- see its own call site for why that is deliberate.
+release_install_lock() {
+  [ -n "${INSTALL_LOCK_FD:-}" ] || return 0
+  flock -u "$INSTALL_LOCK_FD" 2>/dev/null || true
+  exec {INSTALL_LOCK_FD}>&-
+  unset INSTALL_LOCK_FD
+}
+
 # --- the display-host account -----------------------------------------------
 # Create the account when it is absent, and assert the greeter-hiding marker
 # either way. An account that already exists is left alone — no useradd, no

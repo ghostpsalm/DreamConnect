@@ -82,6 +82,19 @@ SC_UNIT="$(systemctl list-unit-files --no-legend 'connectwisecontrol-*.service' 
 
 uninstall() {
   echo ">> uninstalling"
+  # Locked for the rest of this function's life (issue #32): install.state is
+  # read immediately below and not written/deleted until near the end, and a
+  # concurrent install racing the same slot must not read or act on state this
+  # function is still in the middle of unwinding.
+  #
+  # No matching release_install_lock: every path out of uninstall() is `die`
+  # (exit 1) or the `exit 0` this function itself ends on, so process exit is
+  # what releases the flock. If a `return` is ever added to this function
+  # instead of an exit, add release_install_lock on that path too — an fd held
+  # open past the account it was meant to guard is the same shape of bug #30
+  # already had to fix once for install.state itself.
+  acquire_install_lock \
+    || die "another install.sh appears to be running; refusing to uninstall concurrently"
   # Safe defaults when there is no state file — i.e. DREAMCONNECT_HOST_ACCOUNT
   # was never used, and everything below reverts the desktop user's install.
   read_install_state
@@ -337,6 +350,14 @@ fi
 # naming none at all continues under the recorded one. Asked here, before
 # ensure_host_account can create anything and long before write_install_state
 # overwrites the single slot — and the answer is what the rest of the run uses.
+#
+# Locked from here through write_install_state below (issue #32): otherwise two
+# concurrent runs could both read "nothing recorded" here, both pass
+# ensure_host_account's useradd, and race write_install_state for the single
+# slot — stranding the loser's account. See acquire_install_lock's own comment
+# for why the span has to include the useradd and not just this read/write.
+acquire_install_lock \
+  || die "another install.sh appears to be running; refusing to install concurrently"
 DREAMCONNECT_HOST_ACCOUNT="$(host_account_installable "${DREAMCONNECT_HOST_ACCOUNT:-}")" \
   || die "this box already has a display-host account installed; run $0 --uninstall first
    (if install.state itself records an invalid or reserved account name, --uninstall
@@ -379,6 +400,11 @@ RUN_USER=(sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   write_install_state "$USER_NAME" "$USER_UID" "$HOST_WAS_CREATED"
 fi
+# Released here, not held through the dependency install/build/deploy below:
+# the race acquire_install_lock guards against is two runs racing useradd and
+# write_install_state for the one slot, not the slower work after the account
+# is already settled.
+release_install_lock
 
 echo ">> desktop user : $USER_NAME (uid $USER_UID)"
 echo ">> SC unit      : ${SC_UNIT:-<none found>}"
