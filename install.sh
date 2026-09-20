@@ -82,6 +82,19 @@ SC_UNIT="$(systemctl list-unit-files --no-legend 'connectwisecontrol-*.service' 
 
 uninstall() {
   echo ">> uninstalling"
+  # The same lock the install path takes, and the first thing this function does
+  # (#32). This is that race from the other side, and its window is the wider of
+  # the two: the read below and the state delete at the end of this function are
+  # ~150 lines apart, with the whole account removal in between. Locking only the
+  # install path would leave the race reachable from here — a concurrent install
+  # could record an account while this run is deleting the record of another.
+  #
+  # Before read_install_state on purpose: a run refused here has read nothing,
+  # removed nothing and deleted nothing, so the state-preserved branch at the
+  # bottom (#30) is reached exactly as before — the lock can never be the reason
+  # install.state disappears.
+  acquire_install_lock "uninstall" \
+    || die "another dreamconnect install or uninstall is running; wait for it to finish and re-run (nothing was removed)"
   # Safe defaults when there is no state file — i.e. DREAMCONNECT_HOST_ACCOUNT
   # was never used, and everything below reverts the desktop user's install.
   read_install_state
@@ -253,6 +266,12 @@ uninstall() {
       echo "!! state preserved at $(install_state_file) so a future --uninstall can retry account removal"
     fi
   fi
+  # End of the critical section: both exits from the branch above have settled
+  # install.state — deleted, or deliberately kept for a retry — so there is
+  # nothing left for a concurrent run to interleave with. Explicit rather than
+  # left to the `exit 0` below, so the release stays visible next to what it
+  # guards if this function ever grows a second exit.
+  release_install_lock
 
   echo ">> removed service wiring + probe wrappers (left $INSTALL_DIR in place)"
   exit 0
@@ -331,6 +350,25 @@ esac
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ] && ! valid_account_name "$DREAMCONNECT_HOST_ACCOUNT"; then
   die "DREAMCONNECT_HOST_ACCOUNT=$DREAMCONNECT_HOST_ACCOUNT is not a valid account name (must start with a letter or underscore, contain only letters/digits/underscore/hyphen, and be at most 32 characters)"
 fi
+# --- serialise the whole account decision -----------------------------------
+# From here down to write_install_state is ONE critical section, held against any
+# other install.sh or --uninstall on this box (#32). Everything inside it is a
+# step in deciding, and then recording, which display-host account this box has:
+# the guard reads install.state, ensure_host_account runs useradd, and
+# write_install_state takes the single slot.
+#
+# The span deliberately covers the useradd. A lock around only the state read and
+# the state write would serialise the slot and still let both runs create an
+# account — the last writer records its own, and the loser's account is left on
+# the box with nothing naming it, which is the same unrecoverable shape as a
+# deleted install.state (#30): no later --uninstall can find it to remove it.
+# Narrowing this for tidiness re-opens the very race it closes.
+#
+# `|| die` and no waiting: a concurrent install is an operator mistake, not a
+# queue, and the refusal has to come before anything is created. acquire_install_lock
+# names the conflict itself; this adds the abort.
+acquire_install_lock "install" \
+  || die "another dreamconnect install or uninstall is running; wait for it to finish and re-run (nothing was changed)"
 # One display-host account per box: a re-run naming a different account than
 # install.state records is refused (its predecessor's dconf profile, linger and
 # AccountsService marker would become unreachable by --uninstall), and a re-run
@@ -379,6 +417,12 @@ RUN_USER=(sudo -u "$USER_NAME" env "XDG_RUNTIME_DIR=/run/user/$USER_UID" \
 if [ -n "${DREAMCONNECT_HOST_ACCOUNT:-}" ]; then
   write_install_state "$USER_NAME" "$USER_UID" "$HOST_WAS_CREATED"
 fi
+# End of the critical section opened above: the slot is read, the account exists
+# and the record names it, so a second run can now take its turn and be refused
+# by host_account_installable rather than by the lock. Everything below (deps,
+# build, deploy, units) touches no account and no state file, and holding the
+# lock across the package manager would make a slow install look like a hung one.
+release_install_lock
 
 echo ">> desktop user : $USER_NAME (uid $USER_UID)"
 echo ">> SC unit      : ${SC_UNIT:-<none found>}"
