@@ -56,6 +56,54 @@ pm_install() {  # best-effort; non-zero on failure
   esac
 }
 
+# --- building the agent ------------------------------------------------------
+# install.sh used to run `bash agent/build.sh >/dev/null`: every progress line
+# the build printed was thrown away, so a #43 ByteBuddy hash mismatch, a javac
+# error or a failed unzip surfaced as bare stderr fragments with no statement
+# that the AGENT BUILD is what failed and no phase context (#47).
+#
+# Combined stdout+stderr goes to a temp log rather than streaming: a good build
+# stays quiet (streaming would add ~10 lines of noise to every install that
+# works), and the full output survives on disk past the terminal's scrollback
+# for whoever debugs a failure later. Redirected straight to the file, never
+# `| tee`: a pipeline's status is its last command's, so `$?` after a `tee`
+# would be tee's exit code, not the build's.
+build_agent() {  # build-script-path -> the build's own exit status
+  local script="$1" log rc=0
+
+  echo ">> building agent"
+
+  # mktemp honours TMPDIR and creates the file mode 0600 on its own; no flags
+  # needed for either. An unwritable TMPDIR is the one way it can fail — losing
+  # the log then is better than losing the diagnostics entirely, so the build
+  # still runs, just with its output going straight to the terminal.
+  log="$(mktemp 2>/dev/null)" || {
+    echo "!! could not create a log file for the agent build; output follows unredirected" >&2
+    bash "$script"
+    return $?
+  }
+
+  bash "$script" >"$log" 2>&1 || rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    rm -f "$log"
+    return 0
+  fi
+
+  # The log survives a failure: it names its own path so whoever hits this can
+  # go read the whole thing, not just the tail.
+  local total
+  total="$(wc -l < "$log")"
+  echo "error: agent build failed (exit $rc); full log at $log" >&2
+  if [ "$total" -gt 40 ]; then
+    echo "  (last 40 of $total lines)" >&2
+    tail -n 40 "$log" >&2
+  else
+    cat "$log" >&2
+  fi
+  return "$rc"
+}
+
 # --- host identity ----------------------------------------------------------
 # Is this a bare account name, and nothing else? A pure predicate: no output, no
 # filesystem, no passwd lookup. A whitelist on purpose — a blacklist of "/" and

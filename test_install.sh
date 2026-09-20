@@ -85,7 +85,7 @@ test_sourcing_is_side_effect_free() {
 # after sourcing; these are the units slices 2-7 test against tmp fixtures.
 test_library_defines_the_installer_functions() {
   local fn
-  for fn in die detect_user detect_pm pm_install detect_monitor run; do
+  for fn in die detect_user detect_pm pm_install build_agent detect_monitor run; do
     declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
   done
 }
@@ -108,6 +108,119 @@ test_run_suppresses_execution_when_dry() {
   assert_contains "$out" "DRY:" "run with DC_DRY_RUN=1 announces the dry run"
   assert_contains "$out" "touch" "dry-run output names the command"
   assert_contains "$out" "$f" "dry-run output names the arguments"
+}
+
+# --- build_agent (issue #47) --------------------------------------------------
+#
+# install.sh used to run `bash agent/build.sh >/dev/null`, so a failed build
+# (the #43 ByteBuddy hash check, a javac error, a failed unzip) surfaced only as
+# bare stderr fragments with no statement that the agent build is what failed.
+# build_agent's contract: silent on success, and on failure the combined
+# stdout+stderr (tailed at 40 lines) plus the exit code and the log's path, on
+# stderr, with the log itself left on disk. The build script is the seam, so
+# every case below is a fake script with known output rather than the real
+# agent/build.sh.
+
+make_fake_build() {  # name body -> writes $TMP/<name>, executable
+  local f="$TMP/$1"
+  cat > "$f" <<EOF
+#!/usr/bin/env bash
+$2
+EOF
+  chmod +x "$f"
+  echo "$f"
+}
+
+test_build_agent_is_silent_on_success() {
+  local script out err rc
+  script="$(make_fake_build fake-build-ok.sh 'echo "building..."; echo "warn" >&2; exit 0')"
+  out="$(bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" 2>"$TMP/build-ok.err")"; rc=$?
+  err="$(cat "$TMP/build-ok.err")"
+  assert_eq "$rc" "0" "build_agent success: returns 0"
+  assert_eq "$out" ">> building agent" "build_agent success: stdout is only the phase line"
+  assert_eq "$err" "" "build_agent success: nothing on stderr"
+}
+
+test_build_agent_prints_output_and_exit_code_on_failure() {
+  local script err rc logdir
+  logdir="$TMP/build-log-fail"; mkdir -p "$logdir"
+  script="$(make_fake_build fake-build-fail.sh 'echo "out line"; echo "err line" >&2; exit 3')"
+  TMPDIR="$logdir" bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" \
+    >/dev/null 2>"$TMP/build-fail.err"; rc=$?
+  err="$(cat "$TMP/build-fail.err")"
+  assert_eq "$rc" "3" "build_agent failure: returns the build's own exit code, not 1"
+  assert_contains "$err" "exit 3" "build_agent failure: names the exit code"
+  assert_contains "$err" "out line" "build_agent failure: the build's stdout is shown"
+  assert_contains "$err" "err line" "build_agent failure: the build's stderr is shown"
+}
+
+test_build_agent_names_and_keeps_the_log_on_failure() {
+  local script err rc logdir log
+  logdir="$TMP/build-log-keep"; mkdir -p "$logdir"
+  script="$(make_fake_build fake-build-fail2.sh 'echo "doomed"; exit 1')"
+  TMPDIR="$logdir" bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" \
+    >/dev/null 2>"$TMP/build-fail2.err"; rc=$?
+  err="$(cat "$TMP/build-fail2.err")"
+  [ "$rc" -ne 0 ] || fail "build_agent failure: expected a non-zero return"
+  log="$(find "$logdir" -mindepth 1 -maxdepth 1 | head -n 1)"
+  [ -n "$log" ] || { fail "build_agent failure: no log file survived under TMPDIR ($logdir)"; return 0; }
+  assert_contains "$err" "$log" "build_agent failure: the message names the surviving log's path"
+  assert_contains "$(cat "$log" 2>/dev/null)" "doomed" "build_agent failure: the surviving log holds the build's output"
+}
+
+test_build_agent_removes_the_log_on_success() {
+  local script logdir
+  logdir="$TMP/build-log-success"; mkdir -p "$logdir"
+  script="$(make_fake_build fake-build-ok2.sh 'echo hi; exit 0')"
+  TMPDIR="$logdir" bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" >/dev/null 2>&1
+  assert_eq "$(find "$logdir" -mindepth 1 | wc -l)" "0" "build_agent success: leaves no log file behind"
+}
+
+test_build_agent_tails_a_long_failure_log_at_40_lines() {
+  local script err rc logdir
+  logdir="$TMP/build-log-long"; mkdir -p "$logdir"
+  script="$(make_fake_build fake-build-long.sh 'for i in $(seq 1 50); do echo "line $i"; done; exit 1')"
+  TMPDIR="$logdir" bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" \
+    >/dev/null 2>"$TMP/build-long.err"; rc=$?
+  err="$(cat "$TMP/build-long.err")"
+  [ "$rc" -ne 0 ] || fail "build_agent long failure: expected a non-zero return"
+  assert_contains "$err" "last 40 of 50 lines" "build_agent long failure: notes the truncation and the real total"
+  assert_not_contains "$err" "line 10" "build_agent long failure: the tail excludes the earliest lines"
+  assert_contains "$err" "line 50" "build_agent long failure: the tail includes the last line"
+}
+
+test_build_agent_falls_back_to_unredirected_output_when_it_cannot_log() {
+  local script out err rc badtmp
+  badtmp="$TMP/no-such-tmpdir"
+  script="$(make_fake_build fake-build-notmp.sh 'echo "streamed out"; echo "streamed err" >&2; exit 5')"
+  out="$(TMPDIR="$badtmp" bash -c '. "$1"; build_agent "$2"' _ "$LIB" "$script" 2>"$TMP/build-notmp.err")"; rc=$?
+  err="$(cat "$TMP/build-notmp.err")"
+  assert_eq "$rc" "5" "build_agent, unwritable TMPDIR: still returns the build's own exit code"
+  assert_contains "$out" "streamed out" "build_agent, unwritable TMPDIR: the build's stdout still reaches the caller"
+  assert_contains "$err" "streamed err" "build_agent, unwritable TMPDIR: the build's stderr still reaches the caller"
+}
+
+# The wiring: install.sh must call build_agent, and a failed build must abort
+# the installer rather than carry on with no jar. Asserted by line ordering —
+# install.sh cannot be executed here (it demands root).
+test_install_sh_wires_build_agent_with_a_die_on_failure() {
+  local sh called stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  called="$(first_code_line "$sh" '(^|[^[:alnum:]_])build_agent')"
+  [ -n "$called" ] || {
+    fail "build_agent wiring: install.sh never calls build_agent — the old 'bash agent/build.sh >/dev/null' is still discarding output (#47)"
+    return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$called")"
+  [ -n "$stmt" ] || { fail "build_agent wiring: could not read the statement at install.sh:$called"; return 0; }
+
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || fail \
+    "build_agent wiring: install.sh:$called must handle a failed build with '|| die <message>' — a build failure that does not abort leaves install.sh deploying a stale or missing agent jar. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" "build_agent wiring: install.sh:$called swallows a failed build"
+  assert_not_contains "$stmt" "|| :" "build_agent wiring: install.sh:$called swallows a failed build"
 }
 
 # --- slice 2: resolve_host_identity ------------------------------------------
@@ -10711,7 +10824,14 @@ for CURRENT in \
   test_acquire_install_lock_refuses_when_flock_is_absent \
   test_install_sh_holds_the_lock_across_the_whole_account_decision \
   test_install_sh_aborts_when_it_cannot_take_the_lock \
-  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write \
+  test_build_agent_is_silent_on_success \
+  test_build_agent_prints_output_and_exit_code_on_failure \
+  test_build_agent_names_and_keeps_the_log_on_failure \
+  test_build_agent_removes_the_log_on_success \
+  test_build_agent_tails_a_long_failure_log_at_40_lines \
+  test_build_agent_falls_back_to_unredirected_output_when_it_cannot_log \
+  test_install_sh_wires_build_agent_with_a_die_on_failure
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is

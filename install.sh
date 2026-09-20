@@ -490,7 +490,7 @@ if [ ! -f "$AGENT_JAR" ]; then
     command -v javac >/dev/null 2>&1 \
       || die "javac is required to build the agent; install a JDK (17+) and re-run"
   fi
-  echo ">> building agent"; bash "$HERE/agent/build.sh" >/dev/null
+  build_agent "$HERE/agent/build.sh" || die "agent build failed; see the log above"
 fi
 
 # --- deploy files -----------------------------------------------------------
