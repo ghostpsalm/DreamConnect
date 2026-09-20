@@ -234,6 +234,31 @@ passwd_entry() {
 # the state file and the removal gate without writing to /etc.
 install_state_file() { echo "${DC_STATE_FILE:-/etc/dreamconnect/install.state}"; }
 
+# Remove any `install.state.XXXXXX` left beside the state file by a
+# write_install_state that died between its mktemp and its mv (#34). A trap in
+# the writer would not reach this: the interruption this cleans up after is the
+# SIGKILL/power-loss class, where the shell is gone and no trap runs — the
+# milder failures where it survives are already handled by the writer's own
+# `|| { rm -f "$tmp"; ... }`. So the sweep is lazy instead, run at the next
+# point install.state is legitimately mutated.
+#
+# The glob's six `?` match mktemp's fixed-width suffix exactly, so install.lock
+# and install.state itself can never match. `[ -e ]` per entry because an
+# unmatched glob stays literal under bash's default nullglob-off, and `rm -f` on
+# the literal pattern would be a silent no-op we would rather not rely on.
+#
+# Both call sites (write_install_state, and uninstall() in install.sh) run
+# inside the installer lock (#32), so this can never unlink a sibling process's
+# temp file before its own mv.
+sweep_stale_install_state_tmp() {
+  local dir entry
+  dir="$(dirname "$(install_state_file)")"
+  for entry in "$dir"/install.state.??????; do
+    [ -e "$entry" ] || continue
+    rm -f "$entry"
+  done
+}
+
 # Record the host identity and whether we created the account. A full overwrite
 # every time, never an append: two HOST_ACCOUNT lines would leave the reader
 # picking one of them arbitrarily.
@@ -253,6 +278,10 @@ write_install_state() {  # name uid created_account
   f="$(install_state_file)"
   dir="$(dirname "$f")"
   mkdir -p "$dir"
+  # Before this run stages its own: a previous run's orphaned temp file is
+  # named by a suffix nothing ever computes again, so the next legitimate write
+  # is the only thing that will ever be in a position to clear it (#34).
+  sweep_stale_install_state_tmp
   # Staged beside the target and renamed over it, never `> "$f"` directly: a
   # redirect truncates first, so a write cut short (ENOSPC, power loss, a kill)
   # would leave an empty file, which read_install_state reports as "nothing
