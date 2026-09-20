@@ -98,6 +98,10 @@ uninstall() {
   # Safe defaults when there is no state file — i.e. DREAMCONNECT_HOST_ACCOUNT
   # was never used, and everything below reverts the desktop user's install.
   read_install_state
+  # Unconditional and independent of the mode branch below: a box that crashed
+  # mid-write once and is only ever uninstalled afterward (never reinstalled)
+  # would otherwise carry that stray install.state.XXXXXX forever (#34).
+  sweep_stale_install_state_tmp
 
   local target_name target_uid target_home
   if [ -n "$HOST_ACCOUNT" ]; then

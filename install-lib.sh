@@ -234,6 +234,27 @@ passwd_entry() {
 # the state file and the removal gate without writing to /etc.
 install_state_file() { echo "${DC_STATE_FILE:-/etc/dreamconnect/install.state}"; }
 
+# write_install_state stages its write as install.state.XXXXXX beside the real
+# file, then mv's it into place (below). A crash/power-loss/SIGKILL/SIGXFSZ
+# between mktemp and mv leaves that named temp file behind, and nothing else
+# ever names it again to clean it up: a later write mints a fresh random
+# suffix, and read_install_state only ever opens the literal install.state
+# path (#34). Harmless clutter — never read by name — but it accumulates
+# under the state directory across repeated interrupted runs, so both
+# write_install_state and uninstall() sweep it: the glob is anchored to
+# install_state_file()'s own path with mktemp's fixed 6-`?` suffix, so it can
+# never match the real file (which has no suffix) or anything unrelated.
+sweep_stale_install_state_tmp() {
+  local f dir stale
+  f="$(install_state_file)"
+  dir="$(dirname "$f")"
+  [ -d "$dir" ] || return 0
+  for stale in "$f".??????; do
+    [ -e "$stale" ] || continue
+    rm -f "$stale"
+  done
+}
+
 # Record the host identity and whether we created the account. A full overwrite
 # every time, never an append: two HOST_ACCOUNT lines would leave the reader
 # picking one of them arbitrarily.
@@ -259,6 +280,7 @@ write_install_state() {  # name uid created_account
   # recorded" and --uninstall then declines to remove the account we created.
   # The temp file shares the directory so the mv is a rename(2) on one
   # filesystem, i.e. atomic: readers see the old content or the new, never half.
+  sweep_stale_install_state_tmp
   tmp="$(mktemp "$dir/install.state.XXXXXX")"
   {
     echo "HOST_ACCOUNT=$1"

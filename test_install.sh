@@ -449,6 +449,56 @@ test_write_install_state_survives_a_write_killed_part_way_through() {
   assert_eq "$CREATED_ACCOUNT" "1"                 "interrupted write: CREATED_ACCOUNT still recorded"
 }
 
+# #34: a stray install.state.XXXXXX left behind by an earlier interrupted
+# write is never named again by anything — read_install_state only ever opens
+# the literal install.state path — so it sits there as clutter until
+# something sweeps it. write_install_state does, on every subsequent call.
+test_write_install_state_sweeps_a_pre_existing_stray_tmp_file() {
+  local DC_STATE_FILE="$TMP/state-sweep-write/install.state"
+  local dir stray
+  dir="$(dirname "$DC_STATE_FILE")"
+  mkdir -p "$dir"
+  stray="$dir/install.state.abcdef"
+  echo "garbage from an earlier interrupted write" > "$stray"
+
+  write_install_state dreamconnect-host 987 1
+
+  assert_file_absent "$stray" "a pre-existing stray install.state.XXXXXX is swept by the next write_install_state"
+
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
+  read_install_state
+  assert_eq "$HOST_ACCOUNT" "dreamconnect-host" "the sweep does not disturb this run's own write"
+  assert_eq "$HOST_UID" "987"                   "the sweep does not disturb this run's own write"
+}
+
+# The genuine crash case: a real stray temp file left by a write actually
+# killed mid-write (same SIGXFSZ harness as the write-survives test above),
+# not one written by hand. A later successful write_install_state removes it.
+test_write_install_state_sweeps_a_tmp_file_left_by_a_real_interrupted_write() {
+  local state dir rc stray_count
+  local DC_STATE_FILE="$TMP/state-sweep-crash/install.state"
+  state="$DC_STATE_FILE"
+  dir="$(dirname "$state")"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  rc="$(bash -c '
+    exec 2>/dev/null
+    ulimit -c 0; ulimit -f 0
+    . "$1"
+    ( DC_STATE_FILE="$2" write_install_state dreamconnect-host2 986 0 0 >/dev/null 2>&1 )
+    echo "$?"
+  ' _ "$LIB" "$state")"
+  [ "${rc:-0}" -gt 128 ] || fail "precondition: the writer was not killed mid-write (rc=$rc)"
+
+  stray_count="$(find "$dir" -maxdepth 1 -name 'install.state.??????' | wc -l)"
+  [ "$stray_count" -ge 1 ] || fail "precondition: the killed write left no stray install.state.XXXXXX behind"
+
+  write_install_state dreamconnect-host 985 1
+
+  stray_count="$(find "$dir" -maxdepth 1 -name 'install.state.??????' | wc -l)"
+  assert_eq "$stray_count" "0" "a stray temp file left by a real interrupted write is swept by the next successful write"
+}
+
 test_install_state_round_trips_all_four_values() {
   local DC_STATE_FILE="$TMP/state-roundtrip/install.state"
   local HOST_ACCOUNT="stale" HOST_UID="stale" CREATED_ACCOUNT="stale"
@@ -10430,6 +10480,41 @@ test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write() {
   assert_not_contains "$stmt" "|| true" "uninstall lock wiring: install.sh:$acq swallows a failed acquire"
 }
 
+# #34: a box that crashed mid-write once and is only ever uninstalled
+# afterward (never reinstalled) is the one case write_install_state's own
+# sweep can never reach — uninstall() must sweep for itself, unconditionally,
+# not behind either mode branch below, and early enough that the sweep is
+# still inside the lock read_install_state's window already established above.
+test_uninstall_sweeps_stale_install_state_tmp_files() {
+  local sh ustart uend read_at swept mode_branch
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall span: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "uninstall span: uninstall() has no closing brace"; return 0; }
+
+  read_at="$(first_code_line "$sh" '(^|[^[:alnum:]_])read_install_state' "$ustart")"
+  [ -n "$read_at" ] || { fail "uninstall span: uninstall() never calls read_install_state"; return 0; }
+
+  swept="$(first_code_line "$sh" '(^|[^[:alnum:]_])sweep_stale_install_state_tmp' "$ustart")"
+  [ -n "$swept" ] && [ "$swept" -lt "$uend" ] || {
+    fail "uninstall span: uninstall() never calls sweep_stale_install_state_tmp — a stray install.state.XXXXXX left by an interrupted write on a box that is only ever uninstalled afterward is never cleaned up (#34)"
+    return 0; }
+
+  [ "$read_at" -lt "$swept" ] || fail \
+    "uninstall span: sweep_stale_install_state_tmp (line $swept) must come AFTER read_install_state (line $read_at) — the sweep is meant to run unconditionally right after the read, per the accepted plan"
+
+  # Before the mode branch (HOST_ACCOUNT set vs. not), so a classic-mode
+  # uninstall — the case with no state file at all — still sweeps.
+  mode_branch="$(first_code_line "$sh" '-n[[:space:]]+"[$]HOST_ACCOUNT"' "$ustart")"
+  [ -n "$mode_branch" ] || { fail "uninstall span: could not find the HOST_ACCOUNT mode branch in uninstall()"; return 0; }
+  [ "$swept" -lt "$mode_branch" ] || fail \
+    "uninstall span: sweep_stale_install_state_tmp (line $swept) must run BEFORE the HOST_ACCOUNT mode branch (line $mode_branch) — it must run unconditionally, not only on one mode"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10494,6 +10579,8 @@ for CURRENT in \
   test_write_install_state_overwrites_rather_than_appends \
   test_write_install_state_never_downgrades_created_account_for_the_same_account \
   test_write_install_state_survives_a_write_killed_part_way_through \
+  test_write_install_state_sweeps_a_pre_existing_stray_tmp_file \
+  test_write_install_state_sweeps_a_tmp_file_left_by_a_real_interrupted_write \
   test_install_state_round_trips_all_four_values \
   test_read_install_state_resets_to_safe_defaults_when_absent \
   test_read_install_state_trims_whitespace_around_keys_and_values \
@@ -10711,7 +10798,8 @@ for CURRENT in \
   test_acquire_install_lock_refuses_when_flock_is_absent \
   test_install_sh_holds_the_lock_across_the_whole_account_decision \
   test_install_sh_aborts_when_it_cannot_take_the_lock \
-  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write \
+  test_uninstall_sweeps_stale_install_state_tmp_files
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is
