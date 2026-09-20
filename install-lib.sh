@@ -306,6 +306,87 @@ read_install_state() {
   done < "$f"
 }
 
+# --- the installer lock -------------------------------------------------------
+# One display-host account per box is decided by READING install.state and then
+# WRITING it, with `useradd` in between (install.sh: host_account_installable ->
+# ensure_host_account -> write_install_state). Nothing serialises that span, so
+# two concurrent installs naming different accounts both read "nothing recorded",
+# both pass the one-account guard, both create an account, and the last writer
+# takes the single slot — leaving the loser's account on the box with no record
+# naming it, which is exactly the shape no later --uninstall can reach (#32).
+#
+# Beside install.state rather than under /run or /tmp: the tests' existing
+# DC_STATE_FILE override moves the lock with the file it guards, with no second
+# environment variable to forget, and uninstall()'s own `rm -rf /run/dreamconnect`
+# can then never unlink a lock a concurrent run is holding.
+install_lock_file() { echo "$(dirname "$(install_state_file)")/install.lock"; }
+
+# Take the installer lock for the rest of this process, or refuse. $1 names the
+# operation, and appears in the refusal.
+#
+# Never blocks. install.sh demands root, so a second concurrent run is an
+# operator mistake rather than a queue; waiting would hang a root session with no
+# output, behind a timeout nobody has chosen.
+#
+# `exec {fd}>` plus `flock -n <fd>` rather than `flock <file> <command>`: the lock
+# must span a sequence of statements in THIS shell, and the command form could
+# only manage that by re-entering the whole installer as a child. A `mkdir` or
+# `O_EXCL` lock file was rejected for the opposite reason — the kernel drops an
+# flock when the holder dies, so a killed or crashed install leaves nothing stale
+# behind for the next operator to clear by hand.
+#
+# The descriptor is NOT close-on-exec (bash's {var}> redirections are inherited
+# across exec, verified on bash 5.3), so a process started inside the critical
+# section keeps the lock alive for as long as it lives. Both call sites hold the
+# lock only across short-lived children — useradd, getent, systemctl clients —
+# and nothing that daemonises; keep it that way when either span moves.
+acquire_install_lock() {  # what
+  local what="${1:-operation}" lock dir
+
+  # Already ours. flock conflicts between open file DESCRIPTIONS, including two
+  # in the same process, so a second acquire would open a second description,
+  # fail against our own lock and report a concurrent run that does not exist.
+  # Keyed on the variable and not on a pid because a subshell inherits the
+  # descriptor, and so genuinely does inherit the lock along with it.
+  [ -z "${DC_INSTALL_LOCK_FD:-}" ] || return 0
+
+  command -v flock >/dev/null 2>&1 || {
+    echo "error: cannot serialise the $what: flock is not installed (it ships in util-linux)" >&2
+    echo "       refusing rather than running unlocked — a concurrent run would strand an account that no --uninstall could then find" >&2
+    return 1; }
+
+  lock="$(install_lock_file)"
+  dir="$(dirname "$lock")"
+  mkdir -p "$dir" || {
+    echo "error: cannot serialise the $what: could not create $dir to hold the lock file" >&2
+    return 1; }
+
+  # A failed open leaves the variable unset (bash assigns it only on success) and
+  # returns 1 rather than killing the shell, so there is no stale descriptor
+  # number for release_install_lock to close by mistake.
+  exec {DC_INSTALL_LOCK_FD}>"$lock" || {
+    echo "error: cannot serialise the $what: could not open the lock file $lock" >&2
+    return 1; }
+
+  flock -n "$DC_INSTALL_LOCK_FD" || {
+    exec {DC_INSTALL_LOCK_FD}>&-
+    DC_INSTALL_LOCK_FD=""
+    echo "error: refusing to $what: another dreamconnect install or uninstall is already running on this box and holds the lock $lock" >&2
+    echo "       nothing has been changed; wait for that run to finish, then re-run" >&2
+    return 1; }
+
+  return 0
+}
+
+# Drop the lock by closing the descriptor that holds it — the kernel releases an
+# flock with the last close of its open file description. Silent and exit 0 when
+# nothing is held, so a path that refuses before acquiring can still call it.
+release_install_lock() {
+  [ -n "${DC_INSTALL_LOCK_FD:-}" ] || return 0
+  exec {DC_INSTALL_LOCK_FD}>&-
+  DC_INSTALL_LOCK_FD=""
+}
+
 # The rail that decides whether --uninstall may delete a Linux account. Exit 0
 # only when all seven conditions hold; every refusal names the rail on stderr.
 # Deliberately stricter than a uid>=1000 heuristic: it demands our GECOS marker
