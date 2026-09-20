@@ -10144,6 +10144,292 @@ userdel" "control: an account that IS there still gets the full removal, in orde
     "state gate: install.sh:$rmline is not inside the conditional at line $gline (indented ${#rmindent}, the conditional ${#gindent}) — the state-file deletion has to be gated on the removal having succeeded, or issue #30's failed lookup takes install.state with it"
 }
 
+# --- issue #32: the installer lock -------------------------------------------
+#
+# WHY THIS SLICE EXISTS: nothing serialised install.state's read
+# (host_account_installable) from its write (write_install_state), with
+# ensure_host_account's useradd in between. Two concurrent install.sh runs naming
+# different accounts both read "nothing recorded", both pass the
+# one-account-per-box guard, both create an account, and the last writer takes
+# the single slot — leaving the loser's account on the box with no record naming
+# it, which no later --uninstall can find. uninstall() has the same window, from
+# its read at the top to the state delete ~150 lines later.
+#
+# The owner settled both open questions: the critical section spans the useradd
+# (a lock around the state read/write alone still lets both runs create an
+# account), and a run that cannot take the lock fails fast rather than waiting.
+
+test_library_defines_the_install_lock_functions() {
+  local fn
+  for fn in install_lock_file acquire_install_lock release_install_lock; do
+    declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
+  done
+}
+
+# Beside install.state, so the suite's existing DC_STATE_FILE override moves the
+# lock with the file it guards and no test can reach /etc by forgetting a second
+# variable.
+test_the_install_lock_lives_beside_the_state_file() {
+  local DC_STATE_FILE
+  DC_STATE_FILE="$TMP/lock-path/dreamconnect/install.state"
+  assert_eq "$(install_lock_file)" "$TMP/lock-path/dreamconnect/install.lock" \
+    "the lock file sits in the state file's own directory"
+  DC_STATE_FILE=""
+  assert_eq "$(install_lock_file)" "/etc/dreamconnect/install.lock" \
+    "with no override the lock is beside the real install.state"
+}
+
+# A contender that is a genuinely separate PROCESS. Not a subshell: a subshell
+# inherits the descriptor and therefore inherits the lock itself, so it would
+# report success no matter what the code did. Run under `timeout` because "fails
+# fast" is half the contract — a blocking implementation would hang here rather
+# than fail an assertion, and 124 names that specifically.
+LOCK_RC=0
+LOCK_ERR=""
+try_second_acquirer() {  # state_file what
+  LOCK_ERR="$(DC_STATE_FILE="$1" timeout 10 bash -c '
+    . "$1"
+    acquire_install_lock "$2"
+  ' _ "$LIB" "$2" 2>&1 >/dev/null)"
+  LOCK_RC=$?
+  return 0
+}
+
+test_a_second_run_cannot_take_the_installer_lock() {
+  local dir state lock
+  dir="$TMP/lock-contention"; state="$dir/install.state"; lock="$dir/install.lock"
+
+  # Held in THIS process, so the contender below really is the second run. Taken
+  # directly and not in a subshell, which would drop the descriptor — and the
+  # lock with it — the moment it exited.
+  DC_STATE_FILE="$state" acquire_install_lock "install" \
+    || { fail "contention: the first acquirer could not take the lock at all"; return 0; }
+
+  try_second_acquirer "$state" "install"
+
+  [ "$LOCK_RC" -ne 124 ] || {
+    DC_STATE_FILE="$state" release_install_lock
+    fail "contention: the second run BLOCKED on the lock — it must refuse immediately, not wait"
+    return 0; }
+  [ "$LOCK_RC" -ne 0 ] || {
+    DC_STATE_FILE="$state" release_install_lock
+    fail "contention: the second run took the lock while the first still held it"
+    return 0; }
+  assert_contains "$LOCK_ERR" "$lock" "contention: the refusal names the lock it could not take"
+  assert_contains "$LOCK_ERR" "already running" "contention: the refusal names the conflict"
+  # Nothing partial: the loser must not have written a state record, and must not
+  # have left anything but the lock file itself in the directory.
+  assert_file_absent "$state" "contention: the refused run recorded no install state"
+  assert_eq "$(ls "$dir")" "install.lock" "contention: the refused run created nothing else"
+
+  DC_STATE_FILE="$state" release_install_lock
+}
+
+# The bypass, turned into a check. Issue #32's guard against re-entry used to
+# read `DC_INSTALL_LOCK_FD` straight out of the environment, and `DC_*` is this
+# repository's documented fixture-override namespace: an inherited
+# `DC_INSTALL_LOCK_FD=9` made acquire return 0 with no lock taken, while a real
+# holder sat in another process. Reproduced before the fix.
+#
+# Both spellings are planted — the old name and the internal one — because the
+# defect is the CLASS, not the name: whatever the variable is called, a value
+# the environment supplied must not be mistaken for a lock this process holds.
+test_an_inherited_lock_variable_does_not_forge_the_lock() {
+  local dir state lock
+  dir="$TMP/lock-forged"; state="$dir/install.state"; lock="$dir/install.lock"
+
+  # A genuine holder, in this process, exactly as the contention test does.
+  DC_STATE_FILE="$state" acquire_install_lock "install" \
+    || { fail "forged lock: the first acquirer could not take the lock at all"; return 0; }
+
+  local rc err
+  for var in DC_INSTALL_LOCK_FD _dc_install_lock_fd; do
+    err="$(DC_STATE_FILE="$state" env "$var=9" timeout 10 bash -c '
+      . "$1"
+      acquire_install_lock "install"
+    ' _ "$LIB" 2>&1 >/dev/null)"; rc=$?
+    [ "$rc" -ne 124 ] || { fail "forged lock ($var): the second run BLOCKED instead of refusing"; continue; }
+    [ "$rc" -ne 0 ] || {
+      fail "forged lock ($var): an inherited environment variable made acquire report success while another process held the lock — the rail is switchable from outside"
+      continue; }
+    assert_contains "$err" "already running" \
+      "forged lock ($var): the refusal is the real contention refusal, not a different error"
+  done
+
+  DC_STATE_FILE="$state" release_install_lock
+}
+
+# The other half: a real re-entry inside one process must still be a no-op, or
+# the check above would have been bought by breaking the thing it guards.
+test_a_second_acquire_in_the_same_process_is_a_no_op() {
+  local dir state
+  dir="$TMP/lock-reentry"; state="$dir/install.state"
+
+  DC_STATE_FILE="$state" acquire_install_lock "install" \
+    || { fail "re-entry: the first acquirer could not take the lock at all"; return 0; }
+  DC_STATE_FILE="$state" acquire_install_lock "install" \
+    || fail "re-entry: a second acquire in the same process reported a conflict with itself"
+  DC_STATE_FILE="$state" release_install_lock
+
+  try_second_acquirer "$state" "install"
+  assert_eq "$LOCK_RC" "0" \
+    "re-entry: one release drops the lock the re-entrant acquire did not double-take (stderr was [$LOCK_ERR])"
+}
+
+test_releasing_the_install_lock_lets_the_next_run_take_it() {
+  local dir state
+  dir="$TMP/lock-release"; state="$dir/install.state"
+
+  DC_STATE_FILE="$state" acquire_install_lock "install" \
+    || { fail "release: the first acquirer could not take the lock at all"; return 0; }
+  DC_STATE_FILE="$state" release_install_lock
+
+  try_second_acquirer "$state" "install"
+  assert_eq "$LOCK_RC" "0" "release: a later run takes the lock once the first released it (stderr was [$LOCK_ERR])"
+}
+
+# The design depends on flock (util-linux), and the owner's decision is that its
+# absence refuses the install rather than letting it proceed unlocked — an
+# unlocked install is the race this whole slice exists to close. PATH is emptied
+# rather than shimmed: `command -v flock` is the first thing acquire does, so it
+# must refuse before it needs any external command at all.
+test_acquire_install_lock_refuses_when_flock_is_absent() {
+  local dir state err rc
+  dir="$TMP/lock-no-flock"; state="$dir/install.state"
+  mkdir -p "$dir"
+
+  # $BASH by absolute path: a PATH prefix assignment is in effect for the lookup
+  # of the command it prefixes, so a bare `bash` here would not be found either
+  # and the test would pass for the wrong reason.
+  err="$(DC_STATE_FILE="$state" PATH="$TMP/definitely-no-tools-here" \
+         "$BASH" -c '. "$1"; acquire_install_lock "install"' _ "$LIB" 2>&1 >/dev/null)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "absent flock: acquire_install_lock exited 0 — the install would proceed unlocked"
+  assert_contains "$err" "flock" "absent flock: the refusal names what is missing"
+  assert_file_absent "$dir/install.lock" "absent flock: no lock file was created either"
+}
+
+# The wiring, install side. Everything above can be green with the helpers
+# orphaned. Asserted by line ordering in install.sh, which cannot be executed
+# here (it demands root and does top-level work on sourcing) — the technique
+# every call-site test in this file uses.
+#
+# ensure_host_account's position inside the span is the point, not decoration:
+# a lock narrowed to the state read and write would pass an "acquire before the
+# guard, release after the write" test while still letting two runs useradd.
+test_install_sh_holds_the_lock_across_the_whole_account_decision() {
+  local sh ustart uend acq guard ensure wrote rel
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  # Past uninstall(), which takes the same lock for its own span below.
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "install span: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "install span: uninstall() has no closing brace"; return 0; }
+
+  acq="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock' "$uend")"
+  [ -n "$acq" ] || {
+    fail "install span: install.sh never calls acquire_install_lock on the install path — the helper is orphaned and issue #32's race is still open"
+    return 0; }
+  rel="$(first_code_line "$sh" '(^|[^[:alnum:]_])release_install_lock' "$uend")"
+  [ -n "$rel" ] || { fail "install span: the install path never calls release_install_lock"; return 0; }
+  guard="$(first_code_line "$sh" '(^|[^[:alnum:]_])host_account_installable' "$uend")"
+  [ -n "$guard" ] || { fail "install span: no host_account_installable call on the install path"; return 0; }
+  ensure="$(first_code_line "$sh" '(^|[^[:alnum:]_])ensure_host_account' "$uend")"
+  [ -n "$ensure" ] || { fail "install span: no ensure_host_account call on the install path"; return 0; }
+  wrote="$(first_code_line "$sh" '(^|[^[:alnum:]_])write_install_state' "$uend")"
+  [ -n "$wrote" ] || { fail "install span: no write_install_state call on the install path"; return 0; }
+
+  [ "$acq" -lt "$guard" ] || fail \
+    "install span: acquire_install_lock (line $acq) must come BEFORE host_account_installable reads install.state (line $guard) — otherwise both runs read the same 'nothing recorded' before either locks"
+  [ "$acq" -lt "$ensure" ] || fail \
+    "install span: acquire_install_lock (line $acq) must come BEFORE ensure_host_account (line $ensure) — the useradd is inside the critical section, and a lock taken after it strands the loser's account exactly as before"
+  [ "$ensure" -lt "$rel" ] || fail \
+    "install span: release_install_lock (line $rel) is BEFORE ensure_host_account (line $ensure) — narrowing the span to the state read/write lets two runs both create an account"
+  [ "$wrote" -lt "$rel" ] || fail \
+    "install span: release_install_lock (line $rel) must come AFTER write_install_state (line $wrote) — releasing before the slot is recorded re-opens the last-writer-wins race"
+}
+
+# The install call site's ERROR WIRING, which the ordering test cannot see:
+# `acquire_install_lock install || true` leaves that test green while the
+# installer proceeds unlocked into the very race this issue is about.
+test_install_sh_aborts_when_it_cannot_take_the_lock() {
+  local sh ustart uend acq stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  uend="$(first_code_line "$sh" '^[}]' "${ustart:-0}")"
+  [ -n "$uend" ] || { fail "install lock wiring: could not find the end of uninstall()"; return 0; }
+  acq="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock' "$uend")"
+  [ -n "$acq" ] || { fail "install lock wiring: no acquire_install_lock call on the install path"; return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$acq")"
+  [ -n "$stmt" ] || { fail "install lock wiring: could not read the statement at install.sh:$acq"; return 0; }
+
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || fail \
+    "install lock wiring: install.sh:$acq must handle a failed acquire with '|| die <message>' — a refusal that does not abort installs unlocked, which is issue #32 itself. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" "install lock wiring: install.sh:$acq swallows a failed acquire"
+  assert_not_contains "$stmt" "|| :" "install lock wiring: install.sh:$acq swallows a failed acquire"
+}
+
+# The wiring, uninstall side. Its window is the wider of the two — the state read
+# at the top of uninstall() to the delete ~150 lines down — so locking only the
+# install path is half a fix: the race stays reachable from here.
+#
+# The release must sit after BOTH arms of the account_removed conditional, which
+# is where issue #30 lives: on a lookup that cannot confirm the account is gone,
+# install.state survives. This slice must not move that, and a lock released
+# early would put a concurrent run back inside it.
+test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write() {
+  local sh ustart uend acq read_at firstrm rmstate preserved rel stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall span: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "uninstall span: uninstall() has no closing brace"; return 0; }
+
+  acq="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock' "$ustart")"
+  [ -n "$acq" ] && [ "$acq" -lt "$uend" ] || {
+    fail "uninstall span: uninstall() never calls acquire_install_lock — issue #32's race is still reachable from the uninstall side, which is half a fix"
+    return 0; }
+  rel="$(first_code_line "$sh" '(^|[^[:alnum:]_])release_install_lock' "$ustart")"
+  [ -n "$rel" ] && [ "$rel" -lt "$uend" ] || {
+    fail "uninstall span: uninstall() never calls release_install_lock before its closing brace"; return 0; }
+
+  read_at="$(first_code_line "$sh" '(^|[^[:alnum:]_])read_install_state' "$ustart")"
+  [ -n "$read_at" ] || { fail "uninstall span: uninstall() never calls read_install_state"; return 0; }
+  # The first thing uninstall() removes, whatever it happens to be today: a run
+  # refused at the lock must have removed nothing at all.
+  firstrm="$(first_code_line "$sh" '(^|[^[:alnum:]_])rm[[:space:]]+-' "$ustart")"
+  [ -n "$firstrm" ] || { fail "uninstall span: uninstall() removes nothing at all?"; return 0; }
+  rmstate="$(first_code_line "$sh" 'rm -f.*install_state_file' "$ustart")"
+  [ -n "$rmstate" ] || { fail "uninstall span: uninstall() never deletes install.state"; return 0; }
+  preserved="$(first_code_line "$sh" 'state preserved at' "$ustart")"
+  [ -n "$preserved" ] || {
+    fail "uninstall span: the #30 state-preserved branch is gone from uninstall() — a failed removal must keep install.state so a re-run can retry"
+    return 0; }
+
+  [ "$acq" -lt "$read_at" ] || fail \
+    "uninstall span: acquire_install_lock (line $acq) must come BEFORE read_install_state (line $read_at) — the read is the start of the window this lock exists to close"
+  [ "$acq" -lt "$firstrm" ] || fail \
+    "uninstall span: acquire_install_lock (line $acq) must come BEFORE the first removal (line $firstrm) — a run refused at the lock has to have removed nothing"
+  [ "$rmstate" -lt "$rel" ] || fail \
+    "uninstall span: release_install_lock (line $rel) must come AFTER the install.state delete (line $rmstate)"
+  [ "$preserved" -lt "$rel" ] || fail \
+    "uninstall span: release_install_lock (line $rel) must come AFTER the #30 state-preserved branch (line $preserved) — both arms settle install.state, so both are inside the critical section"
+
+  stmt="$(logical_statement_at "$sh" "$acq")"
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || fail \
+    "uninstall lock wiring: install.sh:$acq must handle a failed acquire with '|| die <message>' — an uninstall that carries on unlocked removes an account while a concurrent install is recording one. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" "uninstall lock wiring: install.sh:$acq swallows a failed acquire"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10415,7 +10701,17 @@ for CURRENT in \
   test_install_sh_removes_the_dangling_enablement_symlink_before_the_unit_file \
   test_passwd_entry_tells_an_absent_account_from_a_failed_lookup \
   test_a_failed_passwd_lookup_refuses_at_every_call_site \
-  test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state
+  test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state \
+  test_library_defines_the_install_lock_functions \
+  test_the_install_lock_lives_beside_the_state_file \
+  test_a_second_run_cannot_take_the_installer_lock \
+  test_an_inherited_lock_variable_does_not_forge_the_lock \
+  test_a_second_acquire_in_the_same_process_is_a_no_op \
+  test_releasing_the_install_lock_lets_the_next_run_take_it \
+  test_acquire_install_lock_refuses_when_flock_is_absent \
+  test_install_sh_holds_the_lock_across_the_whole_account_decision \
+  test_install_sh_aborts_when_it_cannot_take_the_lock \
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is

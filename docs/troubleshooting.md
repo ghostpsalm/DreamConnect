@@ -71,6 +71,23 @@ package name isn't covered, install the equivalents by hand and re-run with
 Non-Fedora names are best-effort — corrections welcome. Only `dnf`/Fedora is
 tested end to end today.
 
+**`flock` (util-linux) is a hard prerequisite, not a best-effort one.** It is
+what serialises the one-display-host-account-per-box decision against a second
+concurrent run, so `install.sh` and `install.sh --uninstall` refuse to start at
+all when it is missing rather than proceed unlocked. Every supported distro ships
+it in the base system; if `flock --version` fails, install `util-linux`.
+
+## "another dreamconnect install or uninstall is running"
+
+`install.sh` holds a lock (`/etc/dreamconnect/install.lock`, beside
+`install.state`) across the whole account decision — the guard read, the
+`useradd`, and the state write — and `--uninstall` holds the same one across the
+account removal. A second run refuses immediately rather than waiting: it has
+created nothing, removed nothing, and left `install.state` untouched, so simply
+re-run it once the first has finished. The kernel drops the lock when the holder
+exits, including on a crash or a kill, so there is never a stale lock to clear by
+hand.
+
 ## Checking status
 
 ```sh
