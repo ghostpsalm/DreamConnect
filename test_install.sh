@@ -318,7 +318,7 @@ assert_refused() {  # label
 
 test_library_defines_the_state_and_removal_functions() {
   local fn
-  for fn in write_install_state read_install_state host_account_removable; do
+  for fn in write_install_state read_install_state host_account_removable clean_install_state_temps; do
     declare -F "$fn" >/dev/null || fail "install-lib.sh defines $fn(): not defined"
   done
 }
@@ -447,6 +447,94 @@ test_write_install_state_survives_a_write_killed_part_way_through() {
   read_install_state
   assert_eq "$HOST_ACCOUNT"    "dreamconnect-host" "interrupted write: HOST_ACCOUNT still recorded"
   assert_eq "$CREATED_ACCOUNT" "1"                 "interrupted write: CREATED_ACCOUNT still recorded"
+}
+
+# --- #34: the staging file a killed write leaves behind -----------------------
+#
+# Counted rather than listed, because the suffix is random by construction —
+# what the sweep must guarantee is that none are left, not which one went.
+count_state_temps() {  # dir -> how many install.state.?????? entries it holds
+  local t n=0
+  for t in "$1"/install.state.??????; do
+    [ -e "$t" ] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+# The glob is six literal `?`, matching mktemp's template, so everything else
+# that lives in /etc/dreamconnect has to survive it: the state file itself, the
+# #32 lock, an operator's longer-suffixed neighbour, and a directory that
+# happens to match the pattern (the sweep removes regular files only).
+test_clean_install_state_temps_removes_strays_and_spares_its_neighbours() {
+  local dir
+  dir="$TMP/state-sweep-unit"
+  local DC_STATE_FILE="$dir/install.state"
+  write_state_fixture "$DC_STATE_FILE" dreamconnect-host 987 1 1
+  mkdir -p "$dir/install.state.dirdir"
+  : > "$dir/install.lock"
+  : > "$dir/install.state.bak"
+  : > "$dir/install.state.abcdef"
+  : > "$dir/install.state.XyZ012"
+
+  clean_install_state_temps
+
+  assert_file_absent "$dir/install.state.abcdef" "sweep removes a stray staging file"
+  assert_file_absent "$dir/install.state.XyZ012" "sweep removes a mixed-case staging file"
+  assert_eq "$(count_state_temps "$dir")" "1" "sweep leaves only the matching directory behind"
+  assert_file_exists "$DC_STATE_FILE"            "sweep leaves the real install.state"
+  assert_file_exists "$dir/install.lock"         "sweep leaves the installer lock file"
+  assert_file_exists "$dir/install.state.bak"    "sweep leaves a neighbour with a longer suffix"
+  assert_file_exists "$dir/install.state.dirdir" "sweep leaves a directory matching the pattern"
+}
+
+# An unmatched glob expands to the pattern itself, so a sweep that does not test
+# for a regular file would try to remove a file literally named
+# "install.state.??????" — and on a fresh box the directory is not there at all.
+# Both must be silent no-ops: write_install_state calls this on every write.
+test_clean_install_state_temps_is_a_silent_no_op_when_nothing_matches() {
+  local dir out rc
+  dir="$TMP/state-sweep-nomatch"
+  local DC_STATE_FILE="$dir/install.state"
+  write_state_fixture "$DC_STATE_FILE" dreamconnect-host 987 1 1
+  out="$(clean_install_state_temps 2>&1)"; rc=$?
+  assert_eq "$rc" "0"  "a sweep with nothing to remove exits 0"
+  assert_eq "$out" ""  "a sweep with nothing to remove is silent"
+  assert_file_exists "$DC_STATE_FILE" "a sweep with nothing to remove leaves install.state"
+
+  DC_STATE_FILE="$TMP/state-sweep-absent/install.state"
+  out="$(clean_install_state_temps 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "a sweep of a directory that does not exist yet exits 0"
+  assert_eq "$out" "" "a sweep of a directory that does not exist yet is silent"
+  assert_file_absent "$TMP/state-sweep-absent" "a sweep does not create the directory it swept"
+}
+
+# The finding end to end (#34). The precondition is asserted, not assumed: if an
+# interrupted write stopped leaving a staging file, this test would otherwise go
+# on passing while proving nothing.
+test_write_install_state_sweeps_the_stray_an_interrupted_write_left() {
+  local dir state
+  dir="$TMP/state-sweep-e2e"
+  local DC_STATE_FILE="$dir/install.state"
+  state="$DC_STATE_FILE"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  # ulimit -f 0 kills the writer with SIGXFSZ at its first write — after mktemp
+  # has created the staging file and before the mv, which is the window.
+  bash -c '
+    exec 2>/dev/null
+    ulimit -c 0; ulimit -f 0
+    . "$1"
+    ( DC_STATE_FILE="$2" write_install_state dreamconnect-host2 986 0 0 >/dev/null 2>&1 )
+  ' _ "$LIB" "$state" >/dev/null 2>&1
+
+  [ "$(count_state_temps "$dir")" -ge 1 ] || {
+    fail "precondition: the interrupted write left no staging file, so the sweep is not being demonstrated"
+    return 0; }
+
+  write_install_state dreamconnect-host 987 1 1
+  assert_eq "$(count_state_temps "$dir")" "0" \
+    "the next successful write_install_state clears the stray an interrupted write left"
+  assert_file_exists "$state" "the sweep leaves the freshly written install.state in place"
 }
 
 test_install_state_round_trips_all_four_values() {
@@ -10430,6 +10518,41 @@ test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write() {
   assert_not_contains "$stmt" "|| true" "uninstall lock wiring: install.sh:$acq swallows a failed acquire"
 }
 
+# The wiring for #34's second call site. The library function can be perfect and
+# a box still keep its strays forever if uninstall() never calls it — and the
+# indentation is part of the contract, not cosmetics: nested one level deeper it
+# would sit inside the HOST_ACCOUNT branch and skip every classic install, which
+# is exactly the box most likely to have been interrupted.
+test_uninstall_sweeps_the_state_temps_inside_the_lock() {
+  local sh ustart uend acq rel sweep indent
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  ustart="$(first_code_line "$sh" '^uninstall[(][)]')"
+  [ -n "$ustart" ] || { fail "uninstall sweep: no 'uninstall()' definition in install.sh"; return 0; }
+  uend="$(first_code_line "$sh" '^[}]' "$ustart")"
+  [ -n "$uend" ] || { fail "uninstall sweep: uninstall() has no closing brace"; return 0; }
+
+  sweep="$(first_code_line "$sh" '(^|[^[:alnum:]_])clean_install_state_temps' "$ustart")"
+  [ -n "$sweep" ] && [ "$sweep" -lt "$uend" ] || {
+    fail "uninstall sweep: uninstall() never calls clean_install_state_temps — a box that is uninstalled keeps every staging file an interrupted write left, and nothing will ever sweep them (#34)"
+    return 0; }
+  acq="$(first_code_line "$sh" '(^|[^[:alnum:]_])acquire_install_lock' "$ustart")"
+  [ -n "$acq" ] || { fail "uninstall sweep: uninstall() never calls acquire_install_lock"; return 0; }
+  rel="$(first_code_line "$sh" '(^|[^[:alnum:]_])release_install_lock' "$ustart")"
+  [ -n "$rel" ] || { fail "uninstall sweep: uninstall() never calls release_install_lock"; return 0; }
+
+  [ "$acq" -lt "$sweep" ] || fail \
+    "uninstall sweep: clean_install_state_temps (line $sweep) must come AFTER acquire_install_lock (line $acq) — unlocked, it could unlink a concurrent install's in-flight staging file"
+  [ "$sweep" -lt "$rel" ] || fail \
+    "uninstall sweep: clean_install_state_temps (line $sweep) must come BEFORE release_install_lock (line $rel), for the same reason"
+
+  indent="$(awk -v n="$sweep" 'NR == n { match($0, /^[[:space:]]*/); print RLENGTH }' "$sh")"
+  assert_eq "$indent" "2" \
+    "uninstall sweep: install.sh:$sweep must sit at the top level of uninstall(), not nested in the HOST_ACCOUNT or account_removed branch — a classic install has no host account and would never be swept"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10494,6 +10617,9 @@ for CURRENT in \
   test_write_install_state_overwrites_rather_than_appends \
   test_write_install_state_never_downgrades_created_account_for_the_same_account \
   test_write_install_state_survives_a_write_killed_part_way_through \
+  test_clean_install_state_temps_removes_strays_and_spares_its_neighbours \
+  test_clean_install_state_temps_is_a_silent_no_op_when_nothing_matches \
+  test_write_install_state_sweeps_the_stray_an_interrupted_write_left \
   test_install_state_round_trips_all_four_values \
   test_read_install_state_resets_to_safe_defaults_when_absent \
   test_read_install_state_trims_whitespace_around_keys_and_values \
@@ -10711,7 +10837,8 @@ for CURRENT in \
   test_acquire_install_lock_refuses_when_flock_is_absent \
   test_install_sh_holds_the_lock_across_the_whole_account_decision \
   test_install_sh_aborts_when_it_cannot_take_the_lock \
-  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write \
+  test_uninstall_sweeps_the_state_temps_inside_the_lock
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is

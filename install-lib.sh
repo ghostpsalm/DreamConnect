@@ -234,6 +234,38 @@ passwd_entry() {
 # the state file and the removal gate without writing to /etc.
 install_state_file() { echo "${DC_STATE_FILE:-/etc/dreamconnect/install.state}"; }
 
+# Remove the staging files a killed write_install_state left behind. Its own
+# `rm -f "$tmp"` below covers a write that FAILS; a writer that is killed instead
+# (SIGXFSZ, SIGKILL, power loss — the exact interruption class the staging exists
+# to survive) never reaches it, and after that nothing ever removes the file: the
+# next write mints a fresh random suffix, read_install_state only opens the
+# literal install.state path, and --uninstall only rm -f's that same path. One
+# stray per interrupted run, accumulating forever (#34).
+#
+# A sweep and not a trap. bash cannot trap SIGKILL or a power cut, so a trap
+# would cover only part of the set it is supposed to close; and an EXIT trap set
+# inside a sourced library function is process-global, so it would also clobber
+# whatever exit handling install.sh has of its own.
+#
+# Deleting a file some other process might be mid-write is only safe because both
+# call sites run inside the installer lock (#32) — write_install_state's caller
+# holds it across the whole read/useradd/write span, and uninstall() across its
+# own — so no other dreamconnect run can own a staging file in this directory
+# while this is sweeping it.
+clean_install_state_temps() {
+  local dir t
+  dir="$(dirname "$(install_state_file)")"
+  # Six literal `?`, mktemp's template below exactly: install.state itself,
+  # install.lock and an operator's install.state.bak all fail to match. The -f
+  # test is what makes an unmatched glob a silent no-op — bash leaves the pattern
+  # itself in "$t" when nothing matches — so no `shopt -s nullglob`, which would
+  # change a shell option for everyone who sourced this file.
+  for t in "$dir"/install.state.??????; do
+    [ -f "$t" ] || continue
+    rm -f "$t"
+  done
+}
+
 # Record the host identity and whether we created the account. A full overwrite
 # every time, never an append: two HOST_ACCOUNT lines would leave the reader
 # picking one of them arbitrarily.
@@ -253,6 +285,9 @@ write_install_state() {  # name uid created_account
   f="$(install_state_file)"
   dir="$(dirname "$f")"
   mkdir -p "$dir"
+  # Before the mktemp below, never after: a sweep on the way out would be racing
+  # this function's own in-flight temp file.
+  clean_install_state_temps
   # Staged beside the target and renamed over it, never `> "$f"` directly: a
   # redirect truncates first, so a write cut short (ENOSPC, power loss, a kill)
   # would leave an empty file, which read_install_state reports as "nothing

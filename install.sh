@@ -266,6 +266,13 @@ uninstall() {
       echo "!! state preserved at $(install_state_file) so a future --uninstall can retry account removal"
     fi
   fi
+  # At the top level of the function, not inside the branch above: the strays a
+  # killed write_install_state leaves (#34) are there whether or not this box
+  # ever had a host account, and a box being uninstalled may never write state
+  # again — so this is the last chance to clear them. Still inside the lock, so
+  # it cannot unlink a concurrent run's in-flight temp; and after the state
+  # delete, so the ordering is purely "sweep last".
+  clean_install_state_temps
   # End of the critical section: both exits from the branch above have settled
   # install.state — deleted, or deliberately kept for a retry — so there is
   # nothing left for a concurrent run to interleave with. Explicit rather than
