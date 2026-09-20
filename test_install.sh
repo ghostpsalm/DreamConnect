@@ -10430,6 +10430,195 @@ test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write() {
   assert_not_contains "$stmt" "|| true" "uninstall lock wiring: install.sh:$acq swallows a failed acquire"
 }
 
+# --- issue #47: a failed agent build has to say what failed -------------------
+#
+# WHY THIS SLICE EXISTS: install.sh ran `bash agent/build.sh >/dev/null`, so the
+# build's stdout — every stage line it prints, and on some failures the error
+# itself — went nowhere and nothing was retained. The call had no `|| die`
+# either, so `set -e` aborted the installer with no message of its own. Whoever
+# hit a failed build had to go read agent/build.sh to find out what the step
+# even was. build_agent keeps the whole log, shows its tail on failure, and
+# stays silent when the build works.
+
+# Each test gets its own log directory under $TMP and passes it as
+# DC_BUILD_LOG_DIR: a test that wrote into the real /tmp would leave a
+# root-readable log behind on the developer's box and, worse, could pick up
+# another run's leftovers when it counts what the directory holds.
+make_build_log_dir() {  # name -> path
+  local d="$TMP/buildlog-$1"
+  mkdir -p "$d"
+  printf '%s\n' "$d"
+}
+
+# A stub standing in for agent/build.sh. Body is bash, status is what it exits.
+make_build_stub() {  # name body -> path
+  local p="$TMP/build-stub-$1.sh"
+  { echo '#!/usr/bin/env bash'; printf '%s\n' "$2"; } > "$p"
+  chmod +x "$p"
+  printf '%s\n' "$p"
+}
+
+# stdout and stderr kept apart, because which stream the diagnosis lands on is
+# half the point of this issue: install.sh's own progress lines are stdout, so a
+# failure report has to be on stderr to survive an operator redirecting either.
+BA_RC=0; BA_OUT=""; BA_ERR=""
+run_build_agent() {  # log_dir script
+  local errf="$TMP/build-agent.err"
+  BA_OUT="$(DC_BUILD_LOG_DIR="$1" build_agent "$2" 2>"$errf")"
+  BA_RC=$?
+  BA_ERR="$(cat "$errf")"
+  return 0
+}
+
+test_library_defines_build_agent() {
+  declare -F build_agent >/dev/null || fail "install-lib.sh defines build_agent(): not defined"
+}
+
+# The success path is the common one and it must look exactly like the old
+# `>/dev/null` did: nothing printed, and nothing left in the log directory.
+test_build_agent_is_silent_and_removes_its_log_on_success() {
+  local dir stub
+  dir="$(make_build_log_dir success)"
+  stub="$(make_build_stub success 'echo ">> fetch ByteBuddy"; echo "warn" >&2; exit 0')"
+
+  run_build_agent "$dir" "$stub"
+  assert_eq "$BA_RC" "0" "success: build_agent returns the build's zero status"
+  assert_eq "$BA_OUT" "" "success: build_agent prints nothing on stdout"
+  assert_eq "$BA_ERR" "" "success: build_agent prints nothing on stderr"
+  assert_eq "$(ls "$dir")" "" "success: the build log is removed when the build worked"
+}
+
+test_build_agent_shows_the_failed_builds_output_and_keeps_the_log() {
+  local dir stub log
+  dir="$(make_build_log_dir failure)"
+  stub="$(make_build_stub failure '
+echo ">> fetch ByteBuddy 1.18.11"
+echo "SHA-256 mismatch for /x/lib/byte-buddy-1.18.11.jar" >&2
+exit 1')"
+
+  run_build_agent "$dir" "$stub"
+  assert_eq "$BA_RC" "1" "failure: build_agent propagates the build's exit status"
+
+  log="$dir/$(ls "$dir")"
+  assert_file_exists "$log" "failure: the build log is kept when the build failed"
+
+  # The two things the issue says are missing: what ran, and where to read the
+  # rest. Everything on stderr, nothing on stdout.
+  assert_eq "$BA_OUT" "" "failure: the report does not go to stdout"
+  assert_contains "$BA_ERR" "$stub" "failure: the report names the build script"
+  assert_contains "$BA_ERR" "exit 1" "failure: the report names the exit status"
+  assert_contains "$BA_ERR" "$log" "failure: the report names the retained log"
+  # stdout of the build, the stream the old call site discarded outright.
+  assert_contains "$BA_ERR" "fetch ByteBuddy 1.18.11" "failure: the build's STDOUT is shown"
+  assert_contains "$BA_ERR" "SHA-256 mismatch" "failure: the build's stderr is shown"
+  assert_contains "$(cat "$log")" "fetch ByteBuddy 1.18.11" "failure: the log holds the build's output"
+}
+
+# A build that fails without printing anything — killed, or not executable by
+# the interpreter. A bare header with an empty tail under it reads as output
+# that failed to print; "no output at all" is itself the diagnosis.
+test_build_agent_says_so_when_a_failed_build_printed_nothing() {
+  local dir stub
+  dir="$(make_build_log_dir silent)"
+  stub="$(make_build_stub silent 'exit 3')"
+
+  run_build_agent "$dir" "$stub"
+  assert_eq "$BA_RC" "3" "silent failure: the exit status is propagated"
+  assert_contains "$BA_ERR" "no output" "silent failure: the report says the build printed nothing"
+  assert_eq "$(ls "$dir" | wc -l)" "1" "silent failure: the empty log is still retained"
+}
+
+# A javac failure can be hundreds of lines above the end of the build, so the
+# tail is a summary and never the whole story: it has to say how much it is
+# hiding, and the full log has to still hold the part it left out.
+#
+# The stub's last line is deliberately UNTERMINATED: `tail` prints it, so a
+# count taken with `wc -l` (which does not count it) would under-report by one
+# in the one message whose whole job is to say how much was left out.
+test_build_agent_announces_how_much_of_a_long_log_it_is_showing() {
+  local dir stub log
+  dir="$(make_build_log_dir long)"
+  stub="$(make_build_stub long '
+for i in $(seq 1 99); do echo "line $i"; done
+printf "line 100"
+exit 1')"
+
+  run_build_agent "$dir" "$stub"
+  log="$dir/$(ls "$dir")"
+
+  assert_contains "$BA_ERR" "last 40 of 100 lines" "long log: the report says how much of the log it is showing"
+  assert_contains "$BA_ERR" "line 100" "long log: the tail reaches the end of the build"
+  assert_contains "$BA_ERR" "line 61" "long log: the tail is 40 lines deep"
+  assert_not_contains "$BA_ERR" "line 60" "long log: the tail is not longer than it claims"
+  assert_contains "$(cat "$log")" "line 1" "long log: the retained log holds what the tail left out"
+}
+
+# Nowhere to put a log is a reason to show MORE, not less. The one fallback that
+# must never happen is a silent return to discarding the output.
+test_build_agent_streams_the_build_when_it_cannot_open_a_log() {
+  local stub
+  stub="$(make_build_stub nolog 'echo ">> compile agent classes"; echo "javac: error" >&2; exit 1')"
+
+  run_build_agent "$TMP/no-such-log-dir" "$stub"
+  assert_eq "$BA_RC" "1" "unopenable log: the exit status is still propagated"
+  assert_contains "$BA_OUT$BA_ERR" "compile agent classes" \
+    "unopenable log: the build's stdout is streamed rather than discarded"
+  assert_contains "$BA_OUT$BA_ERR" "javac: error" "unopenable log: the build's stderr survives"
+  assert_contains "$BA_ERR" "$TMP/no-such-log-dir" "unopenable log: the warning names the directory it could not use"
+}
+
+# Input, so refused in build_agent's own voice: handed to `bash` instead, the
+# failure surfaces as bash's own "No such file or directory", naming neither the
+# installer nor the step it was on.
+test_build_agent_refuses_a_missing_or_unreadable_script() {
+  local dir missing unreadable
+  dir="$(make_build_log_dir refuse)"
+
+  run_build_agent "$dir" "$TMP/there-is-no-build-script.sh"
+  assert_eq "$BA_RC" "1" "missing script: build_agent refuses"
+  assert_contains "$BA_ERR" "build_agent" "missing script: the refusal is in build_agent's own voice"
+  assert_contains "$BA_ERR" "there-is-no-build-script.sh" "missing script: the refusal names the path"
+
+  run_build_agent "$dir" ""
+  assert_eq "$BA_RC" "1" "empty script argument: build_agent refuses"
+  assert_contains "$BA_ERR" "build_agent" "empty script argument: the refusal is in build_agent's own voice"
+
+  unreadable="$(make_build_stub unreadable 'exit 0')"
+  chmod 000 "$unreadable"
+  run_build_agent "$dir" "$unreadable"
+  chmod 644 "$unreadable"
+  assert_eq "$BA_RC" "1" "unreadable script: build_agent refuses"
+
+  assert_eq "$(ls "$dir")" "" "refusals: nothing was written to the log directory"
+}
+
+# The wiring. Everything above can be green with build_agent orphaned and
+# install.sh still discarding the build's output, which is issue #47 unfixed.
+test_install_sh_no_longer_discards_the_agent_builds_output() {
+  local sh discarded called stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  discarded="$(first_code_line "$sh" 'build[.]sh.*>[[:space:]]*/dev/null')"
+  [ -z "$discarded" ] || fail \
+    "build call site: install.sh:$discarded still sends agent/build.sh's output to /dev/null — a failed build has nothing to show the operator"
+
+  called="$(first_code_line "$sh" '(^|[^[:alnum:]_])build_agent')"
+  [ -n "$called" ] || {
+    fail "build call site: install.sh never calls build_agent — the helper is orphaned and issue #47 is not fixed"
+    return 0; }
+
+  # A failed build must abort the install with a message of its own. Without the
+  # `|| die`, `set -e` ends the run silently and the tail build_agent just wrote
+  # is the last thing printed, with nothing saying the install stopped.
+  stmt="$(logical_statement_at "$sh" "$called")"
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || fail \
+    "build call site: install.sh:$called must handle a failed build with '|| die <message>'. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" "build call site: install.sh:$called swallows a failed build"
+  assert_not_contains "$stmt" "|| :" "build call site: install.sh:$called swallows a failed build"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10711,7 +10900,15 @@ for CURRENT in \
   test_acquire_install_lock_refuses_when_flock_is_absent \
   test_install_sh_holds_the_lock_across_the_whole_account_decision \
   test_install_sh_aborts_when_it_cannot_take_the_lock \
-  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write \
+  test_library_defines_build_agent \
+  test_build_agent_is_silent_and_removes_its_log_on_success \
+  test_build_agent_shows_the_failed_builds_output_and_keeps_the_log \
+  test_build_agent_says_so_when_a_failed_build_printed_nothing \
+  test_build_agent_announces_how_much_of_a_long_log_it_is_showing \
+  test_build_agent_streams_the_build_when_it_cannot_open_a_log \
+  test_build_agent_refuses_a_missing_or_unreadable_script \
+  test_install_sh_no_longer_discards_the_agent_builds_output
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is

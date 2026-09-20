@@ -1461,3 +1461,67 @@ reclaim_stale_shm_frame() {  # path target_uid
   [ "$(stat -c '%u' "$path")" != "$target_uid" ] && run rm -f "$path"
   return 0
 }
+
+# --- building the agent (issue #47) ------------------------------------------
+# install.sh used to run `bash agent/build.sh >/dev/null`, which threw away
+# every stage line the build prints (">> fetch ByteBuddy", ">> compile agent
+# classes") and kept nothing. A failed build then left the operator with
+# whatever happened to reach stderr, no stage context and no log — and, since
+# the call had no `|| die`, not even an installer message: `set -e` just aborted.
+#
+# So: capture combined output, stay silent and delete the log when the build
+# succeeds (the installer's existing quiet-on-success voice), and on failure
+# print the tail to stderr and KEEP the whole log. Tail plus full log, rather
+# than one or the other, because a build that died hundreds of javac lines after
+# the real error is not diagnosable from a tail, and streaming everything would
+# bury a successful install in build noise.
+#
+# DC_BUILD_LOG_DIR moves the log the way every other DC_* override moves a path,
+# so the tests never write into the real /tmp.
+build_agent() {  # build_script
+  local script="${1:-}" dir log rc lines tail_lines=40
+
+  # The script path is input. A missing or unreadable one is refused here, in
+  # this function's own voice: handed to `bash` instead it surfaces as bash's
+  # own "No such file or directory" naming neither the installer nor the step.
+  if [ -z "$script" ] || [ ! -f "$script" ] || [ ! -r "$script" ]; then
+    echo "error: build_agent: '$script' is not a readable build script" >&2
+    return 1
+  fi
+
+  dir="${DC_BUILD_LOG_DIR:-${TMPDIR:-/tmp}}"
+  # mktemp, never a fixed name: this runs as root and /tmp is world-writable, so
+  # a predictable path is a symlink onto whatever file the attacker names. Also
+  # 0600, which matters less (build output carries no secrets) but costs nothing.
+  if ! log="$(mktemp "$dir/dreamconnect-build.XXXXXX" 2>/dev/null)"; then
+    # Nowhere to put a log is a reason to show MORE, not less. Inherit stdout
+    # and stderr so the operator still sees the failure; never fall back to the
+    # discard this function exists to remove.
+    echo "!! could not create a build log in $dir; streaming the build output instead" >&2
+    rc=0; bash "$script" || rc=$?
+    return "$rc"
+  fi
+
+  # `rc=0; ... || rc=$?`, not a bare call: install.sh runs under `set -e`, where
+  # reading $? after an unguarded failure never happens — the shell is gone.
+  rc=0; bash "$script" >"$log" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then rm -f "$log"; return 0; fi
+
+  echo "!! the build script $script failed (exit $rc); full output kept at $log" >&2
+  if [ ! -s "$log" ]; then
+    # Say so rather than printing a bare header: "it failed and said nothing" is
+    # itself the diagnosis (a killed or unexecutable script), and an empty tail
+    # otherwise reads as output that failed to print.
+    echo "   the build produced no output at all" >&2
+  else
+    # `grep -c ''`, not `wc -l`: a build killed mid-line leaves the last line
+    # unterminated, which wc does not count and tail does print — an off-by-one
+    # in the one message whose whole job is to say how much was left out.
+    lines="$(grep -c '' "$log")"
+    if [ "$lines" -gt "$tail_lines" ]; then
+      echo "   last $tail_lines of $lines lines:" >&2
+    fi
+    tail -n "$tail_lines" "$log" >&2
+  fi
+  return "$rc"
+}

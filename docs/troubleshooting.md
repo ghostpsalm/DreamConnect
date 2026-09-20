@@ -88,6 +88,24 @@ re-run it once the first has finished. The kernel drops the lock when the holder
 exits, including on a crash or a kill, so there is never a stale lock to clear by
 hand.
 
+## The agent build failed during install
+
+`install.sh` builds the agent quietly: while the build works you see only
+`>> building agent`, and its output is discarded. When the build **fails**, the
+installer prints the last 40 lines of that output to stderr, names the exit
+status, and keeps the complete log — the path is in the line beginning `!!`:
+
+```
+!! the build script /path/to/agent/build.sh failed (exit 1); full output kept at /tmp/dreamconnect-build.Xf2Ra9
+```
+
+The log survives only a failure; a successful build deletes its own. It is
+root-owned and world-unreadable, and it lives in `$TMPDIR` (default `/tmp`), so
+a reboot clears it — read it before rebooting. Common causes: a `javac` too old
+or absent, and a ByteBuddy jar whose SHA-256 does not match the pin in
+`agent/build.sh` (that one names the rejected file and removes it, so re-running
+the install re-fetches it).
+
 ## Checking status
 
 ```sh
