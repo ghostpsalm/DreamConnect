@@ -10540,6 +10540,169 @@ test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write() {
   assert_not_contains "$stmt" "|| true" "uninstall lock wiring: install.sh:$acq swallows a failed acquire"
 }
 
+# --- issue #47: a failed agent build must say what failed ---------------------
+#
+# install.sh built the agent with `bash agent/build.sh >/dev/null`, discarding
+# stdout on the failure path as well as the happy one. `sha256sum -c` writes the
+# `<path>: FAILED` line that names the rejected file to STDOUT and only the
+# generic "1 computed checksum did NOT match" to stderr, so the ByteBuddy
+# verification added in #43 fired into a void: no filename, no path, no hint
+# that the agent build was the step that died. #49 has since moved that one
+# message onto stderr with full detail, but the defect underneath it is the
+# mechanism — any step's stdout diagnostic still vanishes — so the fix is to
+# stop splitting the streams and show everything when the build fails.
+#
+# run_capturing lives in install-lib.sh rather than inline in install.sh for the
+# reason this whole suite exists: install.sh demands root and does top-level
+# work on sourcing, so a helper there could only be asserted as text, while a
+# definition in the library is executed for real below.
+
+test_library_defines_run_capturing() {
+  declare -F run_capturing >/dev/null || fail "install-lib.sh defines run_capturing(): not defined"
+}
+
+# The half that must not regress: the happy path was quiet before this change
+# (that is what `>/dev/null` bought) and has to stay quiet, or every successful
+# install scrolls the whole agent build past the operator.
+test_run_capturing_is_silent_when_the_command_succeeds() {
+  local out rc
+  out="$(run_capturing "building the agent" bash -c 'echo noise; echo more noise >&2' 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "run_capturing returns 0 when the command succeeds"
+  assert_eq "$out" "" "run_capturing prints nothing when the command succeeds"
+}
+
+# Both streams, because the whole point is that the split between them is not a
+# thing a caller may rely on: the sha256sum case put the useful half on stdout
+# and the useless half on stderr.
+test_run_capturing_shows_both_streams_when_the_command_fails() {
+  local out rc
+  out="$(run_capturing "building the agent" \
+           bash -c 'echo "byte-buddy.jar: FAILED"; echo "WARNING: 1 computed checksum did NOT match" >&2; exit 3' 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "run_capturing returned 0 for a command that exited 3"
+  assert_contains "$out" "byte-buddy.jar: FAILED" \
+    "run_capturing shows the failing command's STDOUT — the stream that names the rejected file"
+  assert_contains "$out" "1 computed checksum did NOT match" \
+    "run_capturing shows the failing command's stderr too"
+  assert_contains "$out" "building the agent" \
+    "run_capturing names the step that failed, which the bare sha256sum warning never did"
+  assert_contains "$out" "3" "run_capturing reports the exit status it saw"
+}
+
+# The captured output has to reach the operator's terminal on stderr, alongside
+# the die() that follows it: a diagnostic on stdout is one redirect away from
+# being lost again, which is the defect itself.
+test_run_capturing_reports_the_failure_on_stderr() {
+  local out
+  out="$(run_capturing "building the agent" bash -c 'echo "on stdout"; exit 1' 2>/dev/null)"
+  assert_eq "$out" "" "run_capturing writes the failure report to stderr, not stdout"
+}
+
+# How much a failing build printed is not a thing the operator controls, and
+# both ends of the range are real: a step that dies before writing anything, and
+# a build whose useful line is thousands of lines above the end. The second is
+# the one that decides whether this change was worth making — the whole defect
+# is that the line naming the rejected jar did not reach the operator, so a
+# report that truncates is the defect again with extra steps.
+test_run_capturing_says_so_when_the_failing_command_printed_nothing() {
+  local out rc
+  out="$(run_capturing "building the agent" bash -c 'exit 4' 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "no-output: run_capturing returned 0 for a command that exited 4"
+  assert_contains "$out" "building the agent" \
+    "no-output: the step is still named when the command printed nothing at all"
+  assert_contains "$out" "4" "no-output: the exit status is still reported"
+}
+
+test_run_capturing_does_not_truncate_a_large_failing_build() {
+  local out rc lines
+  # The rejected-jar line FIRST, then five thousand lines of javac noise on top
+  # of it: exactly the shape a real build failure has, and exactly the shape a
+  # tail would hide.
+  out="$(run_capturing "building the agent" bash -c '
+      echo "byte-buddy-1.18.11.jar: FAILED"
+      for i in $(seq 1 5000); do echo "note: some deprecation warning $i"; done
+      echo "last line of the build" >&2
+      exit 1' 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "large-output: run_capturing returned 0 for a command that exited 1"
+  assert_contains "$out" "byte-buddy-1.18.11.jar: FAILED" \
+    "large-output: the line naming the rejected file reaches the operator even with 5000 lines after it — truncating to a tail would lose exactly this"
+  assert_contains "$out" "last line of the build" \
+    "large-output: the end of the build reaches the operator too"
+  lines="$(printf '%s\n' "$out" | wc -l)"
+  [ "$lines" -ge 5000 ] || \
+    fail "large-output: only $lines lines survived of 5002 — the report is truncating"
+}
+
+# install.sh runs `set -euo pipefail`. A bare `"$@" > "$log" 2>&1` inside this
+# function would take the whole installer down the moment the build exited
+# non-zero — before the log it had just captured could be printed — whenever the
+# call is not already inside a `||`. Proven against a real set -e caller rather
+# than by reading the redirect.
+test_run_capturing_prints_the_log_before_set_e_can_abort() {
+  local out rc
+  out="$(bash -c '
+    set -euo pipefail
+    . "$1"
+    run_capturing "building the agent" bash -c "echo THE-REAL-REASON; exit 3"
+  ' _ "$LIB" 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || fail "set -e caller: run_capturing reported success for a command that exited 3"
+  assert_contains "$out" "THE-REAL-REASON" \
+    "set -e caller: the captured output must be printed even though the failure is fatal to the caller"
+}
+
+# Same plain mktemp + rm -f idiom as grant_host_account_sudo and
+# ensure_host_account, and the same obligation: no trap, so both paths must
+# clean up themselves. TMPDIR is what mktemp reads, so an empty directory is a
+# complete census of what was left behind.
+test_run_capturing_leaves_no_temporary_file_behind() {
+  local dir
+  dir="$TMP/capture-tmpdir"; mkdir -p "$dir"
+
+  TMPDIR="$dir" run_capturing "a step that works" true \
+    || fail "temp files: run_capturing failed on a command that succeeds"
+  assert_eq "$(ls -A "$dir")" "" "temp files: nothing is left behind on the success path"
+
+  TMPDIR="$dir" run_capturing "a step that fails" false 2>/dev/null
+  assert_eq "$(ls -A "$dir")" "" "temp files: nothing is left behind on the failure path"
+}
+
+# Bad input refused in the function's own voice, never let through to run
+# something the caller did not name.
+test_run_capturing_refuses_a_call_with_no_command() {
+  local out rc
+  out="$(run_capturing "building the agent" 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "run_capturing refuses a call with a description and no command"
+  assert_contains "$out" "run_capturing" "the refusal says which function refused"
+}
+
+# The wiring. Everything above stays green with the helper orphaned and
+# install.sh still discarding the build's stdout — which is the whole of issue
+# #47. install.sh cannot be executed here (root, real package managers, top-level
+# work on sourcing), so this is asserted as text, the technique every other
+# call-site test in this file uses.
+test_install_sh_shows_the_agent_build_output_when_the_build_fails() {
+  local sh built stmt
+  sh="$HERE/install.sh"
+  assert_file_exists "$sh" "install.sh is present"
+  [ -f "$sh" ] || return 0
+
+  # Bracketed rather than backslash-escaped: awk warns on `\.` and the warning
+  # would be indistinguishable from a real diagnostic in the suite's output.
+  built="$(first_code_line "$sh" 'agent/build[.]sh')"
+  [ -n "$built" ] || { fail "build call site: install.sh never invokes agent/build.sh"; return 0; }
+
+  stmt="$(logical_statement_at "$sh" "$built")"
+  [ -n "$stmt" ] || { fail "build call site: could not read the statement at install.sh:$built"; return 0; }
+
+  assert_contains "$stmt" "run_capturing" \
+    "build call site: install.sh:$built must run the agent build through run_capturing, or a build failure prints only whatever the failing step happened to send to stderr. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "/dev/null" \
+    "build call site: install.sh:$built still discards the build's output — that redirect is issue #47. Statement was: [$stmt]"
+  [[ "$stmt" =~ \|\|[[:space:]]*die[[:space:]]+[^[:space:]] ]] || fail \
+    "build call site: install.sh:$built must handle a failed build with '|| die <message>' — run_capturing returns non-zero rather than exiting, so an unhandled call would deploy an agent jar that was never built. Statement was: [$stmt]"
+  assert_not_contains "$stmt" "|| true" "build call site: install.sh:$built swallows a failed agent build"
+  assert_not_contains "$stmt" "|| :" "build call site: install.sh:$built swallows a failed agent build"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10825,7 +10988,17 @@ for CURRENT in \
   test_acquire_install_lock_refuses_when_flock_is_absent \
   test_install_sh_holds_the_lock_across_the_whole_account_decision \
   test_install_sh_aborts_when_it_cannot_take_the_lock \
-  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write
+  test_uninstall_holds_the_lock_from_the_state_read_to_the_state_write \
+  test_library_defines_run_capturing \
+  test_run_capturing_is_silent_when_the_command_succeeds \
+  test_run_capturing_shows_both_streams_when_the_command_fails \
+  test_run_capturing_reports_the_failure_on_stderr \
+  test_run_capturing_says_so_when_the_failing_command_printed_nothing \
+  test_run_capturing_does_not_truncate_a_large_failing_build \
+  test_run_capturing_prints_the_log_before_set_e_can_abort \
+  test_run_capturing_leaves_no_temporary_file_behind \
+  test_run_capturing_refuses_a_call_with_no_command \
+  test_install_sh_shows_the_agent_build_output_when_the_build_fails
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is
