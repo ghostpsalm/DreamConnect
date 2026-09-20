@@ -14,6 +14,42 @@ run() {
   if [ "${DC_DRY_RUN:-}" = "1" ]; then echo "DRY: $*"; else "$@"; fi
 }
 
+# Run a command quietly, and show everything it printed if — and only if — it
+# fails. install.sh built the agent with `bash agent/build.sh >/dev/null`, which
+# threw stdout away on the failure path too: a ByteBuddy checksum mismatch
+# reached the operator as sha256sum's bare "1 computed checksum did NOT match"
+# on stderr, naming no file and not even saying the agent build was what died
+# (#47). Relying on a step writing its diagnostics to the one stream that
+# survives is the fragile part, so capture both and print them on failure; the
+# happy path stays as silent as the redirect it replaces, which is why this is
+# not a plain `tee` to the terminal.
+#
+# The command runs under `if`, not `cmd; rc=$?`: install.sh is `set -euo
+# pipefail`, and a bare non-zero here would kill the installer before the log
+# could be printed whenever the caller is not already in a `||` context.
+run_capturing() {  # description command [args...]
+  local desc log rc
+
+  [ "$#" -ge 2 ] || {
+    echo "error: run_capturing needs a description and a command to run" >&2
+    return 1
+  }
+  desc="$1"; shift
+
+  log="$(mktemp)" || return 1
+  if "$@" > "$log" 2>&1; then rc=0; else rc=$?; fi
+
+  if [ "$rc" -ne 0 ]; then
+    {
+      echo "error: $desc failed (exit $rc); its output was:"
+      cat "$log"
+    } >&2
+  fi
+  rm -f "$log"
+
+  [ "$rc" -eq 0 ] || return 1
+}
+
 # --- detect the desktop user + uid ------------------------------------------
 detect_user() {
   if [ -n "${DREAMCONNECT_USER:-}" ]; then echo "$DREAMCONNECT_USER"; return; fi
