@@ -44,7 +44,28 @@ echo "== Installer shell tests =="
 bash "$HERE/test_install.sh"
 
 echo
+echo "== Agent fixture pin tests =="
+bash "$HERE/agent/test_fixture_fetch.sh"
+
+echo
 echo "== Agent build shell tests =="
+# The one line in this repo's tests allowed to reach the network, and only on a
+# box that has never done it before (#46). agent/test_build.sh is hermetic -- it
+# stubs curl -- but its one case proving build.sh can *succeed* needs a real jar
+# hashing to the pinned constant, and agent/lib/ is gitignored. Without this it
+# skipped on every clean checkout, so a permanently broken build.sh, or the
+# mistyped BB_SHA256 that #43 defends against, still printed ALL TESTS PASSED.
+#
+# Outside the suite on purpose: the fetch is visible here rather than buried in
+# a test helper, the suite keeps its stub, and the fixture is verified against
+# agent/build.sh's own BB_SHA256 before this ever returns a path. A box with no
+# network sets DC_BYTEBUDDY_JAR itself; the fetcher then verifies that and makes
+# no network call. Second and later runs are cache hits and never go online.
+if ! DC_BYTEBUDDY_JAR="$("$HERE/scripts/fetch-test-fixtures.sh")"; then
+  echo "FAILED: could not obtain the ByteBuddy test fixture -- see the lines above" >&2
+  exit 1
+fi
+export DC_BYTEBUDDY_JAR
 bash "$HERE/agent/test_build.sh"
 
 echo
