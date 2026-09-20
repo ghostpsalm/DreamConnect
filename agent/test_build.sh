@@ -17,13 +17,15 @@
 # runs, so a check that only fires on the download path defends against nothing
 # the issue names: verification has to be unconditional.
 #
-# Where the expected hash comes from (independent of any implementation):
-#     https://repo1.maven.org/maven2/net/bytebuddy/byte-buddy/1.18.11/\
-#         byte-buddy-1.18.11.jar.sha256
-#     fetched 2026-08-01 -> e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435\
-#         cbdd180f6ffdb821
-#     Maven Central's own sidecar, byte for byte identical to `sha256sum` of the
-#     jar today's builds already link against.
+# Where the expected hash comes from (#46): agent/build.sh's own BB_SHA256, read
+# through agent/fixture-lib.sh. That is deliberately *not* independent of the
+# implementation, and it is the owner's decision rather than an oversight -- a
+# transcription here is a second constant that can disagree with the product's,
+# and a pin that disagrees with the one real installs use is the exact failure
+# #43 exists to catch. The independent half moved to where the artifact actually
+# is: scripts/fetch-test-fixtures.sh verifies what it downloads from Maven
+# Central against that same constant, so a mistyped pin fails there, loudly,
+# before this suite runs.
 #
 # Safety rails:
 #   * every case runs against a copy of agent/ in a mktemp -d, so the real
@@ -39,9 +41,19 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"          # the real agent/ directory
 BUILD_SH="$HERE/build.sh"
-BB_VERSION="1.18.11"
+
+# The pins come from build.sh itself (#46), never restated here. Unreadable is
+# fatal at startup rather than per-case: without them this suite cannot say what
+# a correct jar is, and a suite that cannot tell must stop, not carry on with a
+# guess. `. ` under `set -uo pipefail` -- no -e -- so each read is guarded.
+[ -f "$HERE/fixture-lib.sh" ] \
+  || { echo "FAIL: fixture-lib.sh not found at $HERE/fixture-lib.sh"; exit 1; }
+. "$HERE/fixture-lib.sh"
+BB_VERSION="$(bb_version)" \
+  || { echo "FAIL: could not read BYTEBUDDY_VERSION from $BUILD_SH"; exit 1; }
+BB_SHA256="$(bb_sha256)" \
+  || { echo "FAIL: could not read BB_SHA256 from $BUILD_SH"; exit 1; }
 BB_JAR_NAME="byte-buddy-$BB_VERSION.jar"
-BB_SHA256="e32f454c2c1f4aca982f9ec764ed892d9a6eee7e8a77f435cbdd180f6ffdb821"
 REAL_CACHE="$HERE/lib/$BB_JAR_NAME"
 NET_MARKER="NETWORK-BLOCKED-BY-TEST"
 
@@ -132,8 +144,11 @@ reads_like_an_integrity_failure() {  # text
 }
 
 # A stand-in for a legitimately cached jar has to *be* the real jar: the pinned
-# hash is byte-buddy-1.18.11.jar's own, and nothing else will hash to it. Look
-# for one locally (never downloading one) and verify it before use.
+# hash is that one artifact's own, and nothing else will hash to it. Look for one
+# locally (never downloading one -- this suite stays hermetic) and verify it
+# before use. Putting it there is scripts/fetch-test-fixtures.sh's job, run once
+# per box by ./run-tests.sh before this suite, which is why a miss below is now
+# a failure rather than a skip (#46).
 fixture_jar() {  # -> prints a path whose sha256 == BB_SHA256, or fails
   local cand
   for cand in "${DC_BYTEBUDDY_JAR:-}" "$REAL_CACHE"; do
@@ -417,11 +432,16 @@ test_a_jar_that_cannot_be_hashed_is_not_reported_as_rejected() {
 
 # Case B -- the same check must not reject a jar that is what it claims to be.
 # Guards the degenerate 'fix' of always failing, and a mistyped pinned hash.
+#
+# The only case in this suite that proves build.sh can *succeed*, which is why
+# #46 exists: it used to skip on every clean checkout, so a build.sh that never
+# built anything still passed the gate with nothing but a "1 skipped check(s)"
+# line. An unmet jar fixture is a failure here now, never a skip -- the fixture
+# is fetchable, once per box, and a missing one means that did not happen.
 test_a_correctly_hashed_cached_jar_still_builds() {
   local sb src t
   src="$(fixture_jar)" || {
-    skip "no locally available byte-buddy-$BB_VERSION.jar matching the pinned hash" \
-         "(set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME, or build once to populate agent/lib/)"
+    fail "no $BB_JAR_NAME matching the pinned hash is available, so the only case proving build.sh succeeds cannot run (#46). Run scripts/fetch-test-fixtures.sh, or set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME"
     return 0
   }
   for t in javac jar unzip; do
