@@ -4805,455 +4805,6 @@ test_remove_accountsservice_marker_refuses_reserved_account_names() {
   done
 }
 
-# Call site 5, the one the issue names outright: "would reach enable_autologin
-# "$GDM_CONF" root (GDM itself refuses root autologin, so this fails closed
-# today, but relying on GDM rather than our own guard is fragile)".
-#
-# NARROWED (breaker lap 1, slice 2). This function has TWO callers with
-# genuinely different notions of a valid name — install.sh:344 (host-account
-# mode, a name this installer is about to CREATE, already validated for shape
-# and the reserved set at install.sh:183-192, host_account_installable and
-# ensure_host_account) and install.sh:349 (classic mode, DREAMCONNECT_AUTOLOGIN=1,
-# a PRE-EXISTING desktop account resolved through detect_user/resolve_host_identity
-# that no rule of ours ever governed). So enable_autologin is not the place for
-# "is this shaped like a new account name" or for the dconf profile reservations
-# (user/local), which classic mode never touches. See the acceptance test below.
-#
-# What stays is the narrower, caller-independent rail: names that break the
-# mechanism this function IS. `root` — a graphical autologin as root is the
-# hazard issue #21 sub-problem 3 names at this exact call site, GDM refuses it
-# itself, and neither mode has a legitimate reason to ask for it. An empty name,
-# which writes an `AutomaticLogin=` key nothing can ever satisfy. And a name
-# carrying a newline or carriage return, which is not a name-policy question at
-# all: it is pasted verbatim into the [daemon] section and would inject arbitrary
-# GDM config keys. Everything else is the caller's business, not this function's.
-
-# The other half of call site 5, so the guard above cannot be satisfied by
-# refusing everything: an ordinary account still gets autologin configured, and
-# the backup enable_autologin's own comment promises. This documents today's
-# behaviour (it passes before the guard exists) and pins it afterwards.
-
-# The other caller: install.sh:346-351, classic mode. `$USER_NAME` there is the
-# machine's EXISTING desktop user — detect_user/resolve_host_identity, resolved
-# out of the passwd source, never created by this installer and never subject to
-# its new-account rules. On an SSSD/AD-joined box that name is routinely
-# `john.doe`; it can exceed 32 characters; it can be literally `user` or `local`,
-# which are dconf PROFILE reservations and mean nothing here because classic mode
-# touches neither dconf nor AccountsService nor useradd. Every one of these is a
-# real Linux account whose owner has opted in with DREAMCONNECT_AUTOLOGIN=1.
-#
-# Expected value from GDM's custom.conf format — `AutomaticLogin=<name>`, the
-# account name verbatim — and from the classic-mode contract at install.sh:346.
-# A refusal here aborts install.sh under `set -euo pipefail` at line 349, AFTER
-# deps, build, deploy, the daemon unit and enable-linger have all run.
-
-# The third way a name pasted into [daemon] corrupts the conf, and the one the
-# newline/CR rail above cannot see. enable_autologin hands the name to awk as
-# `awk -v user="$user"`, and a -v assignment is NOT a verbatim string: POSIX
-# (awk, OPERANDS: "an assignment ... shall be evaluated as if it were an
-# assignment with a string literal") makes awk process C escape sequences in the
-# VALUE before the script runs. So a shell string holding the two characters
-# backslash and `n` — no newline byte anywhere in it, which is why the *$'\n'*
-# case pattern never matches — becomes a real newline INSIDE awk, and
-# `print "AutomaticLogin=" user` emits two lines. `\t` becomes a tab, `\\`
-# becomes one backslash; every one of them writes something other than the
-# account the caller named.
-#
-# `DOMAIN\nick` is not a contrived string: backslash is the NSS/winbind
-# separator between a domain and the local part (`winbind separator = \` is the
-# Samba default), so it is exactly what a domain-joined box hands classic mode
-# through detect_user. Its corruption is invisible: rc 0, and
-# disable_autologin's undo only drops AutomaticLogin* keys, so the stray bare
-# line survives uninstall.
-#
-# Expected value from GDM's custom.conf format (key=value, one key per line — a
-# bare word on its own line is not a valid entry) and from this function's own
-# stated rail: a name that would corrupt the file rather than merely name the
-# wrong account is REFUSED before the backup. Same shape as the newline/CR
-# refusal directly above: non-zero exit, a stderr line, the conf byte-identical,
-# no .dreamconnect.bak. Not a name-policy question — the classic-mode acceptance
-# test above still stands, and no legitimate GDM AutomaticLogin value can carry
-# a backslash, because GDM would receive the escaped form, not the name.
-
-# --- issue #22: disable_autologin's own backup lifecycle ----------------------
-#
-# WHAT IS WRONG TODAY. enable_autologin copies the GDM config to
-# <conf>.dreamconnect.bak before it edits (install-lib.sh:87). disable_autologin
-# reverts by stripping the two keys back out and never touches that backup, so
-# the file survives every uninstall — issue #22, verbatim: "The backup is
-# therefore never cleaned up; it's orphaned on disk after every uninstall."
-# disable_autologin had no tests at all before this pair, which is how a return
-# value that means nothing (it is `rm -f "$tmp"`'s — the awk scratch file's
-# cleanup, install-lib.sh:110) went unnoticed alongside it.
-#
-# WHAT THE FIX IS — factory/CHECKPOINT.md, issue #22 seams, verbatim:
-#
-#   "install-lib.sh :: disable_autologin(conf) — keeps its surgical strip
-#    (custom.conf is a shared, admin-editable file ... wholesale restore risks
-#    eating unrelated admin edits made since install), but now deletes its own
-#    .bak once the strip has actually succeeded, and returns a meaningful exit
-#    code (previously always rm -f's, i.e. meaningless) so a failed strip
-#    preserves the backup instead of discarding it silently."
-#
-# Three behaviours, all three read off that sentence and issue #22's own
-# question ("is a stale backup ever useful to leave behind for manual recovery,
-# or should it always be cleaned up once disable_autologin has run
-# successfully?" — the owner's answer, recorded above: cleaned up, but only on
-# success). None of them is derived from what the current body happens to do:
-# today it deletes nothing and exits 0 either way, which is what makes the pair
-# below red. The suffix and the once-only backup are enable_autologin's own
-# convention, asserted the same way as this file's other .dreamconnect.bak
-# pairs (test_ensure_host_account_backs_up_a_preexisting_accountsservice_file).
-test_disable_autologin_removes_the_backup_on_success() {
-  local conf bak
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  conf="$TMP/gdm-undo-ok/custom.conf"; bak="$conf.dreamconnect.bak"
-  plant_gdm_conf "$conf"
-
-  # The fixture is the REAL backup — whatever enable_autologin writes, wherever
-  # it writes it, is what an uninstall finds on disk. Hand-crafting one would
-  # only prove disable_autologin cleans up a file this test invented.
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: enable_autologin left a backup to clean up"
-  [ -e "$bak" ] || return 0
-
-  run_disable_autologin "$conf"
-
-  assert_not_contains "$(cat "$conf")" "AutomaticLogin" \
-    "the autologin keys are stripped out of the live config"
-  assert_contains "$(cat "$conf")" "[daemon]" \
-    "the surgical strip leaves the rest of the file alone (it is not a wholesale restore)"
-  assert_file_absent "$bak" \
-    "a successful strip removes the backup it owns — after --uninstall nothing of ours is left beside custom.conf (issue #22)"
-  assert_eq "$RUN_DISABLE_RC" "0" \
-    "a successful strip exits 0 (stderr: $RUN_DISABLE_OUT)"
-}
-
-# The other half, and the reason the deletion above may not be unconditional: a
-# strip that did NOT happen must keep the backup, because that backup is then
-# the only copy of the pre-install config the operator has, and must say so to
-# its caller.
-#
-# THE INJECTION is the write-back, not a contrived path: disable_autologin runs
-# `awk ... "$conf" > "$tmp" && cat "$tmp" > "$conf"` (install-lib.sh:106-109),
-# so an unwritable $conf lets the awk pass succeed and fails the write-back —
-# the same shape as test_configure_no_idle_lock_survives_a_failing_chown, which
-# makes the real mechanism fail rather than replacing it. It also pins the
-# narrower half of "meaningful exit code": a fix that returns the AWK's status
-# would be green on the success test above and still exit 0 here, having left
-# the keys in place. This suite never runs as root (line 18), so the mode bits
-# genuinely deny the write; the precondition below proves they did.
-#
-# EXIT CODE: non-zero, value unasserted — the CHECKPOINT requires only that a
-# caller can tell the two apart, and this pair is what makes that true (0 on the
-# success test, non-zero here). install.sh's uninstall() is that caller, and
-# test_install_sh_branches_on_the_disable_autologin_result pins its branch.
-test_disable_autologin_preserves_the_backup_if_the_strip_fails() {
-  local conf bak
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  conf="$TMP/gdm-undo-fail/custom.conf"; bak="$conf.dreamconnect.bak"
-  plant_gdm_conf "$conf"
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: there is a backup to preserve"
-  [ -e "$bak" ] || return 0
-
-  chmod a-w "$conf"
-  run_disable_autologin "$conf"
-  chmod u+w "$conf"   # restored immediately, so nothing later inherits the mode
-
-  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
-    "precondition: the write-back really was refused — the keys are still in the live config, so the revert did NOT happen"
-
-  [ "$RUN_DISABLE_RC" -ne 0 ] || \
-    fail "a failed strip must exit non-zero, got $RUN_DISABLE_RC — the caller cannot tell a reverted config from an untouched one, and install.sh:135 reports success either way (stderr: $RUN_DISABLE_OUT)"
-  assert_file_exists "$bak" \
-    "a failed strip keeps the backup — with the autologin keys still live in $conf, that .dreamconnect.bak is the operator's only copy of the pre-install config"
-}
-
-# WHAT IS WRONG TODAY (breaker lap 1, defect 1 — CHECKPOINT row 2). The pair
-# above only ever ran against a conf with NO autologin configured, so "strip our
-# keys out" and "put back what was there" looked like the same thing. They are
-# not. enable_autologin's strip regex is `#?[[:space:]]*AutomaticLogin(Enable)?`
-# (install-lib.sh:96) — it drops ANY autologin key in [daemon] before writing
-# ours, including an admin's live one. disable_autologin then strips ours back
-# out to nothing, so the admin's own autologin never comes back; until slice 1
-# it was at least still readable in the orphaned .bak, and now that a successful
-# revert deletes the .bak, the last copy goes with it. Silent, on every
-# uninstall, on exactly the boxes where somebody had already set this up.
-#
-# WHAT THE FIX IS — factory/CHECKPOINT.md row 2, verbatim (owner-confirmed):
-#
-#   "disable_autologin now extracts whatever AutomaticLogin*/AutomaticLoginEnable
-#    content (or absence) was in the backup's [daemon] section and writes that
-#    back in place of ours — surgically, not a wholesale file restore, so
-#    unrelated admin edits elsewhere in the file still survive — before
-#    deleting .bak."
-#
-# Every assertion below is one clause of that sentence, checked against the
-# fixture's OWN planted bytes (`AutomaticLogin=alice`, above) rather than
-# anything computed from the library:
-#   - "writes that back"        -> alice's pair is live in the conf again,
-#   - "in place of ours"        -> dreamconnect-host is gone,
-#   - "surgically ... survive"  -> both post-install admin edits are still there,
-#   - "before deleting .bak"    -> and the backup is cleaned up, as in slice 1.
-# The section check is GDM's format, not ours: these keys mean nothing outside
-# [daemon].
-#
-# NOT asserted, deliberately: the commented `#  AutomaticLogin = user1` hint
-# lines the fixture also plants. enable_autologin's `#?` eats those too, and
-# whether "content ... in the backup's [daemon] section" is meant to cover a
-# distro's documentation comments is not something the CHECKPOINT settles — see
-# the gap noted in the run record. Their loss is cosmetic; alice's is not.
-test_disable_autologin_restores_an_autologin_configured_before_the_install() {
-  local conf bak daemon
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  conf="$TMP/gdm-undo-preexisting/custom.conf"; bak="$conf.dreamconnect.bak"
-  plant_gdm_conf_with_autologin "$conf" alice
-
-  # The .bak under test is the REAL one, written by the real enable_autologin —
-  # a hand-built backup would only prove disable_autologin can read a file this
-  # test invented.
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was retargeted (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: enable_autologin backed the admin's config up"
-  [ -e "$bak" ] || return 0
-  assert_not_contains "$(cat "$conf")" "AutomaticLogin=alice" \
-    "precondition: enable_autologin really did overwrite the admin's pre-existing autologin — that is the config this test is owed back"
-  assert_contains "$(cat "$bak")" "AutomaticLogin=alice" \
-    "precondition: the backup holds it, so the revert has a source to restore from"
-
-  edit_gdm_conf_after_install "$conf" "$TMP/gdm-undo-preexisting-edit"
-
-  run_disable_autologin "$conf"
-  daemon="$(gdm_daemon_section "$conf")"
-
-  assert_contains "$daemon" "AutomaticLogin=alice" \
-    "the admin's own autologin is live under [daemon] again — uninstalling DreamConnect must not silently log a machine out of the account it logged in to before we arrived"
-  assert_contains "$daemon" "AutomaticLoginEnable=true" \
-    "and it is enabled — AutomaticLogin without AutomaticLoginEnable configures nothing"
-  assert_not_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
-    "our account is out of the file: restored in place of ours, not alongside"
-  assert_contains "$daemon" "InitialSetupEnable=false" \
-    "an admin edit made inside [daemon] since the install survives — the revert is surgical, not a wholesale restore of the backup"
-  assert_contains "$(cat "$conf")" "DisallowTCP=true" \
-    "an admin edit made outside [daemon] since the install survives too"
-  assert_file_absent "$bak" \
-    "the backup is removed once its content has actually been put back (issue #22)"
-  assert_eq "$RUN_DISABLE_RC" "0" \
-    "a successful revert exits 0 (stderr: $RUN_DISABLE_OUT)"
-}
-
-# WHAT IS WRONG TODAY (breaker lap 1, defect 2 — CHECKPOINT row 3). Slice 1 put
-# the .bak cleanup at the END of disable_autologin, so on the success path the
-# function's exit status is that `rm -f`'s, not the revert's — contradicting the
-# doc comment it was written under (install-lib.sh:107-109, verbatim: "Returns
-# the status of the strip itself (the awk pass and its write-back), not of the
-# scratch-file cleanup"). A .bak that cannot be unlinked therefore reports a
-# revert that DID happen as a failure, and install.sh's uninstall() — which
-# slice 1 taught to branch on this value — prints the failure message and tells
-# the operator their autologin is still live when it is not.
-#
-# THE INJECTION is the same shape as the strip-failure test above: make the real
-# mechanism fail rather than replace it. Unlinking a file needs write permission
-# on its DIRECTORY, so `chmod a-w` on the directory holding custom.conf denies
-# the .bak deletion while leaving the revert itself untouched — the write-back
-# opens an existing file, which needs write permission on the file only. That is
-# also why this works without root, which this suite never has (line 18). The
-# two preconditions below prove the injection landed where it was aimed: the
-# .bak really did survive, and the revert really did happen.
-#
-# EXPECTED VALUE: 0, from the doc comment quoted above and CHECKPOINT row 3's
-# "Fix: explicit `return 0` after cleanup". A leftover .bak is not a failed
-# revert — the keys are out of the live config either way.
-test_disable_autologin_reports_success_when_the_backup_cannot_be_removed() {
-  local conf bak dir
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  dir="$TMP/gdm-undo-stuck-bak"; conf="$dir/custom.conf"; bak="$conf.dreamconnect.bak"
-  plant_gdm_conf "$conf"
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: there is a backup for the cleanup to trip over"
-  [ -e "$bak" ] || return 0
-
-  chmod a-w "$dir"
-  run_disable_autologin "$conf"
-  chmod u+w "$dir"   # restored immediately, so the suite's own cleanup still works
-
-  assert_file_exists "$bak" \
-    "precondition: the .bak deletion really was denied — otherwise this test proves nothing about the return code"
-  assert_not_contains "$(cat "$conf")" "AutomaticLogin" \
-    "precondition: the revert itself succeeded — the autologin keys are out of the live config"
-  assert_eq "$RUN_DISABLE_RC" "0" \
-    "a revert that happened reports success even though its backup could not be unlinked — the return value is the revert's, not the cleanup's (stderr: $RUN_DISABLE_OUT)"
-}
-
-# WHAT IS WRONG TODAY (breaker lap 2, defect 1 — CHECKPOINT row 4, verbatim):
-#
-#   "`getline line < bak` returns -1 on an unreadable/unopenable backup, and the
-#    current code treats that identically to a clean EOF (n=0, "no prior
-#    autologin keys") -- so a `.bak` that can't be read (permission error, disk
-#    error, or truncated/corrupted by a crash mid-cp during enable_autologin's
-#    non-atomic `cp -a`) silently discards whatever it held, reports success, and
-#    deletes it. Fix: detect getline's -1 (read failure) distinctly from EOF; on
-#    a read failure, fail closed -- do not strip, preserve .bak, return non-zero
-#    -- matching the function's own already-established principle that a failure
-#    preserves the operator's only copy."
-#
-# The three assertions below are that fix's three clauses, in order: do not
-# strip, preserve .bak, return non-zero. None is read off the current body,
-# which does the opposite of all three.
-#
-# THE INJECTION breaks the read of the BACKUP and nothing else — mode 000 on
-# $conf.dreamconnect.bak, leaving $conf itself readable and writable, so the awk
-# pass and its write-back would both still succeed and the strip would still
-# happen. That is the point: the fail-closed behaviour has to come from noticing
-# the failed read, not from the write path falling over on its own. This suite
-# never runs as root (line 18), so mode 000 genuinely denies the read; the guard
-# below proves it did on this box rather than assuming it.
-#
-# WHY THIS IS DATA LOSS and not a cosmetic error path: the fixture is the same
-# admin-configured box as the restore test above (a real prior
-# AutomaticLogin=alice), so a call that strips to nothing and then deletes the
-# backup destroys the last copy of alice's config — the exact loss slice 2 was
-# written to prevent, reached through a different door.
-test_disable_autologin_fails_closed_when_the_backup_cannot_be_read() {
-  local conf bak
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  conf="$TMP/gdm-undo-unreadable-bak/custom.conf"; bak="$conf.dreamconnect.bak"
-  plant_gdm_conf_with_autologin "$conf" alice
-
-  # The real backup again, written by the real enable_autologin — an unreadable
-  # file this test created from scratch would prove nothing about the one an
-  # uninstall actually finds.
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was retargeted (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: enable_autologin backed the admin's config up"
-  [ -e "$bak" ] || return 0
-  assert_contains "$(cat "$bak")" "AutomaticLogin=alice" \
-    "precondition: that backup holds the admin's own autologin, and after the install it is the only copy left"
-
-  chmod 000 "$bak"
-  if cat "$bak" >/dev/null 2>&1; then
-    chmod u+rw "$bak"
-    skip "disable_autologin fail-closed on an unreadable backup: mode 000 still readable on this box (filesystem or capability), so the read failure under test cannot be produced here"
-    return 0
-  fi
-
-  run_disable_autologin "$conf"
-  chmod u+rw "$bak" 2>/dev/null || true   # only if it survived; restored at once
-
-  assert_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
-    "a backup that cannot be read leaves the live config alone — with no way to see what it owes back, a strip-to-nothing is indistinguishable from 'the backup held no autologin', and one of those two is silent data loss"
-  assert_file_exists "$bak" \
-    "and the backup stays: unreadable by this call is not the same as worthless — it is still the operator's only copy of the pre-install autologin (CHECKPOINT row 4)"
-  [ "$RUN_DISABLE_RC" -ne 0 ] || \
-    fail "an unreadable backup must exit non-zero, got $RUN_DISABLE_RC — install.sh:137 branches on this value and would announce a completed revert over a config it never read (stderr: $RUN_DISABLE_OUT)"
-}
-
-# WHAT IS WRONG TODAY (breaker lap 2, defect 2 — CHECKPOINT row 5, verbatim):
-#
-#   "the collect regex (line ~133) includes `#?` (matching enable_autologin's own
-#    strip regex, so a backup's commented AutomaticLogin hint lines, e.g. Debian
-#    gdm3's `#  AutomaticLogin = user1`, are captured for restore) but the
-#    LIVE-conf strip regex (line ~142) omits `#?`, so restored commented lines are
-#    re-collected on every subsequent disable_autologin call (reachable via
-#    install.sh:136's retry-on-still-present-.bak path, which slice 3 deliberately
-#    made non-fatal) but never stripped -- duplicating without bound across
-#    repeated uninstall attempts."
-#
-# EXPECTED VALUE — one, from CHECKPOINT row 2's owner-confirmed sentence: the
-# revert writes back "whatever ... was in the backup's [daemon] section" "in
-# place of ours". The backup holds that hint line once, so the config holds it
-# once, however many times the revert runs. A second call has nothing new to
-# restore.
-#
-# THE TWO-CALL SCENARIO IS THE REAL ONE, not a contrived loop. install.sh:136
-# gates the call on `[ -f "$conf.dreamconnect.bak" ]`, so a second --uninstall
-# reaches disable_autologin again exactly when the first left the backup behind.
-# The first call here does that the way the test above already establishes: a-w
-# on the directory denies the unlink while the revert itself succeeds (row 3 —
-# a leftover .bak is not a failed revert). The operator then fixes the
-# permission and re-runs --uninstall, which is the second call. Nothing about
-# defect 1 is involved: the backup is readable throughout.
-#
-# WHAT IT DISCRIMINATES. The count after the FIRST call is asserted too, at 1,
-# so this cannot go green by dropping the hint lines from the collect regex
-# instead — that would restore nothing and contradict row 2's resolved "restore
-# whatever was in the backup's [daemon] section verbatim (comment or live), no
-# special-casing".
-test_disable_autologin_does_not_duplicate_a_restored_comment_hint_on_a_second_call() {
-  local conf bak dir hint enable_hint
-  declare -F disable_autologin >/dev/null || {
-    fail "disable_autologin(): not defined"; return 0; }
-  declare -F enable_autologin >/dev/null || {
-    fail "enable_autologin(): not defined — cannot build the .bak fixture"; return 0; }
-
-  dir="$TMP/gdm-undo-twice"; conf="$dir/custom.conf"; bak="$conf.dreamconnect.bak"
-  hint="#  AutomaticLogin = user1"
-  enable_hint="#  AutomaticLoginEnable = true"
-  plant_gdm_conf_with_commented_autologin_hints "$conf"
-  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
-    "precondition: the stock Debian gdm3 conf carries that commented hint once"
-
-  run_enable_autologin "$conf" dreamconnect-host
-  assert_eq "$RUN_AUTOLOGIN_RC" "0" \
-    "precondition: autologin was configured (stderr: $RUN_AUTOLOGIN_OUT)"
-  assert_file_exists "$bak" "precondition: there is a backup to restore from"
-  [ -e "$bak" ] || return 0
-  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "0" \
-    "precondition: enable_autologin's strip ate the commented hint (its regex matches #?), so after the install it lives only in the backup"
-
-  # First --uninstall: the revert runs, the .bak deletion is denied, so the
-  # backup survives — which is the state install.sh:136 gates its retry on.
-  chmod a-w "$dir"
-  run_disable_autologin "$conf"
-  chmod u+w "$dir"
-
-  if [ ! -e "$bak" ]; then
-    skip "disable_autologin duplication on a repeat call: the .bak was removed despite a read-only directory on this box, so the two-call path cannot be produced here"
-    return 0
-  fi
-  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
-    "precondition: the first call put the backup's commented hint back, once (slice 2's restore)"
-
-  # Second --uninstall, over the config the first one just restored.
-  run_disable_autologin "$conf"
-
-  assert_eq "$(gdm_daemon_line_count "$conf" "$hint")" "1" \
-    "a repeated revert restores the backup's commented hint ONCE, not once per call — the live-strip pass has to recognise the line the collect pass puts back, or every retried --uninstall grows [daemon] by another copy, without bound"
-  assert_eq "$(gdm_daemon_line_count "$conf" "$enable_hint")" "1" \
-    "and the same for its companion — GDM reads the pair together, so a duplicated AutomaticLoginEnable hint is the same defect"
-  assert_not_contains "$(cat "$conf")" "AutomaticLogin=dreamconnect-host" \
-    "our own keys are still gone after the second call — the repeat must not put anything of ours back either"
-}
-
 # Call site 6. Two halves, because a passwd source is DATA, not a fact about the
 # box: the real root entry is refused by the uid-0 and /root-home rails that are
 # already there (verifying the architect's "already sound"), while an entry
@@ -9163,27 +8714,6 @@ test_session_cli_starts_the_daemon_with_display_and_label() {
     "the daemon must be given --label, or the picker names the session after the account"
 }
 
-# Ordering, install side: the display env only exists once the backstage session
-# is actually running, so registration has to come after the units are started.
-test_install_sh_starts_registration_after_its_session_is_running() {
-  local sh started reg
-  sh="$HERE/install.sh"
-  assert_file_exists "$sh" "install.sh is present"
-  [ -f "$sh" ] || return 0
-
-  # `restart`, not `enable`: enabling only wires the unit for boot, and
-  # install.sh deliberately restarts to apply this run's changes. The restart is
-  # the line after which a session is actually running and has published a
-  # display.
-  started="$(first_code_line "$sh" 'systemctl --user restart')"
-  [ -n "$started" ] || { fail "call site: install.sh no longer starts the user units"; return 0; }
-  reg="$(first_code_line "$sh" 'write_registry_entry')"
-  [ -n "$reg" ] || { fail "call site: install.sh never calls write_registry_entry"; return 0; }
-
-  [ "$started" -lt "$reg" ] || \
-    fail "call site: write_registry_entry (line $reg) must come AFTER the session units are started (line $started) — before that there is no published display to register"
-}
-
 # Uninstall already removes /run/dreamconnect wholesale. That still covers the
 # registry — but only while the registry lives under it.
 #
@@ -9670,11 +9200,22 @@ test_install_sh_no_longer_registers_inline_or_guesses_the_display() {
     fail "call site: install.sh still falls back to \${DISPLAY:-}, the installing shell's own display — over ssh -X that registers localhost:10.0 and the session then refuses"
 }
 
+# Ordering, install side: the display env only exists once the backstage session
+# is actually running, so registration has to come after the units are started.
+#
+# This function was defined twice, and bash kept this, the later body. The
+# earlier copy probed `write_registry_entry` — the inline write that FINDING 3
+# above removed — so it had not merely stopped running, it could no longer have
+# passed. The comment is its; the body is the one that was live.
 test_install_sh_starts_registration_after_its_session_is_running() {
   local sh started reg
   sh="$HERE/install.sh"
   [ -f "$sh" ] || { fail "install.sh is present"; return 0; }
 
+  # `restart`, not `enable`: enabling only wires the unit for boot, and
+  # install.sh deliberately restarts to apply this run's changes. The restart is
+  # the line after which a session is actually running and has published a
+  # display.
   started="$(first_code_line "$sh" 'systemctl --user restart')"
   [ -n "$started" ] || { fail "call site: install.sh no longer starts the user units"; return 0; }
   reg="$(first_code_line "$sh" 'systemctl[[:space:]]+(enable|start|restart)[[:space:]]+.*dreamconnect-register@')"
@@ -10703,6 +10244,58 @@ test_install_sh_shows_the_agent_build_output_when_the_build_fails() {
   assert_not_contains "$stmt" "|| :" "build call site: install.sh:$built swallows a failed agent build"
 }
 
+# --- the suite's own rail -----------------------------------------------------
+# A test that never runs cannot fail, so nothing else in this file can see it.
+# Two ways in, both of which had actually happened by the time this was written:
+# six test_disable_autologin_* functions arrived on a merge whose library half
+# was dropped and were never added to the list below (they called helpers that do
+# not exist and asserted a .bak lifecycle this repo no longer has), and
+# test_install_sh_starts_registration_after_its_session_is_running was defined
+# twice — bash keeps the later body, so the earlier one's assertions had silently
+# stopped running. A third way is cheap to cover while we are here: a name in the
+# list with no definition, and a name listed twice.
+#
+# Reads this file's own source, the same idiom as
+# test_no_autologin_environment_variable_is_honoured. The list is one
+# line-continued `for CURRENT in ... do`, so the extraction anchors on BOTH ends:
+# a rail that mis-parses the block reads an empty list and then passes
+# vacuously, which is the one failure mode that would make it worthless — hence
+# the explicit "could not read" refusal rather than an empty-set comparison.
+test_every_test_function_is_registered_exactly_once() {
+  local self defs listed name
+
+  self="$HERE/test_install.sh"
+  [ -f "$self" ] || { fail "suite rail: cannot find this suite's own source at $self"; return 0; }
+
+  # Definitions only: anchored at column 0, which is how every test in this file
+  # is written, and which a mention inside a comment or a string cannot match.
+  defs="$(grep -oE '^test_[A-Za-z0-9_]+\(\)' "$self" | sed 's/()$//')"
+  listed="$(awk '
+    /^for CURRENT in[[:space:]]*\\$/ { inlist = 1; next }
+    inlist && /^do$/                 { exit }
+    inlist                           { print }
+  ' "$self" | sed 's/[[:space:]]*\\$//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d')"
+
+  [ -n "$defs" ] || { fail "suite rail: found no test definitions at all — the grep is wrong, not the file"; return 0; }
+  [ -n "$listed" ] || { fail "suite rail: could not read the 'for CURRENT in ... do' list — a mis-parse here would let every other check below pass vacuously"; return 0; }
+
+  while read -r name; do
+    [ -n "$name" ] && fail "suite rail: $name() is defined more than once — bash keeps the LAST body, so every earlier copy's assertions stopped running the moment the second one was added"
+  done <<< "$(printf '%s\n' "$defs" | sort | uniq -d)"
+
+  while read -r name; do
+    [ -n "$name" ] && fail "suite rail: $name() is listed more than once in the runner — it runs twice and its name appears twice in the output, which reads like a flake"
+  done <<< "$(printf '%s\n' "$listed" | sort | uniq -d)"
+
+  while read -r name; do
+    [ -n "$name" ] && fail "suite rail: $name() is defined but never named in the 'for CURRENT in' list — it has never run, so whatever it asserts is not covered"
+  done <<< "$(comm -23 <(printf '%s\n' "$defs" | sort -u) <(printf '%s\n' "$listed" | sort -u))"
+
+  while read -r name; do
+    [ -n "$name" ] && fail "suite rail: $name is named in the runner list but nothing defines it — the runner will report it as an unknown command"
+  done <<< "$(comm -13 <(printf '%s\n' "$defs" | sort -u) <(printf '%s\n' "$listed" | sort -u))"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10998,7 +10591,8 @@ for CURRENT in \
   test_run_capturing_prints_the_log_before_set_e_can_abort \
   test_run_capturing_leaves_no_temporary_file_behind \
   test_run_capturing_refuses_a_call_with_no_command \
-  test_install_sh_shows_the_agent_build_output_when_the_build_fails
+  test_install_sh_shows_the_agent_build_output_when_the_build_fails \
+  test_every_test_function_is_registered_exactly_once
 do
   before=$FAILURES
   # bash caches where it found a command, and clears that cache only when PATH is

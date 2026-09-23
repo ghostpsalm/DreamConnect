@@ -345,18 +345,12 @@ warnings around it are all gone; git history has them if they're ever needed.
 
 The display-host account survives, and now implies backstage:
 
-- **Autologin the human's session** (`DREAMCONNECT_AUTOLOGIN=1`) — `install.sh`
-  configures GDM autologin on explicit opt-in: a section-aware, idempotent edit
-  of `/etc/gdm{,3}/custom.conf` that preserves the rest of the file, backs it up,
-  and is reverted on `--uninstall`. Without the opt-in it warns and points at it.
-  Warns if `WaylandEnable=false` (the bridge needs a Wayland session at boot).
-  The trade-off is the box booting straight into that human's unlocked session.
 - **A dedicated display-host account** (`DREAMCONNECT_HOST_ACCOUNT=<name>`) —
   creates a hidden, sudo-less, password-disabled account and runs the daemon
   there instead, so no human's session is ever exposed. Idle-lock and
   idle-suspend are disabled for that account (a lock or a suspend kills the
-  remote session — see F3 for the attended case), and autologin is always
-  configured for it, so `DREAMCONNECT_AUTOLOGIN` isn't consulted in this mode.
+  remote session — see F3 for the attended case); the account never logs in at
+  all, since backstage starts its session directly.
   The dconf profile that disables idle-lock is pushed directly into the
   account's live `systemd --user` manager at install time (issue #26), not
   just written to `environment.d` and left to a manager restart — that closes
@@ -366,7 +360,7 @@ The display-host account survives, and now implies backstage:
   remains **unverified on physical hardware**.
   `--uninstall` reverts the lot: deletes the account if this installer created
   it (behind seven safety rails), restores anything it had to overwrite on a
-  pre-existing account, and undoes the idle-lock and autologin changes.
+  pre-existing account, and undoes the idle-lock changes.
   **Code-complete and unit-tested** (`test_install.sh`, 86 assertions); account
   creation, reboot survival and uninstall reversal are not yet confirmed on a
   physical box.

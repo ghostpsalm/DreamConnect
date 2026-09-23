@@ -88,6 +88,37 @@ re-run it once the first has finished. The kernel drops the lock when the holder
 exits, including on a crash or a kill, so there is never a stale lock to clear by
 hand.
 
+## An older box still logs in automatically, and has a `custom.conf.dreamconnect.bak`
+
+Older installers offered `DREAMCONNECT_AUTOLOGIN=1` and configured GDM autologin
+themselves: they copied `/etc/gdm/custom.conf` (or `/etc/gdm3/custom.conf`) to
+`<conf>.dreamconnect.bak` and then wrote `AutomaticLoginEnable=true` and
+`AutomaticLogin=<account>` into `[daemon]`. Backstage replaced that, and the GDM
+edit was removed along with the environment variable and both helpers.
+
+**Today's `install.sh --uninstall` deliberately leaves both alone.** It has no
+code that reads or writes a display-manager config — a rail in `test_install.sh`
+keeps it that way — so it will not revert an edit a different version made, and
+it will not delete a backup it did not write. An uninstall that started editing
+`/etc/gdm/custom.conf` would be re-introducing a root write to a shared admin
+file in order to change how the box boots, on a config this project has no way to
+test. That is worse than the untidiness it cleans up.
+
+A box that was installed before the removal is therefore still autologging in.
+Undo it by hand, once:
+
+```sh
+sudo cp /etc/gdm/custom.conf /etc/gdm/custom.conf.before-manual-edit
+sudoedit /etc/gdm/custom.conf   # delete AutomaticLoginEnable= and AutomaticLogin=
+                                # from [daemon]
+sudo rm /etc/gdm/custom.conf.dreamconnect.bak
+```
+
+Read the `.bak` before deleting it: the old edit stripped any *commented*
+`#AutomaticLogin=` hints out of `[daemon]` as well, so the backup is the only
+record of what GDM originally shipped there. On Debian/Ubuntu the path is
+`/etc/gdm3/custom.conf`. Reboot to confirm the box stops at the greeter.
+
 ## Checking status
 
 ```sh

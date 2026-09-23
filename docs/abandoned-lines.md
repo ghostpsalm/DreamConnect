@@ -44,11 +44,28 @@ helpers and their ~150 lines of tests were all for a feature that no longer
 exists, so the merge kept `main`'s deletion. The branch's other four issues
 (#25, #26, #28 and the uid argument) did land.
 
-What that leaves open: a box installed *before* autologin was removed still has
+What that left open: a box installed *before* autologin was removed still has
 `/etc/gdm/custom.conf.dreamconnect.bak`, still logs in automatically, and
 today's `--uninstall` reverts neither. That is an upgrade path, not a defect in
-the current installer — decide it on issue #22, rather than by resurrecting the
-code.
+the current installer.
+
+**Decided on issue #22: it stays a manual remediation, documented rather than
+automated** — see *"An older box still logs in automatically"* in
+[`docs/troubleshooting.md`](troubleshooting.md). Automating the revert means
+putting a root writer of `/etc/gdm{,3}/custom.conf` back into the installer, to
+change how a box boots, on a file this project cannot test against a real GDM;
+`test_install.sh` holds the opposite position in two live rails
+(`test_the_autologin_helpers_are_gone`,
+`test_the_installer_never_edits_the_display_manager_config`). The one verified
+box was re-installed clean when the feature was removed, so the population this
+would serve is boxes nobody has confirmed exist.
+
+The merge also dropped the *library* half of the #22 fix while keeping its six
+tests, which then sat in `test_install.sh` defined but never registered — 449
+lines asserting a `.bak` lifecycle that is no longer true of this repo. They are
+gone, and `test_every_test_function_is_registered_exactly_once` now fails the
+suite on a test that is defined and never run, so the next merge to lose half of
+something says so.
 
 ## 2026-09-07 — the multi-session-picker line
 
