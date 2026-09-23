@@ -39,6 +39,9 @@ in, boot jar embedded). Requires a JDK (built/tested on JDK 25).
 
 The ByteBuddy jar is verified against a SHA-256 pinned in `build.sh` on every
 build, cached copies included; a mismatch aborts before anything is compiled.
+The jar is staged into `target/` first and it is that copy which is hashed,
+compiled against and shaded in, so the bytes checked are the bytes shipped even
+if `lib/` changes mid-build.
 
 ## Agent options
 

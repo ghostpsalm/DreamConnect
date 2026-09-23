@@ -462,6 +462,149 @@ test_a_correctly_hashed_cached_jar_still_builds() {
     "correctly hashed cached jar: the agent jar is still assembled"
 }
 
+# Case G -- issue #48. Verifying lib/ and then *rereading* lib/ binds nothing:
+# between the hash and the two later reads (`javac -cp`, `unzip … 'net/*'`)
+# anything able to write agent/lib/ substitutes its own bytes, and whatever it
+# substitutes is shaded into dreamconnect-agent.jar, which runs as root inside
+# ScreenConnect's JVM. That is the residual gap in the control #43 added.
+#
+# The swap is deterministic, not timed: a `javac` on the sandbox PATH overwrites
+# the cache entry and then execs the real compiler, so it lands squarely inside
+# the window without the test having to race anything. This tests the *ordering*
+# -- that what was hashed is what is read -- not a real race.
+#
+# The poison is the genuine fixture jar plus one extra class, on purpose. A
+# poison that merely replaced the jar would make the later compile fail for want
+# of ByteBuddy, and the case would go red on a broken build rather than on the
+# defect. A superset compiles exactly as the real jar does, so against a
+# vulnerable build.sh everything succeeds and the payload rides in silently --
+# which is the whole point, and is what the assertions below discriminate on.
+poison_jar() {  # good_jar dest -> a copy of good_jar carrying net/PWNED.class
+  local good="$1" dest="$2" stage
+  stage="$(mktemp -d "$TMP/poison.XXXXXX")" || return 1
+  mkdir -p "$stage/net" || return 1
+  printf 'not bytecode, just a marker for the shade step\n' > "$stage/net/PWNED.class" || return 1
+  cp "$good" "$dest" || return 1
+  chmod u+w "$dest" || return 1
+  jar --update --file "$dest" -C "$stage" net/PWNED.class || return 1
+}
+
+test_a_jar_swapped_after_verification_is_never_shaded_into_the_agent() {
+  local sb src poison real_javac listing lib_hash t
+  src="$(fixture_jar)" || {
+    fail "no $BB_JAR_NAME matching the pinned hash is available, so the verify-then-reread case cannot run (#46). Run scripts/fetch-test-fixtures.sh, or set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME"
+    return 0
+  }
+  for t in javac jar unzip; do
+    command -v "$t" >/dev/null || { skip "$t not installed; cannot run a full build"; return 0; }
+  done
+  real_javac="$(command -v javac)"
+
+  sb="$(make_sandbox)"
+  cp "$src" "$sb/lib/$BB_JAR_NAME"
+  poison="$sb/poison.jar"
+  poison_jar "$src" "$poison" >/dev/null 2>&1 \
+    || { skip "could not build a poisoned jar with this jar(1); the swap would be a no-op"; return 0; }
+
+  # rm before cp: the cache entry may be read-only, and a swap that silently
+  # failed would leave every assertion below passing for no reason at all.
+  cat > "$sb/bin/javac" <<EOF
+#!/usr/bin/env bash
+rm -f "$sb/lib/$BB_JAR_NAME"
+cp "$poison" "$sb/lib/$BB_JAR_NAME"
+exec "$real_javac" "\$@"
+EOF
+  chmod +x "$sb/bin/javac"
+
+  run_build "$sb"
+
+  assert_eq "$RC" "0" "swapped jar: the build still succeeds (the swap is invisible to it)"
+  assert_file_exists "$sb/target/dist/dreamconnect-agent.jar" \
+    "swapped jar: the agent jar is still assembled"
+
+  # Proves the swap actually fired. Without it every assertion here would pass
+  # against a build.sh that simply never ran javac.
+  lib_hash="$(sha256sum < "$sb/lib/$BB_JAR_NAME" 2>/dev/null | cut -d' ' -f1)"
+  assert_ne "$lib_hash" "$BB_SHA256" \
+    "swapped jar: the cache entry must have been replaced, or this case tests nothing"
+
+  listing="$(unzip -l "$sb/target/dist/dreamconnect-agent.jar" 2>&1)"
+  assert_not_contains "$listing" "PWNED" \
+    "swapped jar: only the bytes that were hashed may be shaded in -- the agent runs as root"
+  # The other half: shading must still have happened. A build.sh that shaded
+  # nothing at all would satisfy the assertion above for the wrong reason.
+  assert_contains "$listing" "net/bytebuddy/" \
+    "swapped jar: the verified ByteBuddy classes are still shaded in"
+}
+
+# Case H -- the *other* read #48 names. Issue #48 is about two consumers,
+# `javac -cp "$BB_JAR:…"` and `unzip … 'net/*'`, and Case G above observes only
+# the second: it asserts on the contents of the finished agent jar, which come
+# solely from the unzip. Because Case G's poison is a superset of the real
+# fixture, javac compiles identically whichever jar it is handed and emits no
+# classes from its classpath either way -- so switching the `javac -cp` read
+# back to lib/ leaves every assertion in Case G satisfied, and half the fix
+# would be unguarded.
+#
+# What discriminates the classpath read is a poison the compiler cannot build
+# against: a jar with no ByteBuddy in it at all. Handed the staged copy, the
+# agent compile succeeds and the build exits 0; handed lib/, javac cannot resolve
+# `net.bytebuddy.*` (every class under agent/src imports it) and build.sh aborts
+# under `set -e`. So rc is the discriminator here, and a compile error is the
+# *expected* signal of the defect rather than a broken build -- the inverse of
+# Case G, which needs its build to succeed for the payload to ride in.
+bytebuddy_free_jar() {  # dest -> a jar holding net/PWNED.class and nothing else
+  local dest="$1" stage
+  stage="$(mktemp -d "$TMP/nobb.XXXXXX")" || return 1
+  mkdir -p "$stage/net" || return 1
+  printf 'not bytecode, just a marker for the shade step\n' > "$stage/net/PWNED.class" || return 1
+  jar --create --file "$dest" -C "$stage" net/PWNED.class || return 1
+}
+
+test_a_jar_swapped_after_verification_is_never_compiled_against() {
+  local sb src poison real_javac listing t
+  src="$(fixture_jar)" || {
+    fail "no $BB_JAR_NAME matching the pinned hash is available, so the classpath half of the verify-then-reread case cannot run (#46). Run scripts/fetch-test-fixtures.sh, or set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME"
+    return 0
+  }
+  for t in javac jar unzip; do
+    command -v "$t" >/dev/null || { skip "$t not installed; cannot run a full build"; return 0; }
+  done
+  real_javac="$(command -v javac)"
+
+  sb="$(make_sandbox)"
+  cp "$src" "$sb/lib/$BB_JAR_NAME"
+  poison="$sb/poison-no-bytebuddy.jar"
+  bytebuddy_free_jar "$poison" >/dev/null 2>&1 \
+    || { skip "could not build a stand-in jar with this jar(1); the swap would be a no-op"; return 0; }
+
+  # The swap fires on the *first* javac -- the bootstrap compile, which takes no
+  # -cp -- so lib/ is already poisoned by the time the agent compile asks for a
+  # classpath. Re-running it on the second invocation is harmless and idempotent.
+  cat > "$sb/bin/javac" <<EOF
+#!/usr/bin/env bash
+rm -f "$sb/lib/$BB_JAR_NAME"
+cp "$poison" "$sb/lib/$BB_JAR_NAME"
+exec "$real_javac" "\$@"
+EOF
+  chmod +x "$sb/bin/javac"
+
+  run_build "$sb"
+
+  assert_eq "$RC" "0" \
+    "swapped jar: the agent compile must read the staged copy -- against lib/ there is no ByteBuddy to compile against"
+  assert_not_contains "$OUT" "package net.bytebuddy" \
+    "swapped jar: a 'package net.bytebuddy does not exist' error means javac was pointed at lib/, not at what was hashed"
+  assert_file_exists "$sb/target/dist/dreamconnect-agent.jar" \
+    "swapped jar: the agent jar is still assembled"
+
+  listing="$(unzip -l "$sb/target/dist/dreamconnect-agent.jar" 2>&1)"
+  assert_not_contains "$listing" "PWNED" \
+    "swapped jar: only the bytes that were hashed may be shaded in -- the agent runs as root"
+  assert_contains "$listing" "net/bytebuddy/" \
+    "swapped jar: the verified ByteBuddy classes are still shaded in"
+}
+
 # Safety rail: whatever the two cases above did, they did it in the sandbox.
 test_the_real_agent_lib_cache_is_never_written() {
   assert_eq "$(cache_fingerprint)" "$CACHE_BEFORE" \
@@ -475,6 +618,8 @@ for CURRENT in \
   test_a_path_the_checksum_line_format_cannot_parse_is_still_a_real_verification \
   test_a_jar_that_cannot_be_hashed_is_not_reported_as_rejected \
   test_a_correctly_hashed_cached_jar_still_builds \
+  test_a_jar_swapped_after_verification_is_never_shaded_into_the_agent \
+  test_a_jar_swapped_after_verification_is_never_compiled_against \
   test_the_real_agent_lib_cache_is_never_written
 do
   before=$FAILURES
