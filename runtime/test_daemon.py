@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dreamconnect_daemon as d  # noqa: E402
@@ -783,6 +784,257 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          % stopped)
 
 
+class _RecordingSession:
+    """Presents the surface shutdown() uses, and records the order it is used in.
+
+    Duck-typed rather than a Session or a GreeterSession because the property
+    under test is exactly that shutdown() needs neither: it releases whatever it
+    is handed, in one fixed order, with no step able to skip another.
+    """
+
+    def __init__(self, raise_on=()):
+        self.calls = []
+        self.raise_on = set(raise_on)
+        self.blanked = None
+
+    def _did(self, name):
+        self.calls.append(name)
+        if name in self.raise_on:
+            raise RuntimeError("fake session: %s failed" % name)
+
+    def set_blank(self, on):
+        self.blanked = on
+        self._did("set_blank")
+
+    def _release_wake_lock(self):
+        self._did("_release_wake_lock")
+
+    def stop(self):
+        self._did("stop")
+
+
+class TestShutdownReleasesEverythingOnProcessExit(unittest.TestCase):
+    """What the daemon must hand back before it exits, and in what order.
+
+    The blank is a zeroed CRTC gamma ramp and the wake lock is a SessionManager
+    inhibit — both outlive the process, so they come off first, while the bus
+    connection the session holds is still alive. The session itself goes last
+    because ending it is what releases the virtual monitor (#55).
+    """
+
+    def test_everything_is_released_in_order(self):
+        s = _RecordingSession()
+        d.shutdown(s)
+        self.assertEqual(s.calls, ["set_blank", "_release_wake_lock", "stop"],
+                         "blank and wake lock come off while the session is still "
+                         "there to take the calls; the session is ended last")
+        self.assertIs(s.blanked, False, "the blank is lifted, not re-applied")
+
+    def test_a_raising_blank_still_releases_the_session(self):
+        # The one that matters: a set_blank that throws must not be able to keep
+        # the Mutter session — and its virtual monitor — alive past our exit.
+        s = _RecordingSession(raise_on=("set_blank",))
+        d.shutdown(s)
+        self.assertIn("stop", s.calls,
+                      "a failure in an earlier step swallowed the session release: %s"
+                      % s.calls)
+
+    def test_a_raising_wake_lock_release_still_releases_the_session(self):
+        s = _RecordingSession(raise_on=("_release_wake_lock",))
+        d.shutdown(s)
+        self.assertIn("stop", s.calls, s.calls)
+
+    def test_a_raising_stop_does_not_escape(self):
+        # shutdown() runs from a finally; raising out of it would replace the
+        # error that actually killed the daemon with this one.
+        s = _RecordingSession(raise_on=("stop",))
+        d.shutdown(s)
+        self.assertEqual(s.calls, ["set_blank", "_release_wake_lock", "stop"])
+
+    def test_it_issues_the_stop_on_the_wire(self):
+        bus = FakeBus()
+        s = d.Session(bus, None, None, virtual=(1280, 720))
+        s.start()
+        rd = s.rd_path
+        d.shutdown(s)
+        self.assertEqual(bus.stops(), [rd],
+                         "the real Session's stop() reaches Mutter, which is the "
+                         "only thing that drops the virtual monitor")
+        self.assertIsNone(s.rd_path, "and the session is no longer held")
+
+    def test_it_stops_nothing_when_no_session_was_ever_created(self):
+        bus = FakeBus()
+        s = d.Session(bus, None, None, virtual=(1280, 720))
+        d.shutdown(s)
+        self.assertEqual(bus.stops(), [],
+                         "a Session that never started holds no rd_path, and a Stop "
+                         "aimed at None is a call to Mutter with a path of None")
+
+
+class _StubControlServer:
+    def __init__(self, *a, **kw):
+        pass
+
+    def start(self):
+        pass
+
+
+class _RaisingControlServer:
+    """Stands in for every way main() can fail *after* start() succeeded —
+    the socket path is unwritable, a stale socket cannot be unlinked, the bind
+    races another daemon. By then the virtual monitor already exists."""
+
+    def __init__(self, *a, **kw):
+        raise OSError("fake: control socket refused")
+
+
+class _FakeLoop:
+    def __init__(self, on_run=None):
+        self._on_run = on_run
+        self.ran = False
+
+    def run(self):
+        self.ran = True
+        if self._on_run:
+            self._on_run()
+
+    def quit(self):
+        pass
+
+
+class TestMainReleasesTheSessionOnEveryExit(unittest.TestCase):
+    """Issue #55, the half the reported symptom came from.
+
+    start() stopping the previous in-process session fixes the restart case. It
+    does nothing for process exit: main() used to create the session, start it,
+    resolve the display, build the ControlServer and arm the watchdog all
+    *outside* the try/finally that releases it. Anything failing in that window
+    exited holding the monitor, and the unit is Restart=always/RestartSec=2 — so
+    a crash loop added a virtual monitor every two seconds. That is the live
+    2560x720 screen, `Added virtual monitor` x25, and a top bar stranded on a
+    monitor we do not capture.
+
+    These drive the real main() against a fake bus, so what is pinned is the
+    exit path itself, not a helper a test called directly: deleting the release
+    from main() must turn one of these red.
+    """
+
+    def _drive(self, argv, bus=None, control_server=_StubControlServer,
+               on_run=None, bus_get=None):
+        """Run the real d.main() with the outside world stubbed out.
+
+        patch.object + addCleanup throughout, never bare assignment: GLib, Gio
+        and Gst are real modules shared process-wide, so a missed restore does
+        not fail here — it fails some other suite, in full-gate order only.
+        """
+        loop = _FakeLoop(on_run)
+        patches = [
+            patch.object(d.Gst, "init", lambda *a: None),
+            patch.object(d, "FrameBuffer", lambda path: None),
+            patch.object(d, "ControlServer", control_server),
+            patch.object(d.Gio, "bus_get_sync",
+                         bus_get or (lambda *a: bus)),
+            patch.object(d.GLib, "MainLoop", lambda: loop),
+            patch.object(d.GLib, "unix_signal_add", lambda *a: 1),
+            patch.object(d.GLib, "timeout_add_seconds", lambda *a: 1),
+            patch.object(sys, "argv", ["dreamconnect-daemon"] + argv),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return loop
+
+    @staticmethod
+    def _backstage_argv():
+        return ["--virtual", "1280x720", "--socket", SOCK]
+
+    def test_a_start_that_fails_partway_still_releases_the_monitor(self):
+        # Case A. Start comes after CreateSession and RecordVirtual, so by the
+        # time it fails Mutter has already conjured the monitor.
+        bus = FakeBus(fail_on=("Start",))
+        self._drive(self._backstage_argv(), bus=bus)
+        with self.assertRaises(Exception):
+            d.main()
+        self.assertEqual(bus.stops(), ["/rd/session/u1"],
+                         "a start() that failed past CreateSession exited holding "
+                         "its virtual monitor; calls were %s" % bus.methods())
+
+    def test_a_failure_after_a_good_start_still_releases_the_monitor(self):
+        # Case B, and the reported crash loop: the session is fully up and a
+        # later step in main() throws.
+        bus = FakeBus()
+        self._drive(self._backstage_argv(), bus=bus,
+                    control_server=_RaisingControlServer)
+        with self.assertRaises(OSError):
+            d.main()
+        self.assertEqual(bus.stops(), ["/rd/session/u1"],
+                         "the ControlServer failed with the session already "
+                         "established, and the monitor went with the process")
+
+    def test_the_failure_still_propagates_so_systemd_sees_it(self):
+        # The release is a finally, never an except: swallowing the error would
+        # exit 0, and systemd would stop restarting a daemon that never worked.
+        bus = FakeBus()
+        self._drive(self._backstage_argv(), bus=bus,
+                    control_server=_RaisingControlServer)
+        with self.assertRaises(OSError) as caught:
+            d.main()
+        self.assertIn("control socket refused", str(caught.exception),
+                      "the original error survives the cleanup, unreplaced")
+
+    def test_a_clean_exit_releases_the_monitor_exactly_once(self):
+        # Case C — the ordinary SIGTERM path, and the one that pins the exit
+        # route is reached at all. Deleting the release from main() turns this
+        # red; nothing else did before.
+        bus = FakeBus()
+        loop = self._drive(self._backstage_argv(), bus=bus)
+        d.main()
+        self.assertTrue(loop.ran, "the main loop was never entered")
+        self.assertEqual(bus.stops(), ["/rd/session/u1"],
+                         "a clean exit ends the session exactly once — a second "
+                         "Stop would be aimed at a session that is already gone")
+
+    def test_greeter_mode_takes_the_same_guarded_path(self):
+        # Case D. GreeterSession holds an Xvfb and an xfreerdp instead of a
+        # Mutter session; leaving either behind holds the private display
+        # against the next start. Stub-level: this proves greeter exits through
+        # the same release, not that a live Xvfb is reaped.
+        try:
+            import dreamconnect_greeter as g
+        except ImportError as e:  # pragma: no cover - greeter deps absent
+            self.skipTest("dreamconnect_greeter will not import (%s); greeter "
+                          "mode cannot be exercised on this box" % e)
+        stopped = []
+        for name, fn in (("start", lambda self: None),
+                         ("stop", lambda self: stopped.append(self))):
+            p = patch.object(g.GreeterSession, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        pw = tempfile.NamedTemporaryFile(delete=False)
+        pw.write(b"secret\n")
+        pw.close()
+        self.addCleanup(os.unlink, pw.name)
+        self._drive(["--greeter", "--rdp-password-file", pw.name,
+                     "--socket", SOCK],
+                    control_server=_RaisingControlServer)
+        with self.assertRaises(OSError):
+            d.main()
+        self.assertEqual(len(stopped), 1,
+                         "greeter mode left its Xvfb and RDP client behind: stop() "
+                         "was called %d times" % len(stopped))
+
+    def test_a_failure_before_any_session_exists_reports_itself(self):
+        # Case E. Widening the try means the finally can now run with no session
+        # at all. Without the None guard the real error — no session bus — would
+        # be replaced by an AttributeError raised out of the cleanup.
+        def no_bus(*_a):
+            raise RuntimeError("fake: could not connect to the session bus")
+
+        self._drive(self._backstage_argv(), bus_get=no_bus)
+        with self.assertRaises(RuntimeError) as caught:
+            d.main()
+        self.assertIn("session bus", str(caught.exception),
+                      "the cleanup masked the failure that actually happened")
 
 
 class TestHeadlessCaptureFallback(unittest.TestCase):
