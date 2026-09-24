@@ -69,6 +69,25 @@ NOT_FOUND_LOG="$TMP/unknown-commands"
 # shellcheck source=install-lib.sh
 . "$LIB"
 
+# --- machine independence: nsswitch.conf --------------------------------------
+# passwd_entry's #65 disambiguation reads the CONFIGURED passwd sources, so every
+# test that reaches the real getent path (DC_PASSWD_DB empty, a getent shim on
+# PATH) would otherwise answer one way on a box with sss or ldap in
+# /etc/nsswitch.conf and another way on a box without — including issue #30's own
+# controls, which predate the variable and assert a plain absence. Pinned once,
+# here, to a source list the root probe fully speaks for, so those tests are
+# driven by their shims and nothing else. Exported because several of them run
+# the library in a child `bash -c`.
+#
+# The tests that are ABOUT this parsing set DC_NSSWITCH_FILE themselves per call,
+# the way every other DC_* fixture override in this file is done.
+export DC_NSSWITCH_FILE="$TMP/nsswitch-files-only.conf"
+cat > "$DC_NSSWITCH_FILE" <<'EOF'
+passwd:     files
+group:      files
+shadow:     files
+EOF
+
 # --- tests -------------------------------------------------------------------
 
 # Sourcing the library must do nothing but define functions: no output, no
@@ -9912,17 +9931,22 @@ test_register_label_survives_a_crlf_state_file() {
 #   broken <rc>   exits <rc> for EVERY key, root included: the breaker's repro
 #                 of a broken NSS module or a down SSSD, where the source
 #                 answered nothing at all and absence was never established.
+#   degraded <db> issue #65's shim: `root` is answered from the fixture the way
+#                 a healthy `files` answers it, and every OTHER key exits 2 with
+#                 a backend message, the way a dead `sss` fails. A per-key probe
+#                 of root reads this box as healthy; it is not.
 #
 # Deliberately generic about argv — it answers any key it can and skips a
 # leading `-s <service>` — so which probe classifies getent's ambiguous exit 2
 # stays the builder's choice and is not frozen here.
-make_getent_shim() {  # dir serving|broken db|rc -> echoes the shim dir
+make_getent_shim() {  # dir serving|broken|degraded db|rc -> echoes the shim dir
   local d="$1"
   mkdir -p "$d"
-  rm -f "$d/rc" "$d/db"
+  rm -f "$d/rc" "$d/db" "$d/degraded"
   case "$2" in
-    broken)  printf '%s\n' "${3:-2}" > "$d/rc" ;;
-    serving) printf '%s\n' "$3" > "$d/db" ;;
+    broken)   printf '%s\n' "${3:-2}" > "$d/rc" ;;
+    serving)  printf '%s\n' "$3" > "$d/db" ;;
+    degraded) printf '%s\n' "$3" > "$d/db"; : > "$d/degraded" ;;
     *) fail "make_getent_shim: unknown mode [$2]"; return 1 ;;
   esac
   cat > "$d/getent" <<'EOF'
@@ -9938,6 +9962,10 @@ args=("$@")
 [ "${args[0]:-}" = passwd ] || exit 2
 key="${args[1]:-}"
 [ -n "$key" ] || { cat "$db"; exit 0; }
+if [ -f "$here/degraded" ] && [ "$key" != root ] && [ "$key" != 0 ]; then
+  echo "getent: sssd backend unavailable" >&2
+  exit 2
+fi
 line="$(awk -F: -v k="$key" '$1 == k || $3 == k { print; exit }' "$db")"
 [ -n "$line" ] || exit 2
 printf '%s\n' "$line"
@@ -9947,13 +9975,17 @@ EOF
 }
 
 PE_OUT=""; PE_ERR=""; PE_RC=0
-try_passwd_entry() {  # shim_dir_or_empty passwd_db_or_empty name
+# The optional 4th argument is the nsswitch.conf fixture. Omitted, it is the
+# suite-wide `passwd: files` pin, so every call written before issue #65 asks
+# the same question it always did; issue #65's own tests pass their own.
+try_passwd_entry() {  # shim_dir_or_empty passwd_db_or_empty name [nsswitch_file]
   local errf="$TMP/passwd-entry.err"
   # bash clears its command hash only on a PATH assignment IN THE SHELL, and
   # every shim here arrives as a prefix on a call instead; without this a shim
   # from an earlier phase is reused in silence.
   hash -r
-  PE_OUT="$(DC_PASSWD_DB="$2" PATH="${1:+$1:}$PATH" passwd_entry "$3" 2>"$errf")"
+  PE_OUT="$(DC_PASSWD_DB="$2" DC_NSSWITCH_FILE="${4:-$DC_NSSWITCH_FILE}" \
+            PATH="${1:+$1:}$PATH" passwd_entry "$3" 2>"$errf")"
   PE_RC=$?
   PE_ERR="$(cat "$errf")"
   return 0
@@ -9961,9 +9993,10 @@ try_passwd_entry() {  # shim_dir_or_empty passwd_db_or_empty name
 
 # A dry ensure_host_account driven through the real (getent) lookup path, the
 # one run_ensure_dry cannot reach because it always sets DC_PASSWD_DB.
-run_ensure_dry_via_getent() {  # shim_dir accountsservice_dir name
+run_ensure_dry_via_getent() {  # shim_dir accountsservice_dir name [nsswitch_file]
   hash -r
   ENSURE_OUT="$(DC_DRY_RUN=1 DC_PASSWD_DB= DC_ACCOUNTSSERVICE_DIR="$2" \
+                DC_NSSWITCH_FILE="${4:-$DC_NSSWITCH_FILE}" \
                 PATH="$1:$PATH" ensure_host_account "$3" 2>&1)"
   ENSURE_RC=$?
   return 0
@@ -9975,8 +10008,9 @@ SETE_ERR=""; SETE_RC=0
 # does not handle the new non-zero status does not refuse, it DIES mid-function —
 # same exit code, no message, no refusal. This suite runs without -e, so nothing
 # else in it can see that.
-run_under_set_e() {  # shim_dir_or_empty passwd_db state_file snippet
+run_under_set_e() {  # shim_dir_or_empty passwd_db state_file snippet [nsswitch_file]
   SETE_ERR="$(PATH="${1:+$1:}$PATH" DC_PASSWD_DB="$2" DC_STATE_FILE="$3" SUDO_USER= \
+              DC_NSSWITCH_FILE="${5:-$DC_NSSWITCH_FILE}" \
               bash -c "set -euo pipefail; . '$LIB'; $4" 2>&1 >/dev/null)"
   SETE_RC=$?
   return 0
@@ -10133,13 +10167,17 @@ test_a_failed_passwd_lookup_refuses_at_every_call_site() {
 # loginctl/userdel/systemctl shims on PATH. run_uninstall_dry and
 # run_uninstall_shimmed cannot reach it: both always set DC_PASSWD_DB, which
 # takes passwd_entry's fixture branch and never consults getent at all.
-run_uninstall_via_getent() {  # dry("1"|"") getent_dir shim_dir state_file name protected_user [uid]
+#
+# The optional 8th argument is the nsswitch.conf fixture, defaulting to the
+# suite-wide `passwd: files` pin — same convention as try_passwd_entry.
+run_uninstall_via_getent() {  # dry("1"|"") getent_dir shim_dir state_file name protected_user [uid] [nsswitch_file]
   local -a args=("$5" "$6")
   [ "$#" -lt 7 ] || args+=("$7")
   # try_passwd_entry's reason, unchanged: the shims arrive as a PATH prefix on a
   # function call, which does not clear bash's command hash.
   hash -r
   UNINSTALL_OUT="$(DC_DRY_RUN="$1" DC_PASSWD_DB= DC_STATE_FILE="$4" SUDO_USER= \
+                   DC_NSSWITCH_FILE="${8:-$DC_NSSWITCH_FILE}" \
                    DC_MANAGER_POLL_INTERVAL=0.05 DC_BUS_POLL_INTERVAL=0.05 \
                    PATH="$2:$3:$PATH" uninstall_host_account "${args[@]}" 2>&1)"
   UNINSTALL_RC=$?
@@ -10252,6 +10290,373 @@ userdel" "control: an account that IS there still gets the full removal, in orde
   gindent="${gtext%%[![:space:]]*}"; rmindent="${rmtext%%[![:space:]]*}"
   [ "${#rmindent}" -gt "${#gindent}" ] || fail \
     "state gate: install.sh:$rmline is not inside the conditional at line $gline (indented ${#rmindent}, the conditional ${#gindent}) — the state-file deletion has to be gated on the removal having succeeded, or issue #30's failed lookup takes install.state with it"
+}
+
+# --- issue #65: the root probe is per-KEY, and absence is a per-SOURCE question
+#
+# #30 classifies getent's ambiguous exit 2 by probing `getent passwd root`. That
+# probe is per-KEY. On `passwd: files sss` with a dead SSSD, `files` answers root
+# and reports NSS healthy while the LDAP-backed account the lookup was actually
+# about was never reached by anything — so an adopted, still-live account is
+# classified ABSENT, uninstall_host_account takes #21's short-circuit and returns
+# 0, and install.sh deletes the only record that would let a later --uninstall
+# retry. The destructive branch is the one that runs.
+#
+# CONTRACT UNDER TEST, from this issue's requirements and its accepted plan. The
+# expected values come from that contract and from the fixtures' own bytes, never
+# from what the shipped code does:
+#
+#   passwd_sources
+#     stdout: every source named by every `passwd:` line of
+#       ${DC_NSSWITCH_FILE:-/etc/nsswitch.conf}, one per line, lowercased,
+#       deduplicated, comments and `[ACTION=...]` groups removed
+#     non-zero with empty stdout: unreadable, or no passwd database named —
+#       "unknown", which a caller must never read as "none"
+#
+#   unproven_passwd_sources
+#     stdout: the configured sources the `getent passwd root` probe does not
+#       speak for, or empty when it speaks for all of them. Unknown sources
+#       print something, never nothing.
+#
+#   passwd_entry gains a FOURTH status:
+#     3  getent said "no such key", the root probe answered, but a configured
+#        source that could hold this account was not proven to have answered.
+#        Empty stdout; stderr names the account. Distinct from 2 on purpose: 2
+#        means nothing was established and every caller must refuse, while
+#        widening 2 to cover this would make ensure_host_account refuse to
+#        create on every SSSD-configured box.
+#
+#   Callers of status 3:
+#     uninstall_host_account  — refuses unless the state file proves it created
+#                               this exact account (useradd writes to `files`,
+#                               which is what the root probe reads)
+#     ensure_host_account     — still creates, and says what it could not prove
+#     host_account_removable  — refuses
+#     resolve_host_identity   — refuses
+#
+#   And requirement 1, which stands alone and does not depend on any of the
+#   above: uninstall_host_account's absence short-circuit may return 0 only when
+#   install.state records CREATED_ACCOUNT=1 for THIS name. An adopted account's
+#   absence is never certain.
+#
+# Wording is the builder's throughout; nothing below asserts it beyond the
+# account (and, where the source list is the point, the source) being named.
+
+# An nsswitch.conf fixture. Written verbatim, one argument per line, so a case
+# below can put exactly the bytes it is about into the file.
+make_nsswitch_fixture() {  # label line... -> echoes the path
+  local f="$TMP/nsswitch-$1.conf"
+  shift
+  printf '%s\n' "$@" > "$f"
+  echo "$f"
+}
+
+PS_OUT=""; PS_RC=0
+# passwd_sources' answer flattened to one space-separated line, which is what
+# makes a table assertion readable. The ORDER is asserted with it: first-seen
+# order is what lets a reader match the answer against the fixture by eye.
+try_passwd_sources() {  # nsswitch_file
+  local raw
+  raw="$(DC_NSSWITCH_FILE="$1" passwd_sources 2>/dev/null)"; PS_RC=$?
+  PS_OUT="$(printf '%s' "$raw" | tr '\n' ' ')"
+  PS_OUT="${PS_OUT% }"
+  return 0
+}
+
+test_passwd_sources_lists_the_configured_passwd_databases() {
+  local f
+  declare -F passwd_sources >/dev/null || { fail "passwd_sources() is not defined"; return 0; }
+
+  f="$(make_nsswitch_fixture files-only "passwd: files" "group: files")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_RC" "0" "a files-only nsswitch: exit 0"
+  assert_eq "$PS_OUT" "files" "a files-only nsswitch: just files — the group line is not a passwd line"
+
+  f="$(make_nsswitch_fixture sss "passwd:     sss files systemd")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_OUT" "sss files systemd" "three sources: all three, in the order the line names them"
+
+  f="$(make_nsswitch_fixture brackets "passwd: files [SUCCESS=merge] sss [!UNAVAIL=return] ldap")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_OUT" "files sss ldap" \
+    "action groups are removed: [SUCCESS=merge] qualifies the source before it and is not a source"
+
+  f="$(make_nsswitch_fixture comments "# passwd: ldap" "passwd: files # sss was here once")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_OUT" "files" \
+    "comments are stripped: neither a commented-out line nor a trailing comment names a source"
+
+  f="$(make_nsswitch_fixture upper "passwd: FILES SSS")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_OUT" "files sss" "the answer is lowercased, so the allowlist can be compared literally"
+
+  f="$(make_nsswitch_fixture two-lines "passwd: files" "passwd: sss files")"
+  try_passwd_sources "$f"
+  assert_eq "$PS_OUT" "files sss" \
+    "two passwd lines: the union, deduplicated — glibc reads the first, but the second may be the one in force and the safe answer covers both"
+
+  f="$(make_nsswitch_fixture no-passwd "group: files" "shadow: files")"
+  try_passwd_sources "$f"
+  [ "$PS_RC" -ne 0 ] || fail \
+    "an nsswitch.conf with no passwd line: exited 0 — 'no sources named' is unknown, and a caller that read it as 'no sources' would trust every absence"
+  assert_eq "$PS_OUT" "" "no passwd line: empty stdout"
+
+  f="$(make_nsswitch_fixture empty-passwd "passwd:")"
+  try_passwd_sources "$f"
+  [ "$PS_RC" -ne 0 ] || fail "a passwd line naming nothing: exited 0, same mistake as no line at all"
+
+  try_passwd_sources "$TMP/nsswitch-there-is-no-such-file.conf"
+  [ "$PS_RC" -ne 0 ] || fail "an nsswitch.conf that cannot be read: exited 0"
+  assert_eq "$PS_OUT" "" "an unreadable nsswitch.conf: empty stdout"
+
+  # An exotic file must fail TOWARDS unproven. This one's bracket is never
+  # closed, so the group cannot be removed; what it must not do is quietly
+  # shrink to the trusted sources and call the rest parsed.
+  f="$(make_nsswitch_fixture unterminated "passwd: files [SUCCESS=merge sss")"
+  try_passwd_sources "$f"
+  [ "$PS_OUT" != "files" ] || fail \
+    "an unterminated action group: parsed down to 'files' alone — an nsswitch.conf this cannot parse must leave the absence unproven, never look fully local"
+}
+
+test_unproven_passwd_sources_trusts_only_what_the_root_probe_speaks_for() {
+  local f
+  declare -F unproven_passwd_sources >/dev/null || {
+    fail "unproven_passwd_sources() is not defined"; return 0; }
+
+  f="$(make_nsswitch_fixture up-files "passwd: files")"
+  assert_eq "$(DC_NSSWITCH_FILE="$f" unproven_passwd_sources)" "" \
+    "files alone: nothing unproven — root is in /etc/passwd, so the probe reads the same source"
+
+  f="$(make_nsswitch_fixture up-files-systemd "passwd: files systemd")"
+  assert_eq "$(DC_NSSWITCH_FILE="$f" unproven_passwd_sources)" "" \
+    "files systemd: nothing unproven — nss-systemd serves only DynamicUser=/nspawn identities, which a display-host account can never be"
+
+  f="$(make_nsswitch_fixture up-sss "passwd: files sss")"
+  assert_eq "$(DC_NSSWITCH_FILE="$f" unproven_passwd_sources)" "sss" \
+    "files sss: sss is unproven — this is issue #65's box exactly"
+
+  f="$(make_nsswitch_fixture up-ldap "passwd: ldap files winbind")"
+  assert_eq "$(DC_NSSWITCH_FILE="$f" unproven_passwd_sources)" "ldap winbind" \
+    "an allowlist, not a denylist: every source that is not files or systemd is reported"
+
+  f="$(make_nsswitch_fixture up-compat "passwd: compat")"
+  assert_eq "$(DC_NSSWITCH_FILE="$f" unproven_passwd_sources)" "compat" \
+    "compat: unproven — it pulls in NIS through passwd_compat, which the root probe says nothing about"
+
+  [ -n "$(DC_NSSWITCH_FILE="$TMP/nsswitch-there-is-no-such-file.conf" unproven_passwd_sources)" ] || \
+    fail "an unreadable nsswitch.conf: reported nothing unproven — unknown sources are unproven sources, and answering empty here is the per-key probe's own mistake in a new place"
+}
+
+test_passwd_entry_refuses_to_call_an_unproven_absence_an_absence() {
+  local live gone degraded serving broken sss files_only
+  declare -F passwd_entry >/dev/null || { fail "passwd_entry() is not defined"; return 0; }
+  live="$(make_removal_passwd_db)"
+  gone="$(make_hand_deleted_passwd_db)"
+  sss="$(make_nsswitch_fixture pe-sss "passwd: files sss")"
+  files_only="$(make_nsswitch_fixture pe-files "passwd: files systemd")"
+
+  # 1. Issue #65's box: the account IS there, in a source that is down, while
+  #    root is answered out of a healthy `files`.
+  degraded="$(make_getent_shim "$TMP/getent-65-degraded" degraded "$live")"
+  try_passwd_entry "$degraded" "" dreamconnect-host "$sss"
+  assert_eq "$PE_RC" "3" \
+    "a dead sss with a healthy files: exit 3 — root answering proves files, and says nothing at all about the source this account may live in"
+  assert_eq "$PE_OUT" "" "an unproven absence: empty stdout"
+  assert_contains "$PE_ERR" "dreamconnect-host" "an unproven absence: stderr names the account"
+  assert_contains "$PE_ERR" "sss" "an unproven absence: stderr names the source that was not proven"
+
+  # 2. Control: the SAME shim on a box whose every configured source the root
+  #    probe speaks for. Nothing is unproven, so exit 2 is an absence, exactly
+  #    as it was before this issue.
+  try_passwd_entry "$degraded" "" dreamconnect-host "$files_only"
+  assert_eq "$PE_RC" "1" \
+    "control: files+systemd only — the root probe speaks for every configured source, so a missing key is still a plain absence"
+  # Not "silent": getent's own stderr is passed through untouched (#30), and the
+  # shim writes a backend line here. What a plain absence must add is NOTHING —
+  # the bytes below are the shim's, verbatim, and passwd_entry has said nothing.
+  assert_eq "$PE_ERR" "getent: sssd backend unavailable" \
+    "control: a plain absence adds nothing of its own to stderr"
+
+  # 3. Control: a source list that cannot be trusted does not turn a FAILED
+  #    lookup into an unproven one. Root itself did not answer here, so nothing
+  #    at all was established and 2 is the only honest answer.
+  broken="$(make_getent_shim "$TMP/getent-65-broken" broken 2)"
+  try_passwd_entry "$broken" "" dreamconnect-host "$sss"
+  assert_eq "$PE_RC" "2" \
+    "control: getent failing for every key including root is still exit 2, never 3 — 3 says 'probably absent', and nothing here says even that"
+
+  # 4. A source list that cannot be trusted with a perfectly healthy getent:
+  #    the account really is gone from `files`, but sss was never asked.
+  serving="$(make_getent_shim "$TMP/getent-65-gone" serving "$gone")"
+  try_passwd_entry "$serving" "" dreamconnect-host "$sss"
+  assert_eq "$PE_RC" "3" \
+    "a healthy getent with an unprovable source list: still exit 3 — a lookup that did not reach sss has not established that an sss-backed account is gone"
+
+  # 5. Control: FOUND beats all of it. An entry on stdout is not an absence of
+  #    any kind, so the source list never comes into it.
+  serving="$(make_getent_shim "$TMP/getent-65-live" serving "$live")"
+  try_passwd_entry "$serving" "" dreamconnect-host "$sss"
+  assert_eq "$PE_RC" "0" "control: an account that IS there is found, exit 0, whatever nsswitch.conf says"
+  assert_contains "$PE_OUT" "dreamconnect-host:x:987:" "control: the passwd line is still on stdout"
+
+  # 6. An unreadable nsswitch.conf leaves the sources unknown, and unknown is
+  #    unproven — never "all fine".
+  try_passwd_entry "$serving" "" dreamconnect-ghost "$TMP/nsswitch-there-is-no-such-file.conf"
+  assert_eq "$PE_RC" "3" \
+    "an nsswitch.conf that cannot be read: exit 3 — the configured sources are unknown, so no absence can be trusted"
+
+  # 7. The DC_PASSWD_DB fixture branch never answers 3: the file IS the whole
+  #    source, so a name it does not hold is absent with nothing left unproven.
+  #    Without this, pinning the suite's nsswitch fixture would be load-bearing
+  #    for every DC_PASSWD_DB test in this file.
+  try_passwd_entry "" "$gone" dreamconnect-host "$sss"
+  assert_eq "$PE_RC" "1" \
+    "DC_PASSWD_DB with an untrustworthy nsswitch: still exit 1 — the fixture file is the whole source and nsswitch.conf does not describe it"
+}
+
+test_an_unproven_absence_refuses_where_it_would_delete_and_creates_where_it_would_not() {
+  local live degraded sss state asdir
+  declare -F passwd_entry >/dev/null || { fail "passwd_entry() is not defined"; return 0; }
+  require_ensure_host_account "unproven absence" || return 0
+  live="$(make_removal_passwd_db)"
+  sss="$(make_nsswitch_fixture sites-sss "passwd: files sss")"
+  degraded="$(make_getent_shim "$TMP/getent-65-sites" degraded "$live")"
+  state="$TMP/state-65-sites/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+
+  # ensure_host_account: the one caller that must NOT refuse. Refusing here
+  # would block every install on every box with sss configured — an always-on
+  # blocker traded for a rare destructive bug — so it creates and says what it
+  # could not prove. This is why 3 is a status of its own and not a wider 2.
+  asdir="$TMP/as-65-unproven"; mkdir -p "$asdir"
+  run_ensure_dry_via_getent "$degraded" "$asdir" dreamconnect-host "$sss"
+  [ "$ENSURE_RC" -ne 127 ] || { fail "unproven absence: ensure exit 127, not a result"; return 0; }
+  assert_eq "$ENSURE_RC" "0" \
+    "ensure_host_account on an unproven absence: exit 0 — refusing would make an SSSD-configured box uninstallable"
+  assert_contains "$(dry_lines_for useradd)" "dreamconnect-host" \
+    "ensure_host_account on an unproven absence: useradd is still reached"
+  assert_contains "$ENSURE_OUT" "dreamconnect-host" \
+    "ensure_host_account on an unproven absence: it says which account it could not prove absent"
+
+  # host_account_removable: the gate in front of userdel -r. Unproven is not
+  # good enough for a deletion.
+  run_under_set_e "$degraded" "" "$state" 'host_account_removable dreamconnect-host kogies' "$sss"
+  [ "$SETE_RC" -ne 0 ] || fail \
+    "host_account_removable on an unproven absence: exited 0 — it would authorise userdel -r on an account whose source was never asked"
+  assert_contains "$SETE_ERR" "dreamconnect-host" \
+    "host_account_removable on an unproven absence: refuses in its own voice, naming the account"
+
+  # resolve_host_identity: a uid is what must never be guessed.
+  run_under_set_e "$degraded" "" "$state" 'resolve_host_identity dreamconnect-host kogies' "$sss"
+  [ "$SETE_RC" -ne 0 ] || fail \
+    "resolve_host_identity on an unproven absence: exited 0 — a fabricated identity points the root JVM at a socket nothing binds"
+  assert_contains "$SETE_ERR" "dreamconnect-host" \
+    "resolve_host_identity on an unproven absence: refuses, naming the account"
+}
+
+# The issue's own repro, and the requirement that stands without it.
+#
+# install.state is compared BYTE FOR BYTE before and after, because the whole
+# consequence of this bug is the file being gone: uninstall_host_account never
+# writes it, so any difference is this function having grown a side effect, and
+# the exit status is what decides whether install.sh deletes it.
+test_uninstall_host_account_refuses_an_untrusted_absence_for_an_adopted_account() {
+  local live gone degraded serving shims log sss files_only state before
+  require_uninstall_host_account "untrusted absence" || return 0
+  live="$(make_removal_passwd_db)"
+  gone="$(make_hand_deleted_passwd_db)"
+  sss="$(make_nsswitch_fixture un-sss "passwd: files sss")"
+  files_only="$(make_nsswitch_fixture un-files "passwd: files systemd")"
+  degraded="$(make_getent_shim "$TMP/getent-65-uninstall-degraded" degraded "$live")"
+
+  # 1. The issue's repro, in its own terms: an adopted LDAP-backed account
+  #    (CREATED_ACCOUNT=0) on a box where root resolves and the target does not.
+  state="$TMP/state-65-adopted/install.state"
+  write_state_fixture "$state" ldaphost 987 0 1
+  before="$(cat "$state")"
+  shims="$TMP/shims-65-adopted"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$degraded" "$shims" "$state" ldaphost "" 987 "$sss"
+  [ "$UNINSTALL_RC" -ne 127 ] || { fail "adopted account: exit 127, not a result"; return 0; }
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "an ADOPTED account (CREATED_ACCOUNT=0) whose passwd source was never proven to have answered: exited 0 — install.sh reads that as removed and deletes install.state, leaving a live account with linger and autologin configured and no record any later --uninstall could retry from"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "an untrusted absence: not one of disable-linger, terminate-user or userdel was executed"
+  assert_contains "$UNINSTALL_OUT" "ldaphost" \
+    "an untrusted absence: the output names the account"
+  assert_contains "$UNINSTALL_OUT" "not trusted" \
+    "an untrusted absence: the message names a lookup that cannot be trusted, NOT an account that is gone — the operator has to know the account may still be there"
+  assert_eq "$(cat "$state")" "$before" \
+    "an untrusted absence: install.state is byte-identical afterwards, which is what makes the box recoverable by a later run"
+
+  # 2. The same, dry: nothing may even be emitted, so nothing reached run().
+  shims="$TMP/shims-65-adopted-dry"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent 1 "$degraded" "$shims" "$state" ldaphost "" 987 "$sss"
+  [ "$UNINSTALL_RC" -ne 0 ] || fail "an untrusted absence (dry): exited 0"
+  assert_eq "$(uninstall_dry_all)" "" "an untrusted absence (dry): no command is even emitted"
+  assert_eq "$(cat "$state")" "$before" "an untrusted absence (dry): install.state is untouched"
+
+  # 3. Requirement 1 on its own, with NO per-source doubt anywhere: a fully
+  #    trusted `passwd: files systemd`, a healthy getent, and an account the
+  #    source itself reports absent — but one this installer never created. An
+  #    adopted account can live in a source this code cannot prove healthy even
+  #    when today's nsswitch.conf looks local, so its absence is refused too.
+  serving="$(make_getent_shim "$TMP/getent-65-uninstall-gone" serving "$gone")"
+  state="$TMP/state-65-adopted-local/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 0 1
+  before="$(cat "$state")"
+  shims="$TMP/shims-65-adopted-local"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987 "$files_only"
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "an adopted account (CREATED_ACCOUNT=0) reported absent: exited 0 — the absence short-circuit may only speak for an account useradd wrote to files, which is the source the root probe reads"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "an adopted absence: nothing was executed"
+  assert_eq "$(cat "$state")" "$before" "an adopted absence: install.state survives"
+
+  # 4. Control, issue #21, unnarrowed: the account this installer DID create,
+  #    reported absent by a source the root probe speaks for, is still
+  #    nothing-to-remove. A blanket "refuse on any empty lookup" fails here.
+  state="$TMP/state-65-created/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  shims="$TMP/shims-65-created"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987 "$files_only"
+  assert_eq "$UNINSTALL_RC" "0" \
+    "control: an account we created, absent from a source the probe proves, is still nothing-to-remove — issue #21 is not narrowed by this fix"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "control: and still runs none of the three commands"
+
+  # 5. The same created account on issue #65's own degraded box. useradd wrote
+  #    it to `files`, and the root probe read `files`, so its absence from there
+  #    is established however dead sss is: still exit 0. Without this, "refuse
+  #    whenever a source is unproven" would pass everything above and make
+  #    --uninstall permanently impossible on an SSSD box.
+  shims="$TMP/shims-65-created-degraded"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$degraded" "$shims" "$state" dreamconnect-host kogies 987 "$sss"
+  assert_eq "$UNINSTALL_RC" "0" \
+    "control: a CREATED account on a degraded-sss box is still nothing-to-remove — useradd wrote it to files and the root probe proves files answers"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "control: and still runs none of the three commands"
+
+  # 6. The state file naming a DIFFERENT account. This short-circuit runs before
+  #    host_account_removable, so rail 5's name agreement is not there to catch
+  #    it: a record left by an install under another name would otherwise let
+  #    this return 0 and delete that record.
+  state="$TMP/state-65-mismatch/install.state"
+  write_state_fixture "$state" some-other-host 987 1 1
+  before="$(cat "$state")"
+  shims="$TMP/shims-65-mismatch"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987 "$files_only"
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "install.state recording a DIFFERENT account: exited 0 — CREATED_ACCOUNT=1 says nothing about this name, and clearing that record strands the account it does name"
+  assert_eq "$(cat "$state")" "$before" "a recorded-name mismatch: install.state survives"
+
+  # 7. Control, the other end: an account that IS there is still removed in
+  #    full, so none of the above is an implementation that refuses everything.
+  serving="$(make_getent_shim "$TMP/getent-65-uninstall-live" serving "$live")"
+  state="$TMP/state-65-live/install.state"
+  write_state_fixture "$state" dreamconnect-host 987 1 1
+  shims="$TMP/shims-65-live"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$serving" "$shims" "$state" dreamconnect-host kogies 987 "$sss"
+  assert_eq "$UNINSTALL_RC" "0" "control: an account that IS there is removed, exit 0"
+  assert_eq "$(uninstall_op_sequence "$log")" "disable-linger
+terminate-user
+userdel" "control: an account that IS there still gets the full removal, in order"
 }
 
 # --- issue #32: the installer lock -------------------------------------------
@@ -10979,6 +11384,11 @@ for CURRENT in \
   test_passwd_entry_tells_an_absent_account_from_a_failed_lookup \
   test_a_failed_passwd_lookup_refuses_at_every_call_site \
   test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state \
+  test_passwd_sources_lists_the_configured_passwd_databases \
+  test_unproven_passwd_sources_trusts_only_what_the_root_probe_speaks_for \
+  test_passwd_entry_refuses_to_call_an_unproven_absence_an_absence \
+  test_an_unproven_absence_refuses_where_it_would_delete_and_creates_where_it_would_not \
+  test_uninstall_host_account_refuses_an_untrusted_absence_for_an_adopted_account \
   test_library_defines_the_install_lock_functions \
   test_the_install_lock_lives_beside_the_state_file \
   test_a_second_run_cannot_take_the_installer_lock \

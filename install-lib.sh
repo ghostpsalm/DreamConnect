@@ -198,14 +198,100 @@ resolve_host_identity() {
   echo "$name $uid $home /run/user/$uid/dreamconnect.sock"
 }
 
+# The passwd sources nsswitch.conf names, one per line, lowercased and
+# deduplicated in the order they were seen. Non-zero with empty stdout when the
+# file cannot be read or names no passwd database at all — which a caller must
+# read as "the sources are unknown", never as "there are none".
+#
+# This exists because getent's answer is per-KEY while the question that decides
+# whether an absence is real is per-SOURCE (#65). On `passwd: files sss` with a
+# dead SSSD, `getent passwd root` is answered out of `files` and reports NSS
+# healthy, while the LDAP-backed account it was actually asked about was never
+# looked up by anything.
+#
+# Action groups are deleted rather than parsed: `[SUCCESS=merge]` qualifies the
+# source before it and is never a source itself, so keeping it would leave a
+# token no allowlist can match and make every box that tunes its merge policy
+# unprovable. EVERY `passwd:` line contributes — glibc consults the first, but a
+# file with two of them is a misconfiguration where the second may well be the
+# one in force, and the safe answer is the union. A line whose bracket is never
+# closed keeps its `[...` token for the same reason: an nsswitch.conf this
+# cannot parse must fail towards "unproven", never towards a shorter list.
+#
+# DC_NSSWITCH_FILE, if set, replaces /etc/nsswitch.conf. A TEST FIXTURE ONLY,
+# never a production path — the same rule DC_PASSWD_DB lives under, and for the
+# same reason: without it every test that reaches the real getent would answer
+# differently on a box with SSSD configured than on one without.
+passwd_sources() {
+  local f="${DC_NSSWITCH_FILE:-/etc/nsswitch.conf}" out
+  [ -r "$f" ] || return 1
+  out="$(awk '
+    { line = tolower($0)
+      sub(/#.*/, "", line)
+      if (line !~ /^[[:space:]]*passwd:/) next
+      sub(/^[[:space:]]*passwd:/, "", line)
+      gsub(/\[[^]]*\]/, " ", line)
+      n = split(line, a, /[[:space:]]+/)
+      for (i = 1; i <= n; i++)
+        if (a[i] != "" && !(a[i] in seen)) { seen[a[i]] = 1; print a[i] }
+    }' "$f")" || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# The configured passwd sources that the `getent passwd root` probe does NOT
+# speak for, space-separated on one line. Empty output means the probe answering
+# really does establish that a missing account is missing; anything printed is a
+# source that could hold the account and was never shown to have answered.
+#
+# An allowlist, never a denylist, because the failure this guards is a deletion:
+# an unknown module has to land on the cautious side. `files` is what the root
+# probe reads — root is in /etc/passwd on every box this installs on — and
+# `systemd` (nss-systemd) serves only DynamicUser= and nspawn identities, which
+# no display-host account can ever be. Everything else — sss, ldap, winbind,
+# nis, compat, altfiles, a module nobody here has heard of — stays unproven,
+# because a source that answered for root out of a DIFFERENT module has said
+# nothing whatever about this account.
+#
+# An nsswitch.conf that cannot be read or parsed prints a placeholder rather
+# than nothing: unknown sources are unproven sources, and returning empty there
+# would be the per-key probe's own mistake in a new place.
+unproven_passwd_sources() {
+  local sources src out=""
+  sources="$(passwd_sources)" || {
+    printf '%s\n' "(the passwd sources in ${DC_NSSWITCH_FILE:-/etc/nsswitch.conf} could not be read)"
+    return 0; }
+  # `while read` and not `for src in $sources`: a source name arrives from a
+  # config file, and an unquoted expansion would glob a `*` in it against the
+  # working directory before the case below ever saw it.
+  while IFS= read -r src; do
+    case "$src" in
+      files|systemd) ;;
+      *) out="${out:+$out }$src" ;;
+    esac
+  done <<< "$sources"
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
 # One passwd(5) entry, matched on the whole name, printed verbatim, and a status
-# that says which of three things happened:
+# that says which of four things happened:
 #
 #   0  found — the entry is on stdout
 #   1  absent — the passwd source answered and there is no such account; empty
 #      stdout and nothing on stderr, because absence is an answer, not an error
 #   2  the lookup itself FAILED — a broken NSS module, a down LDAP/SSSD backend,
 #      no getent at all; empty stdout and a stderr line naming the account
+#   3  getent said "no such key", but a configured passwd source that could hold
+#      this account was not proven to have answered; empty stdout and a stderr
+#      line naming the account and the unproven sources (#65)
+#
+# 3 is deliberately a status of its own rather than a widening of 2. 2 means
+# nothing at all was established and every caller must refuse it; widening it
+# would make ensure_host_account refuse to create on every SSSD-configured box,
+# turning a rare destructive bug into an always-on install blocker. 3 says which
+# way the uncertainty leans — probably absent, not provably so — and lets each
+# caller choose: the ones that would DELETE refuse it, the one that would create
+# proceeds and says what it could not prove.
 #
 # The third status is issue #30. This function used to answer with stdout alone,
 # so "not there" and "could not tell" were the same empty string and every caller
@@ -223,15 +309,19 @@ resolve_host_identity() {
 # can live in LDAP or SSSD, and corroborating against the local file would report
 # it absent while userdel still refuses to remove it — issue #30 inverted.
 #
-# Residual hole, not closable through getent: SSSD down while `files` is healthy
-# leaves the root probe answering, so an LDAP host account still classifies as
-# absent. Narrowing it needs a per-source answer getent does not expose, and the
-# only local alternative is the /etc/passwd read ruled out above.
+# That probe is per-KEY, which is the hole #65 closes: SSSD down while `files`
+# is healthy leaves root answering out of `files`, and an LDAP host account
+# classified absent on the strength of a lookup that never reached the source it
+# lives in. So the probe answering is no longer enough on its own —
+# unproven_passwd_sources has to agree that every configured source is one the
+# root probe speaks for, and where it does not, the answer is 3 rather than 1.
 #
 # DC_PASSWD_DB, if set, is read as a passwd file instead of getent passwd (a test
-# fixture only, never a production path) and answers on the same three-way scale.
+# fixture only, never a production path). It answers 0/1/2 and never 3: the
+# fixture file IS the whole source, so a name it does not contain is absent with
+# nothing left unproven.
 passwd_entry() {
-  local name="$1" entry rc=0
+  local name="$1" entry unproven rc=0
   if [ -n "${DC_PASSWD_DB:-}" ]; then
     # Readability is checked ahead of awk rather than read off its status: awk's
     # own fatal message names the FILE, and a caller refusing a removal has to be
@@ -258,7 +348,14 @@ passwd_entry() {
   # looked up and did not find, so none of them establish that the account is
   # gone.
   if [ "$rc" -eq 2 ] && getent passwd root >/dev/null 2>&1; then
-    return 1
+    # The probe answered, so SOMETHING is serving passwd. Which something is the
+    # whole of #65: on `passwd: files sss` with a dead SSSD that answer came out
+    # of `files`, and the account asked about may live in the source that did
+    # not answer at all.
+    unproven="$(unproven_passwd_sources)"
+    [ -n "$unproven" ] || return 1
+    echo "error: passwd lookup for $name: no such account, but these configured passwd sources were not proven to have answered: $unproven" >&2
+    return 3
   fi
   echo "error: passwd lookup for $name failed: the passwd source did not answer" >&2
   return 2
@@ -670,7 +767,17 @@ ensure_host_account() {  # name
     echo "error: refusing to create display-host account '$name': the passwd lookup failed, so it may already exist" >&2
     return 1; }
 
-  if [ "$rc" -eq 1 ]; then
+  # Status 3 — probably absent, not provably so (#65) — creates, where 2
+  # refuses, because the two mistakes are not symmetric. Refusing here would
+  # block every install on every box with a non-local passwd source configured,
+  # which is most of them; creating over an account that IS there after all is
+  # caught by useradd's own "user already exists" and carried out through this
+  # function's status, before the usermod that would disable its password.
+  if [ "$rc" -eq 3 ]; then
+    echo "warning: creating display-host account '$name': the passwd source reports no such account, but not every configured source was proven to have answered (see above) — if it does already exist, useradd will refuse and this install will stop" >&2
+  fi
+
+  if [ "$rc" -eq 1 ] || [ "$rc" -eq 3 ]; then
     # The comment is one argument: split, the GECOS becomes "DreamConnect" and
     # host_account_removable() would refuse to remove the account we created.
     run useradd --system --create-home --comment "DreamConnect display host" "$name"
@@ -1372,6 +1479,12 @@ remove_no_idle_lock() {  # name home
 # before userdel, or a still-running session holds its files open.
 uninstall_host_account() {  # name protected_user uid
   local name="$1" protected="${2:-}" uid="${3:-}" rc=0
+  # Declared local so read_install_state below fills THESE and not the caller's:
+  # install.sh reads all three after this returns, and a re-read that landed in
+  # its scope would be a second, silent source of truth for the account it is
+  # about to report on. The signature stays as it is — the uid is still the
+  # caller's third argument, because every other caller and test passes it.
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
 
   # The account issue #21 is about: removed outside this tool before --uninstall
   # ever ran. host_account_removable would refuse it — correctly, for a caller
@@ -1391,12 +1504,35 @@ uninstall_host_account() {  # name protected_user uid
   # (issue #30). install.sh clears install.state only on our 0, so that answer
   # orphaned a live account — linger and markers still set — with no record left
   # to retry the removal from.
+  #
+  # And the absence itself is only trustworthy for an account this installer
+  # CREATED (#65). useradd writes to `files`, which is the same source the root
+  # probe reads, so for CREATED_ACCOUNT=1 a probe that answered really does
+  # settle it. An ADOPTED account (CREATED_ACCOUNT=0) may live in LDAP or SSSD,
+  # where a dead backend and a deleted account are the same empty answer and
+  # `files` answers the probe either way — so its absence is never certain and
+  # the short-circuit that would let install.sh delete install.state is refused.
+  # The name has to agree too: this short-circuit runs before
+  # host_account_removable, so its rail 5 is not there to catch a state file
+  # naming some other account.
   if [ -n "$name" ]; then
     passwd_entry "$name" >/dev/null || rc=$?
     case "$rc" in
-      1)
-        echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
-        return 0 ;;
+      1|3)
+        read_install_state
+        if [ "$HOST_ACCOUNT" = "$name" ] && [ "$CREATED_ACCOUNT" = "1" ]; then
+          echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
+          return 0
+        fi
+        # Both arms leave install.state alone and run nothing: the point of
+        # refusing is that a later --uninstall can still find the account by it.
+        if [ "$rc" -eq 3 ]; then
+          echo "refusing to remove '$name': the passwd source reports no such account, but not every configured source was proven to have answered, so the absence is not trusted; leaving the install state in place to retry" >&2
+        else
+          printf "refusing to remove %q: the passwd source reports no such account, but install state records host account '%q' created=%q — an account this installer did not create can live in a passwd source whose health this lookup cannot prove, so the absence is not trusted; leaving the install state in place to retry\n" \
+            "$name" "$HOST_ACCOUNT" "$CREATED_ACCOUNT" >&2
+        fi
+        return 1 ;;
       # Not a refusal by host_account_removable's rails and not an absence: the
       # question was never answered. Nothing destructive is attempted, and the
       # non-zero status is what keeps install.state alive for a retry once the
