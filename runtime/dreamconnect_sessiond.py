@@ -161,7 +161,8 @@ def published_display(uid, runtime_root=RUNTIME_ROOT):
 
     Anyone who simply logged in has no envfile; register_session falls back to
     the user manager's display for them (dreamconnect-register.sh:104-112), so
-    absent is the normal case and not a fault.
+    absent is the normal case and not a fault. `manager_display` below is how
+    the supervisor gets a value for those sessions anyway (#63).
     """
     path = os.path.join(runtime_root, str(uid), DISPLAY_ENVFILE)
     try:
@@ -171,6 +172,71 @@ def published_display(uid, runtime_root=RUNTIME_ROOT):
                     return line.partition("=")[2].strip()
     except OSError:
         return None
+    return None
+
+
+# Asking a user manager costs a fork, a privilege drop and a D-Bus round trip
+# into a session this supervisor does not control. Bounded well under the 30s
+# reconcile interval, and deliberately not on Supervisor._run_command's 60s: one
+# wedged user manager must cost this pass one uid's answer, not every other
+# account's reconcile.
+MANAGER_ENV_TIMEOUT_SECONDS = 5
+
+
+def _manager_env_command(argv):
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=MANAGER_ENV_TIMEOUT_SECONDS)
+
+
+def manager_display(uid, run=None, account=None):
+    """The display that uid's systemd user manager holds, or None.
+
+    dreamconnect-register.sh's `manager_display` (:76-87) in Python, argv copied
+    character for character from it, because this is one rule with two
+    implementations: if they ever disagree the supervisor restarts register@
+    every 30 seconds and register@ writes back the display the supervisor just
+    rejected, a loop with no error in it anywhere. Change them together.
+
+    Anchored on `^DISPLAY=`, first match -- not `"DISPLAY=" in line`. A session
+    whose Xwayland has not come up yet has `GNOME_SETUP_DISPLAY=` and no
+    `DISPLAY` at all, which is the very case dreamconnect-register.sh:78-79
+    guards; a substring reader would answer with the setup display and register
+    the session onto a display nothing serves.
+
+    Root runs `runuser` into a user-owned session here, which is why #54 stopped
+    short of it. It grants that account nothing new: root already trusted this
+    same source when register@ wrote the entry, so the most a user can provoke
+    is a restart of their own register@ unit rewriting their own entry with the
+    display they claim.
+
+    Every failure -- unknown uid, non-zero exit, timeout, a runuser that is not
+    there -- is None and never an exception. This is called from inside the
+    reconcile loop, and a TimeoutExpired escaping here would take every other
+    account's pass down along with the one wedged user manager.
+    """
+    run = run or _manager_env_command
+    if account is None:
+        try:
+            import pwd
+            account = pwd.getpwuid(int(uid)).pw_name
+        except (KeyError, ValueError, ImportError):
+            return None
+    argv = ["runuser", "-u", account, "--",
+            "env", f"XDG_RUNTIME_DIR={RUNTIME_ROOT}/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME_ROOT}/{uid}/bus",
+            "systemctl", "--user", "show-environment"]
+    try:
+        result = run(argv)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result is None or getattr(result, "returncode", 0) != 0:
+        return None
+    for line in (getattr(result, "stdout", "") or "").splitlines():
+        if line.startswith("DISPLAY="):
+            # First match wins and a blank one is still the answer, matching
+            # `sed -n 's/^DISPLAY=//p' | head -n 1` followed by `[ -n "$v" ]`:
+            # the shell does not read past a blank first value either.
+            return line.partition("=")[2].strip() or None
     return None
 
 
@@ -209,7 +275,8 @@ class Supervisor:
     """Applies plans. Split from the reconciler so the rules stay pure."""
 
     def __init__(self, registry_dir=REGISTRY_DIR, reserved_users=None,
-                 runner=None, runtime_root=RUNTIME_ROOT):
+                 runner=None, runtime_root=RUNTIME_ROOT,
+                 manager_display_reader=None):
         self.registry_dir = registry_dir
         self.runtime_root = runtime_root
         if reserved_users is None:
@@ -219,6 +286,10 @@ class Supervisor:
         self.reserved_users = tuple(reserved_users)
         # Injected so tests can drive a full reconcile without touching systemd.
         self._run = runner or self._run_command
+        # A seam of its own rather than another use of `runner`: tests read
+        # `runner.calls == []` as "this pass did nothing", and asking a user
+        # manager which display it holds is a read, not an action.
+        self._manager_display = manager_display_reader or manager_display
 
     @staticmethod
     def _run_command(argv):
@@ -266,6 +337,15 @@ class Supervisor:
         Only uids that already hold an entry are read. A uid with no entry has
         nothing that could have gone stale, and walking every /run/user on the
         box twice a minute to learn that would cost more than the answer.
+
+        An attended session registered through the registrar's manager_display
+        fallback publishes no envfile at all, so before #63 it had no second
+        value, the stale rule could never fire for it, and a mid-session display
+        change left its entry stale for good. Its user manager is asked instead
+        -- but only when the envfile placed nothing, because the envfile is what
+        the registrar itself preferred, and only when the entry names a display,
+        because `stale_registrations` discards a blank entry before it ever looks
+        at the published value and an answer bought for one is thrown away.
         """
         recorded, published = {}, {}
         for uid in uids:
@@ -273,6 +353,8 @@ class Supervisor:
             if entry:
                 recorded[uid] = entry
             current = published_display(uid, self.runtime_root)
+            if not current and entry:
+                current = self._manager_display(uid)
             if current:
                 published[uid] = current
         return recorded, published
@@ -297,8 +379,12 @@ class Supervisor:
         # deregisters before ExecStart rewrites, so the entry is briefly absent,
         # and running it earlier would put that gap under the reads above.
         for uid in p.refresh:
+            # "is on" rather than "publishes": since #63 the second value is
+            # either the envfile's or the user manager's, and a log line naming
+            # a source the session never wrote is the wrong thing to hand
+            # somebody debugging a restart loop.
             log(f"re-registering uid {uid} (entry names "
-                f"{recorded_displays.get(uid)}, session publishes "
+                f"{recorded_displays.get(uid)}, session is on "
                 f"{published_displays.get(uid)})")
             self._apply(refresh_argv(uid), uid, "refresh")
         for uid, ids in p.conflicts:

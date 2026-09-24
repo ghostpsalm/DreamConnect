@@ -163,9 +163,18 @@ class TestStaleRegistrations(unittest.TestCase):
             disc.stale_registrations({992: ":1"}, {992: ":1"}), [])
 
     def test_a_uid_that_publishes_nothing_is_not_stale(self):
-        # The manager_display fallback registers without an envfile: there is
-        # nothing to compare against, so there is nothing to conclude.
+        # Since #63 this means both sources were silent -- no envfile and a user
+        # manager that could not be asked. Nothing to compare against is still
+        # nothing to conclude.
         self.assertEqual(disc.stale_registrations({1000: ":1"}, {}), [])
+
+    def test_a_manager_sourced_display_is_stale_like_any_other(self):
+        # #63: for an attended session publishing no envfile the supervisor puts
+        # the user manager's DISPLAY into this same map. The rule must not care
+        # where the value came from -- an entry naming :0 against a session now
+        # on :1 is stale whichever half of the supervisor placed the :1.
+        self.assertEqual(
+            disc.stale_registrations({1000: ":0"}, {1000: ":1"}), [1000])
 
     def test_a_uid_with_no_entry_is_not_stale(self):
         self.assertEqual(disc.stale_registrations({}, {1000: ":2"}), [])
