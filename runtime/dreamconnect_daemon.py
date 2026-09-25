@@ -389,6 +389,67 @@ class Session:
             log(f"could not read monitor state ({e}); assuming monitors exist")
             return True
 
+    def _monitor_inventory(self):
+        """Connector names Mutter reports right now, or None when unreadable.
+
+        Its own method rather than something folded into _has_monitors for the
+        reason that one already gives: "no monitors" and "could not ask" are
+        different answers here too, and the caller says something different for
+        each. Reads the *monitors* array, not the logical layout: a leaked
+        virtual monitor is normally laid out and would show in both, but one
+        that Mutter kept without placing would show only here, and the point of
+        the call is to notice a leftover, not to size the desktop.
+        """
+        try:
+            r = self.bus.call_sync(
+                "org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig",
+                "org.gnome.Mutter.DisplayConfig", "GetCurrentState", None, None,
+                Gio.DBusCallFlags.NONE, -1, None)
+            _serial, monitors, _logical, _props = r.unpack()
+            # Each entry is ((connector, vendor, product, serial), modes, props).
+            return [m[0][0] for m in monitors]
+        except Exception as e:  # noqa: BLE001
+            log(f"could not read the monitor inventory ({e})")
+            return None
+
+    def _report_monitors_before_virtual(self):
+        """Log what already exists immediately before RecordVirtual conjures a
+        monitor. This line IS the live check #67 asks for.
+
+        #55 closed every leak route this daemon controls, but a SIGKILL, a crash
+        or an OOM never reaches main()'s finally, so that session is never
+        explicitly Stopped — and whether Mutter drops a virtual monitor when its
+        creating peer disconnects is unproven (see spikes/SPIKE2_RESULTS.md).
+        Logging the inventory on every virtual start turns each restart into the
+        experiment: kill the daemon, let systemd restart it, and this line says
+        whether the dead peer's monitor survived.
+
+        Reports only. Mutter's ScreenCast and RemoteDesktop interfaces expose no
+        handle to another peer's session — no enumerate, no remove — so there is
+        nothing to reclaim with; the only lever left would be restarting the
+        whole backstage session, which is not justified while it is still
+        unproven that anything survives at all. Capture proceeds regardless: a
+        failed inventory must never cost the operator a picture.
+        """
+        present = self._monitor_inventory()
+        if present is None:
+            log("virtual capture starting; monitor inventory unreadable, so a "
+                "monitor left behind by a previous daemon would go unnoticed (#67)")
+        elif not present:
+            log("virtual capture starting; no monitor present beforehand — "
+                "nothing was left behind by an earlier daemon (#67)")
+        else:
+            log(f"virtual capture starting; {len(present)} monitor(s) already "
+                f"present before RecordVirtual: {', '.join(present)}")
+            # Deliberately "suspected", not "leaked": in attended mode with
+            # --virtual forced, the session's real outputs are present and
+            # entirely normal. Only a backstage session — no panel, no dummy
+            # plug — has no legitimate reason to show one.
+            log("if this session has no physical output (backstage), that is a "
+                "suspected leftover from a daemon that was killed rather than "
+                "stopped; nothing can reclaim it but restarting the backstage "
+                "session (#67)")
+
     def _desktop_area(self):
         """Bounding box of all logical monitors as (x, y, w, h, count), in
         desktop/logical coordinates — or None if it can't be determined."""
@@ -459,6 +520,18 @@ class Session:
         # that Mutter already closed the session, and refusing to recover from
         # that would trade a leaked monitor for a dead bridge. The identifiers
         # are cleared either way, so a later stop can never aim at a corpse.
+        #
+        # This covers every route that runs code: in-process restarts here, and
+        # SIGTERM/SIGINT (incl. `systemctl --user restart`) through main()'s
+        # finally. It cannot cover SIGKILL, a crash or an OOM — that process
+        # runs nothing — so those rely on Mutter dropping the monitor when the
+        # creating D-Bus peer disconnects. Two pieces of evidence point that
+        # way and neither is proof: spike0's header records that Mutter destroys
+        # the session the instant the creating connection drops, and #55's live
+        # box logged `Added virtual monitor` 25 times while the X screen was
+        # 2560 wide — 2 monitors, so 23 had already been reclaimed. The check
+        # that would settle it is spikes/spike2_virtual_monitor_lifetime.py;
+        # _report_monitors_before_virtual() is the standing detector (#67).
         if self.rd_path:
             try:
                 self._rd("Stop")
@@ -504,6 +577,9 @@ class Session:
                 f"{self.virtual[0]}x{self.virtual[1]}")
 
         if self.virtual:
+            # Before the call that conjures a monitor, never after: the whole
+            # value of the line is that it describes the desktop we inherited.
+            self._report_monitors_before_virtual()
             self.area_origin = (0, 0)
             self.stream_path = self.bus.call_sync(
                 SC_DEST, self.sc_path, SC_SESSION_IFACE, "RecordVirtual",
@@ -997,6 +1073,12 @@ def main():
         # mode releases an Xvfb and an RDP client instead of a Mutter session;
         # leaving either behind would hold the private display against the next
         # start.
+        #
+        # Reached on SIGTERM/SIGINT, so a `systemctl --user restart` releases the
+        # virtual monitor. NOT reached on SIGKILL, a crash or an OOM: that exit
+        # runs no Python at all, and no amount of code here can change it — see
+        # start()'s teardown comment for what is and is not established about
+        # Mutter reclaiming the monitor in that case (#67).
         release = session.stop if args.greeter else (lambda: session._rd("Stop"))
         for cleanup in (lambda: session.set_blank(False),
                         session._release_wake_lock,
