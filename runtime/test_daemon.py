@@ -578,6 +578,50 @@ class _Unpackable:
         return (self._value,)
 
 
+class _UnpackableState:
+    """GetCurrentState's reply, which is unpacked as a whole 4-tuple (serial,
+    monitors, logical, props) rather than by taking element [0] like every other
+    call the daemon makes — hence a second stand-in rather than a value.
+
+    The logical layout mirrors the monitor list because on a real desktop it
+    does: a monitor Mutter conjures is laid out. The modes list is left empty so
+    _desktop_area() declines to compute a bounding box, which keeps a physical
+    session on the proven RecordMonitor path.
+    """
+
+    def __init__(self, connectors):
+        self._connectors = list(connectors)
+
+    def unpack(self):
+        monitors = [((c, "Meta", "MetaVirtual", "0x0"), [], {})
+                    for c in self._connectors]
+        logical = [(0, 0, 1.0, 0, True, [(c, "Meta", "MetaVirtual", "0x0")], {})
+                   for c in self._connectors]
+        return (1, monitors, logical, {})
+
+
+class _LogCapture:
+    """Collect what the daemon log()s for the duration of a block.
+
+    The evidence line #67 asks for IS a journal line, so a test that wants to
+    pin it has nowhere else to look. Restored in __exit__ because d.log is
+    module-global and a leaked stub would silence every later test.
+    """
+
+    def __enter__(self):
+        self.lines = []
+        self._real = d.log
+        d.log = lambda *a: self.lines.append(" ".join(str(x) for x in a))
+        return self
+
+    def __exit__(self, *_exc):
+        d.log = self._real
+        return False
+
+    def text(self):
+        return "\n".join(self.lines)
+
+
 class FakeBus:
     """Records every D-Bus call the session makes and answers plausibly.
 
@@ -587,11 +631,14 @@ class FakeBus:
     test can tell one session from its replacement.
     """
 
-    def __init__(self, fail_on=(), fail_nth_create=None):
+    def __init__(self, fail_on=(), fail_nth_create=None, monitors=()):
         self.calls = []             # (path, iface, method)
         self.unsubscribed = []
         self.fail_on = set(fail_on)
         self.fail_nth_create = fail_nth_create
+        # Connector names GetCurrentState reports. Empty is the backstage norm:
+        # no panel, no dummy plug, nothing left behind.
+        self.monitors = list(monitors)
         self._creates = 0
         self._n = 0
 
@@ -612,6 +659,8 @@ class FakeBus:
             return _Unpackable("sess-id-%d" % self._n)
         if method in ("RecordVirtual", "RecordMonitor", "RecordArea"):
             return _Unpackable("/stream/u%d" % self._n)
+        if method == "GetCurrentState":
+            return _UnpackableState(self.monitors)
         return _Unpackable(None)
 
     def signal_subscribe(self, *a, **kw):
@@ -783,6 +832,137 @@ class TestSessionRestartStopsThePreviousSession(unittest.TestCase):
                          % stopped)
 
 
+class TestVirtualStartReportsWhatWasAlreadyThere(unittest.TestCase):
+    """Issue #67, split out of #55 as a seraph finding.
+
+    #55 stopped the previous session on every route that runs code. A SIGKILL,
+    a crash or an OOM runs none: that daemon never Stops its RemoteDesktop
+    session, and systemd restarts it 2s later. Whether its virtual monitor
+    survives depends on something nobody has measured — does Mutter drop a
+    virtual monitor when the creating D-Bus peer disconnects? If it does not,
+    every crash adds a monitor and the operator gets the #55 symptom back: a
+    2560-wide X screen for a 1280-wide session, a top bar on the half we do not
+    capture.
+
+    Mutter offers no handle on another peer's session, so there is nothing to
+    reclaim with. What the daemon CAN do is say what it inherited: log the
+    monitors that exist immediately before RecordVirtual conjures one. That
+    single line is the live check — SIGKILL the daemon and read its first lines
+    — and it stays a permanent detector for the same symptom.
+
+    Pinned here is the property, not the wording: on a virtual start the daemon
+    reports the pre-existing monitors before creating its own, it distinguishes
+    "none" from "could not ask", capture proceeds either way, and a physical
+    capture mode says nothing of the sort.
+    """
+
+    def _virtual(self, bus):
+        return d.Session(bus, None, None, virtual=(1280, 720))
+
+    def test_an_empty_desktop_is_reported_as_empty(self):
+        bus = FakeBus()
+        with _LogCapture() as logs:
+            self._virtual(bus).start()
+        self.assertIn("GetCurrentState", bus.methods(),
+                      "nothing asked Mutter what was already present, so a start "
+                      "after a SIGKILL carries no evidence either way: %s"
+                      % bus.methods())
+        self.assertRegex(
+            logs.text(), r"(?i)no monitor present",
+            "a clean backstage start must say plainly that it inherited nothing "
+            "— that is the half of the evidence proving Mutter DID reclaim the "
+            "dead peer's monitor. Logged: %s" % logs.text())
+
+    def test_monitors_left_behind_are_named_with_the_issue_and_the_remedy(self):
+        bus = FakeBus(monitors=("Meta-0", "Meta-1"))
+        with _LogCapture() as logs:
+            self._virtual(bus).start()
+        text = logs.text()
+        self.assertIn("Meta-0", text,
+                      "the connectors are named, so an operator can tell two "
+                      "leftovers from one: %s" % text)
+        self.assertIn("Meta-1", text)
+        self.assertIn("#67", text,
+                      "the line points at the issue that explains it: %s" % text)
+        self.assertRegex(
+            text, r"(?i)restart",
+            "and names the only remedy there is — restarting the backstage "
+            "session — since no API can remove another peer's monitor: %s" % text)
+
+    def test_a_desktop_with_monitors_is_not_asserted_to_be_a_leak(self):
+        # Attended mode with --virtual forced: the session's real outputs are
+        # present and entirely normal. Reporting them as a leak would send an
+        # operator chasing a fault that is not there.
+        bus = FakeBus(monitors=("HDMI-2",))
+        with _LogCapture() as logs:
+            self._virtual(bus).start()
+        text = logs.text()
+        self.assertRegex(
+            text, r"(?i)\bif\b.*(no physical output|backstage)",
+            "the warning must be conditional on the session having no physical "
+            "output, not a flat assertion of a leak: %s" % text)
+
+    def test_an_unreadable_inventory_is_not_reported_as_an_empty_one(self):
+        bus = FakeBus(fail_on=("GetCurrentState",))
+        with _LogCapture() as logs:
+            self._virtual(bus).start()
+        text = logs.text()
+        self.assertRegex(
+            text, r"(?i)unreadable|could not read",
+            "'could not ask' and 'nothing was there' are different answers, and "
+            "logging the first as the second would turn a broken probe into "
+            "false evidence that Mutter reclaims monitors: %s" % text)
+        self.assertNotRegex(text, r"(?i)no monitor present")
+
+    def test_a_failed_inventory_never_costs_the_operator_a_picture(self):
+        bus = FakeBus(fail_on=("GetCurrentState",))
+        s = self._virtual(bus)
+        with _LogCapture():
+            s.start()
+        self.assertIn("RecordVirtual", bus.methods(),
+                      "the report is diagnostics; capture must proceed regardless")
+        self.assertTrue(s.stream_path and s.stream_path.startswith("/stream/"),
+                        "and the stream it established is the one recorded: %r"
+                        % s.stream_path)
+
+    def test_the_inventory_is_read_before_the_monitor_is_conjured(self):
+        bus = FakeBus()
+        with _LogCapture():
+            self._virtual(bus).start()
+        methods = bus.methods()
+        self.assertLess(
+            methods.index("GetCurrentState"), methods.index("RecordVirtual"),
+            "read afterwards, the inventory would include the monitor this very "
+            "session just created, and the line would be worthless as evidence "
+            "about the previous one (order was %s)" % methods)
+
+    def test_a_physical_capture_adds_no_such_report(self):
+        # RecordMonitor and RecordArea conjure nothing, so they have no monitor
+        # to leak and nothing to report. They still read GetCurrentState for
+        # their own reasons (_has_monitors, _desktop_area) — what must not
+        # appear is the virtual-start report.
+        bus = FakeBus(monitors=("HDMI-2",))
+        with _LogCapture() as logs:
+            d.Session(bus, "HDMI-2", None).start()
+        self.assertIn("RecordMonitor", bus.methods(),
+                      "the physical path is the one under test: %s" % bus.methods())
+        self.assertNotRegex(
+            logs.text(), r"(?i)virtual capture starting",
+            "a physical capture must not claim to inherit a virtual monitor: %s"
+            % logs.text())
+
+    def test_the_inventory_reads_connector_names(self):
+        bus = FakeBus(monitors=("Meta-0", "HDMI-2"))
+        s = self._virtual(bus)
+        self.assertEqual(s._monitor_inventory(), ["Meta-0", "HDMI-2"])
+
+    def test_an_unreadable_inventory_is_none_not_empty(self):
+        # None and [] are the two answers the caller has to tell apart, so the
+        # distinction has to survive at the seam and not only in the log text.
+        s = self._virtual(FakeBus(fail_on=("GetCurrentState",)))
+        with _LogCapture():
+            self.assertIsNone(s._monitor_inventory())
+        self.assertEqual(self._virtual(FakeBus())._monitor_inventory(), [])
 
 
 class TestHeadlessCaptureFallback(unittest.TestCase):

@@ -43,6 +43,36 @@ sudo pkill -9 xrdb
 
 The client's display probe then gets EOF and proceeds to connect within seconds.
 
+## Backstage desktop is half black after a daemon crash
+
+**Symptom:** in backstage mode the operator sees the desktop on one half of the
+canvas and black on the other, with no top bar — the same picture issue **#55**
+described, after the daemon was killed or crashed rather than stopped.
+
+**Cause:** each `RecordVirtual` session makes Mutter conjure a virtual monitor,
+released when that session ends. A daemon killed with `SIGKILL`, or one that
+crashes or is OOM-killed, runs no cleanup code at all, so it never stops its
+session. Whether Mutter reclaims the monitor anyway, when the creating D-Bus
+peer disconnects, is **not yet established** — see
+[`spikes/SPIKE2_RESULTS.md`](../spikes/SPIKE2_RESULTS.md) for the check that
+would settle it (#67). A clean stop or `systemctl --user restart` always
+releases it (#55).
+
+**Check:** the daemon logs what it inherited on every virtual start.
+
+```sh
+journalctl --user -u dreamconnect-daemon | grep 'virtual capture starting'
+```
+
+`no monitor present beforehand` is healthy. Named connectors on a backstage
+session — which has no panel and no dummy plug, so should have none — are a
+monitor left behind by an earlier daemon.
+
+**Fix:** restart the backstage session, which ends the `gnome-shell` that holds
+the monitors. Restarting the daemon alone does not help: Mutter's ScreenCast and
+RemoteDesktop interfaces expose no way to enumerate or remove a monitor created
+by another client, so nothing can reclaim a dead peer's monitor from outside.
+
 ## "Insert clipboard text" does nothing
 
 Works as of **v1.2** (ROADMAP **F1**): the agent hooks the console-only native

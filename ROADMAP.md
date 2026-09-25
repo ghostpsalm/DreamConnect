@@ -305,6 +305,11 @@ restart without dropping the old ones (leak → duplicate `_on_closed` → casca
 restarts); now subscriptions are tracked/unsubscribed and a `_restarting` guard
 makes one close schedule exactly one restart. SC update survival rides the
 `JAVA_TOOL_OPTIONS` drop-in, which persists across client package updates.
+Virtual-monitor leaks are released on every route that runs code — an in-process
+restart and SIGTERM/SIGINT (#55) — but a SIGKILL, crash or OOM runs none, so a
+virtual start now logs the monitors it inherited as a standing detector (#67);
+whether Mutter reclaims a dead peer's monitor is still unproven and needs a live
+box ([`spikes/SPIKE2_RESULTS.md`](spikes/SPIKE2_RESULTS.md)).
 
 #### H5 — Distro-agnostic install
 **Status:** ✅ DONE (Fedora tested; others best-effort) · **Priority:** medium
