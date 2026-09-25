@@ -754,6 +754,55 @@ test_host_account_removable_refuses_when_state_names_another_account() {
   assert_refused "state HOST_ACCOUNT names a different account"
 }
 
+# Issue #60, a follow-up to #33. Rail 5's message renders both names through
+# `printf '%q'` (see
+# test_state_mismatch_refusals_reveal_whitespace_in_both_names) inside its own
+# literal single quotes, and `printf '%q' ''` is `''` — so an empty recorded name
+# nested in those quotes came out as four consecutive apostrophes, which reads as
+# a typo rather than as "the state file records nothing".
+#
+# The contract: when nothing is recorded, rail 5 says so in words and prints no
+# quoted recorded name at all. `''` is not an acceptable answer either — it still
+# does not tell the operator that the record is missing — so the assertion is on
+# the absence of any apostrophe pair, not merely of four.
+#
+# Rail 5 is the ONLY site an empty recorded name reaches. host_account_installable
+# returns early on an empty HOST_ACCOUNT (install-lib.sh:575) before any of its own
+# two-name or recorded-name messages, so there is nothing to assert there.
+#
+# Both ways HOST_ACCOUNT ends up empty are driven, because read_install_state
+# produces it from either: no install.state at all (the issue's path), and a state
+# file present but holding an empty HOST_ACCOUNT (a write killed part way through,
+# or a hand-edit). The refusal must read the same for both.
+test_host_account_removable_names_no_recorded_account_without_stray_quotes() {
+  local db state
+  db="$(make_removal_passwd_db)"
+
+  try_removable "$db" "$TMP/state-none-recorded/install.state" "" dreamconnect-host kogies
+  assert_refused "no state file: nothing recorded"
+  assert_not_contains "$REMOVE_ERR" "''''" \
+    "no state file: the empty record is not four apostrophes"
+  assert_not_contains "$REMOVE_ERR" "''" \
+    "no state file: the empty record is not an empty quoted string either"
+  assert_contains "$REMOVE_ERR" "records no host account" \
+    "no state file: the refusal says in words that nothing is recorded"
+  assert_contains "$REMOVE_ERR" "dreamconnect-host" \
+    "no state file: the account asked for is still named"
+
+  state="$TMP/state-empty-recorded/install.state"
+  write_state_fixture "$state" "" 987 1 1
+  try_removable "$db" "$state" "" dreamconnect-host kogies
+  assert_refused "state file with an empty HOST_ACCOUNT"
+  assert_not_contains "$REMOVE_ERR" "''''" \
+    "empty HOST_ACCOUNT: the empty record is not four apostrophes"
+  assert_not_contains "$REMOVE_ERR" "''" \
+    "empty HOST_ACCOUNT: the empty record is not an empty quoted string either"
+  assert_contains "$REMOVE_ERR" "records no host account" \
+    "empty HOST_ACCOUNT: the refusal says in words that nothing is recorded"
+  assert_contains "$REMOVE_ERR" "dreamconnect-host" \
+    "empty HOST_ACCOUNT: the account asked for is still named"
+}
+
 # Rail 6: GECOS must be EXACTLY "DreamConnect display host" — empty, trailing
 # space, wrong case and a human's real name all refuse.
 test_host_account_removable_refuses_a_wrong_gecos_marker() {
@@ -10784,6 +10833,7 @@ for CURRENT in \
   test_host_account_removable_refuses_when_state_says_not_created \
   test_host_account_removable_refuses_when_state_file_is_absent \
   test_host_account_removable_refuses_when_state_names_another_account \
+  test_host_account_removable_names_no_recorded_account_without_stray_quotes \
   test_host_account_removable_refuses_a_wrong_gecos_marker \
   test_library_defines_ensure_host_account \
   test_ensure_host_account_creates_a_system_account_with_the_marker \
