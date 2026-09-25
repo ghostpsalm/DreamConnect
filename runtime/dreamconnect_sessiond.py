@@ -125,12 +125,16 @@ def entry_display(registry_dir, uid):
     """The display one entry names, "" if it names none, None if there is no
     entry at all.
 
-    Parsed the way the agent parses it (Bridge.java:228-232): a key is only what
-    precedes the *first* `=` on the line, and last wins. Both halves matter. The
-    label is free text that may itself contain `=` -- BootTests.java:1735 uses
-    `label=a=b` -- so a reader that looked for `display=` as a substring would
-    read a display off a label and restart register@ every pass for a session
-    that never moved.
+    Parsed the way the agent parses it (Bridge.java:228-232), all three rules:
+    a key is only what precedes the *first* `=` on the line, the key is trimmed
+    before it is compared, and a value that is blank after trimming is skipped
+    -- so the last *non-blank* `display=` wins. The first rule is the one a
+    careless reader breaks: the label is free text that may itself contain `=`
+    -- BootTests.java:1735 uses `label=a=b` -- so a reader that looked for
+    `display=` as a substring would read a display off a label and restart
+    register@ every pass for a session that never moved. The other two cost two
+    tokens each and are kept because the alternative is two parsers of one
+    format whose agreement rests on an invariant held in another language (#66).
 
     A missing entry is None rather than an error because register@'s ExecStop
     removes it, so it can vanish between the listdir and this read; on a 30s
@@ -145,8 +149,11 @@ def entry_display(registry_dir, uid):
     display = ""
     for line in text.splitlines():
         key, sep, value = line.partition("=")
-        if sep and key == "display":
-            display = value.strip()
+        if not sep or key.strip() != "display":
+            continue
+        value = value.strip()
+        if value:
+            display = value
     return display
 
 
