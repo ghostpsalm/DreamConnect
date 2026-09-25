@@ -532,6 +532,19 @@ host_account_removable() {  # name protected_user
   # Both names through %q, for the reason spelled out at the installable
   # mismatch below: this is the other refusal that juxtaposes two names, and a
   # recorded one that differs only by inner whitespace reads as the given one.
+  #
+  # Nothing recorded gets its own sentence rather than %q's answer for it (#60).
+  # read_install_state leaves HOST_ACCOUNT empty both when install.state is absent
+  # and when it holds an empty value, and `printf '%q' ''` is '' — nested in the
+  # message's own quotes below that renders as four consecutive apostrophes, which
+  # reads as a typo. Dropping those literal quotes instead would restore the
+  # pre-#33 '' but strip the delimiters off every ordinary refusal, regressing the
+  # common message to fix the rare one — and '' still does not tell the operator
+  # that the state file is what is missing.
+  if [ -z "$HOST_ACCOUNT" ]; then
+    printf "refusing to remove %q: install state records no host account\n" "$name" >&2
+    return 1
+  fi
   [ "$HOST_ACCOUNT" = "$name" ] || {
     printf "refusing to remove %q: install state records host account '%q'\n" \
       "$name" "$HOST_ACCOUNT" >&2; return 1; }
