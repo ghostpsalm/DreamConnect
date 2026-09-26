@@ -47,12 +47,16 @@ BUILD_SH="$HERE/build.sh"
 # a correct jar is, and a suite that cannot tell must stop, not carry on with a
 # guess. `. ` under `set -uo pipefail` -- no -e -- so each read is guarded.
 [ -f "$HERE/fixture-lib.sh" ] \
-  || { echo "FAIL: fixture-lib.sh not found at $HERE/fixture-lib.sh"; exit 1; }
+  || { echo "cannot run: fixture-lib.sh not found at $HERE/fixture-lib.sh"; exit 1; }
 . "$HERE/fixture-lib.sh"
 BB_VERSION="$(bb_version)" \
-  || { echo "FAIL: could not read BYTEBUDDY_VERSION from $BUILD_SH"; exit 1; }
+  || { echo "cannot run: could not read BYTEBUDDY_VERSION from $BUILD_SH"; exit 1; }
 BB_SHA256="$(bb_sha256)" \
-  || { echo "FAIL: could not read BB_SHA256 from $BUILD_SH"; exit 1; }
+  || { echo "cannot run: could not read BB_SHA256 from $BUILD_SH"; exit 1; }
+[ -f "$HERE/../test-harness-lib.sh" ] \
+  || { echo "cannot run: test-harness-lib.sh not found at $HERE/../test-harness-lib.sh"; exit 1; }
+# shellcheck source=../test-harness-lib.sh
+. "$HERE/../test-harness-lib.sh"
 BB_JAR_NAME="byte-buddy-$BB_VERSION.jar"
 REAL_CACHE="$HERE/lib/$BB_JAR_NAME"
 NET_MARKER="NETWORK-BLOCKED-BY-TEST"
@@ -61,8 +65,15 @@ NET_MARKER="NETWORK-BLOCKED-BY-TEST"
 FAILURES=0
 SKIPPED=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
+# `assertion failed:`, not a result word, and the first one kept for the case
+# line -- see test_install.sh's fail() (#81).
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
+}
 skip() { echo "  SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
 
 assert_eq() {  # actual expected label
@@ -92,7 +103,7 @@ assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -f "$BUILD_SH" ] || { echo "FAIL: build.sh not found at $BUILD_SH"; exit 1; }
+[ -f "$BUILD_SH" ] || { echo "cannot run: build.sh not found at $BUILD_SH"; exit 1; }
 
 # --- the seam ----------------------------------------------------------------
 
@@ -478,8 +489,9 @@ for CURRENT in \
   test_the_real_agent_lib_cache_is_never_written
 do
   before=$FAILURES
+  FIRST_FAILURE=""
   "$CURRENT"
-  if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
+  case_line "$CURRENT" "$((FAILURES - before))" "$FIRST_FAILURE"
 done
 
 [ "${SKIPPED:-0}" -eq 0 ] \

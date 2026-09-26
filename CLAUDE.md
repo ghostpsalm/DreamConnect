@@ -84,6 +84,7 @@ real system.
 | `runtime/*.py` | `runtime/test_*.py` | Command parsing and session logic, separated from D-Bus and PipeWire I/O |
 | `agent/boot/` | `agent/test/`, run by `BootTests` | Bootstrap classes compiled with `--add-exports java.desktop/...` |
 | `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
+| `test-harness-lib.sh` | sourced by every `test_*.sh` harness, tested in `test_install.sh` | Holds **definitions only**. `case_line` is the one place a shell case's result line is formatted, so four harnesses cannot drift into four forms. |
 
 Two rails in `test_install.sh` that must not be removed: it **refuses to run as root**, because slices
 drive `useradd`/`userdel` and `dconf` and a test that forgets a fixture override must not be able to
@@ -110,6 +111,17 @@ does it well and it is the local style, not decoration — see `wait_for_user_bu
 timeout regex is `0|[1-9][0-9]*` and not `[0-9]+` (`$(( ))` reads a leading zero as octal, so `08`
 aborts the expansion in a way that is not a `return`, and the caller's `|| die` never runs). Match
 that: say what was ruled out and why.
+
+**Test output is read by a parser, not only by you (#78, #81).** A check line is `ok  : <name>` or
+`FAIL  : <name> # <diagnostic>` — the word, whitespace, then the name; everything before the first
+` # ` is the check's identity and must be byte-identical on every run and every box, and anything that
+varies (temp paths, counts, captured output) goes after it. BootTests prints it through `checkLine`; the
+shell harnesses through `case_line` in `test-harness-lib.sh`, never an `echo` of their own. A detail line
+must not begin with a result word — `fail()` prints `assertion failed:`, a harness that cannot start
+prints `cannot run:` — and must not be an indented copy of a check line, since the parser allows
+leading whitespace. `test_every_shell_harness_prints_its_cases_through_case_line` holds every
+`test_*.sh` to this, so a new harness is covered the day it is added. The Python suites still print
+unittest's own lines, which parse as nothing; only their `== … ==` sections are checks.
 
 **Shell**: `set -euo pipefail`. Refuse bad input in the function's own voice and `return 1` — never let
 it reach arithmetic, where `set -u` aborts the shell and the caller's `|| die` never runs.

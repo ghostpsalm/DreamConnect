@@ -89,8 +89,15 @@ ENV_BIN="$(command -v env)"
 # --- tiny assert harness (same shape as agent/test_build.sh) ------------------
 FAILURES=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
+# `assertion failed:`, not a result word, and the first one kept for the case
+# line -- see test_install.sh's fail() (#81).
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
+}
 
 assert_eq() {  # actual expected label
   [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"
@@ -119,9 +126,13 @@ assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -f "$FIXTURE_LIB" ] || { echo "FAIL: fixture-lib.sh not found at $FIXTURE_LIB"; exit 1; }
-[ -f "$REAL_BUILD_SH" ] || { echo "FAIL: build.sh not found at $REAL_BUILD_SH"; exit 1; }
-[ -f "$FETCH_SH" ] || { echo "FAIL: fetch-test-fixtures.sh not found at $FETCH_SH"; exit 1; }
+[ -f "$FIXTURE_LIB" ] || { echo "cannot run: fixture-lib.sh not found at $FIXTURE_LIB"; exit 1; }
+[ -f "$REAL_BUILD_SH" ] || { echo "cannot run: build.sh not found at $REAL_BUILD_SH"; exit 1; }
+[ -f "$FETCH_SH" ] || { echo "cannot run: fetch-test-fixtures.sh not found at $FETCH_SH"; exit 1; }
+HARNESS_LIB="$(cd "$HERE/.." && pwd)/test-harness-lib.sh"
+[ -f "$HARNESS_LIB" ] || { echo "cannot run: test-harness-lib.sh not found at $HARNESS_LIB"; exit 1; }
+# shellcheck source=../test-harness-lib.sh
+. "$HARNESS_LIB"
 
 # --- the seam ----------------------------------------------------------------
 
@@ -628,8 +639,9 @@ for CURRENT in \
   test_a_verifier_that_cannot_run_fails_closed_without_deleting_the_fixture
 do
   before=$FAILURES
+  FIRST_FAILURE=""
   "$CURRENT"
-  if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
+  case_line "$CURRENT" "$((FAILURES - before))" "$FIRST_FAILURE"
 done
 
 if [ "$FAILURES" -ne 0 ]; then
