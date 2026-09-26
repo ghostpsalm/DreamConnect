@@ -20,7 +20,13 @@ javac "${EXPORTS[@]}" -d "$out" \
 # because the status itself is wanted, not merely the fact of failure; the `|| `
 # form is also what keeps `set -e` from firing on this command.
 java_status=0
-java "${EXPORTS[@]}" -cp "$out" dreamconnect.boot.BootTests || java_status=$?
+# Tee'd, into the directory the trap above already sweeps: agent/test_boot_output.sh
+# compares this run's check lines against a second run's (#78), and handing it the
+# output the gate has already produced costs one extra JVM instead of two. With
+# pipefail the pipeline's status is java's, since tee's is zero -- and `|| ` still
+# keeps `set -e` from firing, exactly as the bare form did.
+boot_out="$out/boot-tests.stdout"
+java "${EXPORTS[@]}" -cp "$out" dreamconnect.boot.BootTests | tee "$boot_out" || java_status=$?
 
 echo
 echo "== Python daemon tests =="
@@ -67,6 +73,19 @@ if ! DC_BYTEBUDDY_JAR="$("$HERE/scripts/fetch-test-fixtures.sh")"; then
 fi
 export DC_BYTEBUDDY_JAR
 bash "$HERE/agent/test_build.sh"
+
+echo
+echo "== Boot test output format =="
+# The SHAPE of what the Java leg printed, not what it asserted (#78): every check
+# line parseable as `<word><whitespace><name>`, and the identity before " # "
+# byte-identical across two runs. It reads the tee'd output above, so it compares
+# whatever that leg printed -- a red suite included.
+#
+# Last rather than immediately after the leg it reads, for the same reason the
+# Java leg's status is deferred: this one is not deferred, so under `set -e` a
+# failure here ends the script, and from here there is nothing left to cut off.
+DC_BOOT_CLASSES="$out" DC_BOOT_EXPORTS="${EXPORTS[*]}" DC_BOOT_FIRST_OUT="$boot_out" \
+  bash "$HERE/agent/test_boot_output.sh"
 
 echo
 # The deferred half of the Java section. Compared with `[ ... ]`, not `(( ))`:
