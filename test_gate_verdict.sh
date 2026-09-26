@@ -212,34 +212,58 @@ could not obtain the thing -- see the lines above" \
     "explicit failure: verdict alone on its line, hint on the next"
 }
 
-# Case G -- the deferred verdict's shape, which is the Java leg's (#41): the
-# status is kept, the sections after it run, and the verdict is printed at the
-# bottom naming the suite it was deferred from rather than the last one to
-# start. Exercised here as a scratch script because the real thing needs a JDK
-# and a red BootTests; the acceptance run covers that on a throwaway copy.
-test_a_deferred_verdict_names_the_suite_it_was_deferred_from() {
-  guarded 'section "Deferred suite"
-deferred_suite="$DC_SUITE"
+# Case G -- the carry-on verdict's shape, which is the Java leg's (#41): the
+# verdict is printed where the suite fails, the sections after it still run, and
+# the run's red exit comes at the bottom. It used to be the verdict that waited
+# for the bottom, and then any later suite that failed exited first through the
+# ERR trap: the red Java leg had no verdict and its section parsed as passed,
+# which is what #80 was filed for (found on the integrated #69/#80 tree).
+# Exercised here as a scratch script because the real thing needs a JDK and a
+# red BootTests; the acceptance run covers that on a throwaway copy.
+test_a_carry_on_verdict_survives_a_later_suite_failing() {
+  guarded 'section "Carry-on suite"
 status=0
 ( exit 4 ) || status=$?
+if [ "$status" -ne 0 ]; then
+  suite_verdict "$status" "the suites below still run"
+fi
+echo
+section "Later suite"
+false
+echo
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+echo "ALL TESTS PASSED"'
+
+  assert_matches_once "$OUT" "$(verdict_re "Carry-on suite")" \
+    "carry-on verdict: printed, once, even though a later suite ended the run"
+  assert_matches_once "$OUT" "$(verdict_re "Later suite")" \
+    "carry-on verdict: the later suite still gets its own"
+  assert_not_contains "$OUT" "ALL TESTS PASSED" "carry-on verdict: the run is red"
+  [ "$RC" -ne 0 ] || fail "carry-on verdict: the run exited 0"
+}
+
+test_a_carry_on_verdict_lets_the_later_suites_run_and_still_fails_the_run() {
+  guarded 'section "Carry-on suite"
+status=0
+( exit 4 ) || status=$?
+if [ "$status" -ne 0 ]; then
+  suite_verdict "$status" "the suites below still run"
+fi
 echo
 section "Later suite"
 true
 echo
-if [ "$status" -ne 0 ]; then
-  DC_SUITE="$deferred_suite"
-  suite_failed "$status" "see the == $deferred_suite == section above"
-fi
+if [ "$status" -ne 0 ]; then exit "$status"; fi
 echo "ALL TESTS PASSED"'
 
-  assert_eq "$RC" "4" "deferred verdict: exits with the deferred status"
-  assert_matches_once "$OUT" "$(verdict_re "Deferred suite")" \
-    "deferred verdict: names the suite whose failure it is"
+  assert_eq "$RC" "4" "carry-on verdict: the run exits with the carried status"
+  assert_matches_once "$OUT" "$(verdict_re "Carry-on suite")" \
+    "carry-on verdict: names the suite whose failure it is"
   assert_eq "$(count_matching "$OUT" "$(verdict_re "Later suite")")" "0" \
-    "deferred verdict: not the section that happened to run last"
+    "carry-on verdict: not the section that happened to run last"
   assert_contains "$OUT" "== Later suite ==" \
-    "deferred verdict: the sections after the failure still ran -- that is why it is deferred"
-  assert_not_contains "$OUT" "ALL TESTS PASSED" "deferred verdict: the run is still red"
+    "carry-on verdict: the sections after the failure still ran -- that is why it carries on"
+  assert_not_contains "$OUT" "ALL TESTS PASSED" "carry-on verdict: the run is still red"
 }
 
 # Case H -- a status that is not a number. suite_failed cannot refuse and
@@ -286,6 +310,19 @@ test_the_runner_has_no_unparseable_verdict_left() {
     "runner: 'FAILED: ...' is the free-text form no parser recognises (#80)"
 }
 
+# The Java leg is the one suite that carries on (#41), so it is the one whose
+# verdict could be lost: it must be printed between the BootTests run and the
+# next section, and the bottom of the script must not print a second one.
+test_the_runner_prints_the_java_verdict_where_it_fails() {
+  local between bottom
+  between="$(awk '/dreamconnect[.]boot[.]BootTests/ {on=1} on && /^section "/ {exit} on' "$RUN_TESTS")"
+  assert_contains "$between" 'suite_verdict "$java_status"' \
+    "runner: the Java verdict is printed right after the BootTests run, before any later suite can end the run"
+  bottom="$(awk '/^section "/ {last=NR} {line[NR]=$0} END {for (i=last; i<=NR; i++) print line[i]}' "$RUN_TESTS")"
+  assert_not_contains "$bottom" 'suite_failed "$java_status"' \
+    "runner: a second Java verdict at the bottom would read as the suite failing twice"
+}
+
 test_the_runner_arms_the_verdict_trap() {
   local body
   body="$(cat "$RUN_TESTS")"
@@ -303,10 +340,12 @@ for CURRENT in \
   test_the_verdict_names_the_section_that_failed_not_an_earlier_one \
   test_a_failure_inside_a_subshell_yields_exactly_one_verdict \
   test_an_explicit_failure_carries_its_status_and_its_hint \
-  test_a_deferred_verdict_names_the_suite_it_was_deferred_from \
+  test_a_carry_on_verdict_survives_a_later_suite_failing \
+  test_a_carry_on_verdict_lets_the_later_suites_run_and_still_fails_the_run \
   test_an_unusable_status_still_fails_and_still_parses \
   test_the_runner_prints_every_header_through_section \
   test_the_runner_has_no_unparseable_verdict_left \
+  test_the_runner_prints_the_java_verdict_where_it_fails \
   test_the_runner_arms_the_verdict_trap
 do
   before=$FAILURES

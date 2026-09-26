@@ -51,7 +51,10 @@ that can disagree with the one that actually executes.
 in its own `== <suite> ==` header. That is the generic suite-verdict form; the runner's earlier
 free-text `FAILED: the Java boot tests (exit 1) -- see ...` parsed as nothing, so a run whose Java leg
 failed had that leg recorded as *passed*. Both lines come from `gate-lib.sh` — a new section uses
-`section "<name>"` rather than `echo`, and gets its verdict from the ERR trap for free.
+`section "<name>"` rather than `echo`, and gets its verdict from the ERR trap for free. The one suite
+that carries on after failing (#41, the Java boot tests) prints its verdict with `suite_verdict` at the
+point of failure and exits red from the bottom; a verdict held back to the bottom is lost the moment a
+later suite fails first, which is how a red Java leg once again parsed as passed on the integrated tree.
 
 **A case that skipped says so, never pass (#68).** The shell suites' result loops used to decide a
 case's status from the `FAILURES` delta alone, so a case that reported a skip and returned early was
@@ -111,7 +114,7 @@ real system.
 | `install-lib.sh` | sourced by `test_install.sh` | Holds **definitions only**, so sourcing must stay free of side effects. `install.sh` itself cannot be unit-tested: it demands root and does top-level work before anything is callable. |
 | `runtime/*.py` | `runtime/test_*.py` | Command parsing and session logic, separated from D-Bus and PipeWire I/O |
 | `agent/boot/` | `agent/test/`, run by `BootTests` | Bootstrap classes compiled with `--add-exports java.desktop/...` |
-| `gate-lib.sh` | sourced by `run-tests.sh` and `test_gate_verdict.sh` | Holds **definitions only** like `install-lib.sh`. `section` prints `== <name> ==` and `suite_failed` prints `FAILED (exit N) <name>`, both off one variable, so a suite's header and its verdict cannot disagree. |
+| `gate-lib.sh` | sourced by `run-tests.sh` and `test_gate_verdict.sh` | Holds **definitions only** like `install-lib.sh`. `section` prints `== <name> ==` and `suite_failed`/`suite_verdict` print `FAILED (exit N) <name>`, all off one variable, so a suite's header and its verdict cannot disagree. |
 | `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
 | `test-harness-lib.sh` | sourced by every `test_*.sh` harness, tested in `test_install.sh` | Holds **definitions only**. `case_line` is the one place a shell case's result line is formatted, so four harnesses cannot drift into four forms. |
 

@@ -11,9 +11,11 @@
 # suite always ends the run non-zero and prints `FAILED (exit N) <suite>` (#80), and
 # it prints "ALL TESTS PASSED" only on the path where all of them passed. Its shell
 # flags are not restated here: #80 added -E, which carries its ERR trap into
-# functions and subshells, and the copy this comment used to hold went stale. The Java section is
-# the one that defers rather than aborts (#41) -- it still fails the run, from the
-# bottom of the script, so that the suites after it are reported rather than cut off.
+# functions and subshells, and the copy this comment used to hold went stale.
+#
+# The Java section is the one that carries on rather than aborts (#41): it prints
+# its verdict where it fails and still fails the run, from the bottom of the
+# script, so that the suites after it are reported rather than cut off.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 

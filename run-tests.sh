@@ -17,9 +17,10 @@ EXPORTS=(--add-exports java.desktop/java.awt.peer=ALL-UNNAMED
          --add-exports java.desktop/sun.awt=ALL-UNNAMED)
 
 section "Java boot tests"
-# This section's verdict is printed from the bottom of the script, by which time
-# DC_SUITE names the last section that ran. Remembering the name here, where the
-# header was printed, is what keeps the deferred verdict naming this suite.
+# This section's verdict is printed where it fails, but the run's red exit is
+# owed from the bottom of the script, by which time DC_SUITE names the last
+# section that ran. Remembering the name here keeps that closing line naming
+# this suite.
 java_suite="$DC_SUITE"
 out="$(mktemp -d)"; trap 'rm -rf "$out"' EXIT
 javac "${EXPORTS[@]}" -d "$out" \
@@ -41,6 +42,16 @@ java_status=0
 # keeps `set -e` from firing, exactly as the bare form did.
 boot_out="$out/boot-tests.stdout"
 java "${EXPORTS[@]}" -cp "$out" dreamconnect.boot.BootTests | tee "$boot_out" || java_status=$?
+# The verdict now, the exit at the bottom. It used to be printed at the bottom
+# too, and any later suite that failed exited first through the ERR trap, so a
+# red Java leg was left with no verdict and its section parsed as passed -- the
+# defect #80 was filed for, reached again once #69's guarded run made a Java
+# failure also fail the output-format suite. `[ ... ]` rather than `(( ))`:
+# java_status is only ever assigned from `$?`, but arithmetic under `set -u`
+# aborts the shell outright on anything unexpected.
+if [ "$java_status" -ne 0 ]; then
+  suite_verdict "$java_status" "the suites below still run (#41); the gate fails at the end"
+fi
 
 echo
 section "Python daemon tests"
@@ -88,35 +99,32 @@ export DC_BYTEBUDDY_JAR
 bash "$HERE/agent/test_build.sh"
 
 echo
-section "Boot test output format"
-# The SHAPE of what the Java leg printed, not what it asserted (#78): every check
-# line parseable as `<word><whitespace><name>`, and the identity before " # "
-# byte-identical across two runs. It reads the tee'd output above, so it compares
-# whatever that leg printed -- a red suite included.
-#
-# Last rather than immediately after the leg it reads, for the same reason the
-# Java leg's status is deferred: this one is not deferred, so under `set -e` a
-# failure here ends the script, and from here there is nothing left to cut off.
-DC_BOOT_CLASSES="$out" DC_BOOT_EXPORTS="${EXPORTS[*]}" DC_BOOT_FIRST_OUT="$boot_out" \
-  bash "$HERE/agent/test_boot_output.sh"
-
-echo
 section "Gate verdict tests"
 # The verdict lines this script prints (#80): that a failed suite says
 # `FAILED (exit N) <the name in its own header>` and nothing else on that line.
 bash "$HERE/test_gate_verdict.sh"
 
 echo
-# The deferred half of the Java section. Compared with `[ ... ]`, not `(( ))`:
-# java_status is only ever assigned from `$?`, but arithmetic under `set -u` aborts
-# the shell outright on anything unexpected, which is the one way this line could
-# turn a red gate into a differently-shaped red that no longer names the suite.
+section "Boot test output format"
+# The SHAPE of what the Java leg printed, not what it asserted (#78): every check
+# line parseable as `<word><whitespace><name>`, and the identity before " # "
+# byte-identical across two runs. It reads the tee'd output above, so it compares
+# whatever that leg printed -- a red suite included.
 #
-# DC_SUITE is restored rather than read as it stands: suite_failed names the
-# current suite, and by here that is the last section above, not the Java one.
+# Last rather than immediately after the leg it reads: it is not deferred, so a
+# failure here ends the script through the ERR trap, and from here there is
+# nothing left to cut off. A section added after it would be skipped whenever
+# this one is red -- which, since #69's guarded run, a red Java leg can make it.
+DC_BOOT_CLASSES="$out" DC_BOOT_EXPORTS="${EXPORTS[*]}" DC_BOOT_FIRST_OUT="$boot_out" \
+  bash "$HERE/agent/test_boot_output.sh"
+
+echo
+# The deferred half of the Java section: its verdict was printed where it failed,
+# and this is the red exit it still owes the run. No second verdict -- two
+# `FAILED (exit N) Java boot tests` lines would read as the suite failing twice.
 if [ "$java_status" -ne 0 ]; then
-  DC_SUITE="$java_suite"
-  suite_failed "$java_status" "see '== $java_suite ==' above"
+  echo "the gate is red: the Java boot tests failed -- see their verdict under '== $java_suite =='"
+  exit "$java_status"
 fi
 
 echo "ALL TESTS PASSED"

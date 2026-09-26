@@ -221,16 +221,22 @@ test_no_line_announces_a_skip() {
 # every in-JVM check still passes. What catches that is a whole run made with the
 # guard set -- the only condition under which the branch executes at all.
 #
-# Asserts the failure is counted (exit 1, no ALL PASS) and is the fork guard's
-# and nothing else, so an unrelated failure cannot make this case pass for the
-# wrong reason. A box that exports the guard globally gets a red gate here; that
-# is intended, and it is the failure mode the issue is about.
+# Asserts the failure is counted (exit 1, no ALL PASS) and that setting the
+# guard adds exactly one failure -- the fork guard's -- to whatever the unguarded
+# run already failed, so an unrelated failure cannot make this case pass for the
+# wrong reason. Compared against the unguarded run, not against "exactly one
+# FAIL": that form went red on any unrelated BootTests failure too, and this
+# suite's red then ended the gate before the Java leg's verdict was printed, so
+# the Java section parsed as passed (found integrating #69 with #80). A box that
+# exports the guard globally gets a red gate here; that is intended, and it is
+# the failure mode the issue is about.
 test_the_fork_guard_declines_as_a_counted_failure() {
+  local added
   assert_eq "$GUARDED_STATUS" "1" "the suite's exit status with $FORK_GUARD set"
-  assert_eq "$(identities "$GUARDED" | grep -a -c '^FAIL' || true)" "1" \
-            "failed check(s) in the guarded run"
-  assert_eq "$(identities "$GUARDED" | grep -a '^FAIL' || true)" "FAIL  : $FORK_REFUSED" \
-            "the guarded run's failed check"
+  added="$(comm -13 <(identities "$FIRST" | grep -a '^FAIL' | sort) \
+                    <(identities "$GUARDED" | grep -a '^FAIL' | sort))"
+  assert_eq "$added" "FAIL  : $FORK_REFUSED" \
+            "the failed check(s) the guard added to the unguarded run's"
   if grep -q -a '^ALL PASS' "$GUARDED"; then
     fail "the guarded run declined the fork self-test and still reported ALL PASS"
   fi

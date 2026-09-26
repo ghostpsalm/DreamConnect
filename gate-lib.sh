@@ -36,24 +36,44 @@ suite_failed() {  # STATUS [hint...] -- print the current suite's verdict and ex
   # would otherwise re-enter this function through the ERR trap that called it.
   trap - ERR
 
-  # Coerced, not refused. Everywhere else in this repo bad input earns a `return
-  # 1` in the function's own voice (CLAUDE.md, "Shell"), but this function's
-  # whole job is to end a red run: returning would hand control back to a script
-  # that may well go on to print ALL TESTS PASSED, and `exit "not-a-number"`
-  # loses the verdict to bash's own "numeric argument required". A failure whose
-  # status cannot be read is still a failure, so it becomes 1.
-  case "$status" in
-    ''|*[!0-9]*|0) status=1 ;;
-  esac
+  status="$(verdict_status "$status")"
+  suite_verdict "$status" "$@"
+  exit "$status"
+}
 
-  # Alone on one line, and on stdout beside the headers rather than on stderr:
-  # the two streams are separately buffered, so a verdict on stderr can surface
-  # anywhere relative to the `== ... ==` header it belongs to, and the whole
-  # point of this line is that a reader -- human or parser -- can tie it to one.
+# Coerced, not refused. Everywhere else in this repo bad input earns a `return
+# 1` in the function's own voice (CLAUDE.md, "Shell"), but a verdict's whole job
+# is to mark a red run: returning would hand control back to a script that may
+# well go on to print ALL TESTS PASSED, and `exit "not-a-number"` loses the
+# verdict to bash's own "numeric argument required". A failure whose status
+# cannot be read is still a failure, so it becomes 1.
+verdict_status() {  # STATUS -> a non-zero exit status
+  case "${1-}" in
+    ''|*[!0-9]*|0) echo 1 ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# suite_verdict STATUS [hint...] -- print the current suite's verdict and carry on
+#
+# For a suite whose failure must not stop the run (#41: the Java boot tests, so
+# that the suites after them still report). Printed at the point of failure, not
+# deferred to the bottom of the script: a deferred verdict is lost if any later
+# suite fails first, because that suite's own verdict exits the run -- found on
+# the integrated #69/#80 tree, where one failing BootTests check left the Java
+# section recorded as passed. The caller still owes the run its red exit.
+#
+# Alone on one line, and on stdout beside the headers rather than on stderr:
+# the two streams are separately buffered, so a verdict on stderr can surface
+# anywhere relative to the `== ... ==` header it belongs to, and the whole point
+# of this line is that a reader -- human or parser -- can tie it to one.
+suite_verdict() {  # STATUS [hint...]
+  local status
+  status="$(verdict_status "${1-}")"
+  shift 2>/dev/null || :
   printf 'FAILED (exit %s) %s\n' "$status" "${DC_SUITE:-the gate}"
   [ "$#" -gt 0 ] && printf '%s\n' "$*"
-
-  exit "$status"
+  return 0
 }
 
 gate_err_verdict() {  # STATUS -- the ERR trap's handler
