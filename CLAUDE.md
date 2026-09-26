@@ -61,6 +61,15 @@ It exists because the only case proving `agent/build.sh` can *succeed* needs a r
 is gitignored, and that case used to `SKIP` on every clean checkout — so a `build.sh` that never built
 anything still printed `ALL TESTS PASSED`. An unmet jar fixture is now a **failure**, never a skip.
 
+**The Java suite has no counted-nowhere skip either (#69).** BootTests has no skip counter, and a
+`skip:` line matches neither `ok  : ` nor `FAIL  : `, so it was invisible to the leg parser as well: the
+one case proving #41's process boundary could decline to run while the suite printed `ALL PASS`. Its
+fork guard is now a counted failure, and `agent/test_boot_output.sh` runs the suite a third time with
+the guard set — asserting exit 1 and that one FAIL line, the guard's — and asserts that no line of
+either run's stdout begins with a skip word at all. The guarded run is what makes the first half
+testable: the branch executes on no other run, so without it the failure could be turned back into a
+skip with the gate still green.
+
 **The ByteBuddy pins live in exactly one place**: `BYTEBUDDY_VERSION`, `BB_SHA256` and `BB_URL` in
 `agent/build.sh`. `agent/fixture-lib.sh` reads them out of that file with `sed` (never sourcing it —
 sourcing a build runs the build). Do not transcribe a second copy anywhere, not even into a test or a

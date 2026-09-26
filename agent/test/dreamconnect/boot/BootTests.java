@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -269,6 +270,7 @@ public class BootTests {
                 new NamedTest("testCheckLineFormat", BootTests::testCheckLineFormat),
                 new NamedTest("testRunnerCatchesEachTestAndKeepsGoing", BootTests::testRunnerCatchesEachTestAndKeepsGoing),
                 new NamedTest("testFaultSelfTestExitsNonZeroAfterContinuing", BootTests::testFaultSelfTestExitsNonZeroAfterContinuing),
+                new NamedTest("testFaultSelfTestForkGuardFailsRatherThanSkips", BootTests::testFaultSelfTestForkGuardFailsRatherThanSkips),
                 // Last, and in this order: both mutate Bridge's process-wide static
                 // state (daemon/frame, and shm=/socket=/label= config). Add new tests
                 // ABOVE this line.
@@ -456,6 +458,40 @@ public class BootTests {
     static final String FAULT_SELFTEST_FORK_GUARD = "DREAMCONNECT_BOOTTESTS_FORKED";
 
     /**
+     * Identity of the check that fires when the guard is already set and the
+     * fork self-test therefore cannot run (#69).
+     *
+     * A counted failure, not a skip. This is the only test proving #41's
+     * process boundary — that a throwing test still exits 1 *and* that the
+     * later run-tests.sh sections still run — and the guard is set in this
+     * process only if it leaked in from the gate's environment or if
+     * --fault-selftest stopped being honoured and the child ran the whole
+     * suite. Both are precisely the regressions that must not pass quietly.
+     * Printing `skip:` and returning, as this branch used to, was counted by
+     * nothing: BootTests has no skip counter, `skip:` matches neither
+     * {@link #OK_PREFIX} nor {@link #FAIL_PREFIX}, so test_boot_output.sh's leg
+     * parser never saw it either, and the suite printed ALL PASS with #41
+     * unproven. Failing puts it in {@code failures}, in the summary, in exit 1
+     * and in the leg inventory, with no new counter or output vocabulary.
+     *
+     * The guard's value is run-specific and so goes after {@link #DIAG} (#79),
+     * never into this identity.
+     */
+    static final String FAULT_SELFTEST_FORK_REFUSED =
+            "the fork self-test's recursion guard is unset, so #41's process boundary is exercised";
+
+    /**
+     * Whether the fork self-test must refuse to fork, given the guard's value
+     * as {@link System#getenv} reports it ({@code null} when unset).
+     *
+     * Extracted as a pure static so the decision is testable in-process: the
+     * branch itself cannot be exercised by a test that is not willing to fork.
+     */
+    static boolean forkSelfTestRefused(String guardValue) {
+        return guardValue != null;
+    }
+
+    /**
      * The list `--fault-selftest` must run, through the same main() reporting
      * path a normal run uses.
      *
@@ -513,8 +549,14 @@ public class BootTests {
      * exits non-zero. Hence the marker, and hence the FAIL line.
      */
     private static void testFaultSelfTestExitsNonZeroAfterContinuing() throws Exception {
-        if (System.getenv(FAULT_SELFTEST_FORK_GUARD) != null) {
-            System.out.println("skip: the fork self-test does not run inside a forked child");
+        String guard = System.getenv(FAULT_SELFTEST_FORK_GUARD);
+        if (forkSelfTestRefused(guard)) {
+            // Counted, then returned from: see FAULT_SELFTEST_FORK_REFUSED for
+            // why this is a failure rather than the skip it used to be. The
+            // return still comes before pb.start(), so the recursion bound the
+            // guard exists for (one level, even if --fault-selftest stops being
+            // honoured) is unchanged.
+            check(false, FAULT_SELFTEST_FORK_REFUSED, guard);
             return;
         }
 
@@ -558,6 +600,37 @@ public class BootTests {
               + "throwable", q(failLine));
         check(!out.contains("ALL PASS"),
               "and the child does not report the run as passing");
+    }
+
+    /**
+     * #69: the guarded branch above declines coverage, so it must decline it
+     * loudly.
+     *
+     * Asserts the two halves that made the old `skip:` invisible — the
+     * predicate that decides to decline, and the line the decision renders as.
+     * Not the wiring between them: the branch runs only when the guard is
+     * already set, which is not this process. That half is
+     * test_boot_output.sh's `test_the_fork_guard_declines_as_a_counted_failure`,
+     * which runs the whole suite with the guard set and reads the exit status
+     * and the FAIL line the gate would see — and without it these checks would
+     * all still pass with the old println put back.
+     */
+    private static void testFaultSelfTestForkGuardFailsRatherThanSkips() {
+        check(forkSelfTestRefused("1"), "a set fork guard refuses the fork");
+        // An exported-but-empty value is still a set variable (`FOO= java …`),
+        // and getenv reports "" for it. Only an absent one is a run that may
+        // fork, which is why the predicate tests for null and not for emptiness.
+        check(forkSelfTestRefused(""), "an exported empty fork guard is set too, so it refuses", q(""));
+        check(!forkSelfTestRefused(null), "an unset fork guard does not refuse: the fork self-test runs");
+
+        String line = checkLine(false, FAULT_SELFTEST_FORK_REFUSED, "1");
+        check(line.startsWith(FAIL_PREFIX),
+              "refusing renders as a counted failure line, not a skip the gate cannot see", line);
+        check(!FAULT_SELFTEST_FORK_REFUSED.toLowerCase(Locale.ROOT).startsWith("skip"),
+              "and the identity does not begin with a skip word either",
+              q(FAULT_SELFTEST_FORK_REFUSED));
+        check(line.split(" # ", 2)[1].equals("got 1"),
+              "the guard's run-specific value is the diagnostic, never the identity (#79)", line);
     }
 
     /**
