@@ -14,6 +14,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -28,8 +29,88 @@ import java.util.concurrent.TimeUnit;
 public class BootTests {
     private static int failures = 0;
 
+    /** Leading word of a check line that passed, with the leg separator. */
+    static final String OK_PREFIX = "ok  : ";
+
+    /**
+     * Leading word of a check line that failed.
+     *
+     * Two spaces, not one (#78): whoever reads this output beyond the terminal
+     * — the Factory's run comparison — parses a leg as {@code <word><whitespace><name>},
+     * and the old {@code "FAIL: "} put no whitespace between the word and the
+     * name. A failing boot test was therefore not a failed check at all; it
+     * vanished from the inventory and the failure was attributed to the gate's
+     * exit status instead. Aligning with {@link #OK_PREFIX} is incidental.
+     */
+    static final String FAIL_PREFIX = "FAIL  : ";
+
+    /**
+     * Separator between a check's identity and its diagnostic — TAP's own.
+     *
+     * Everything before it names the check and must be byte-identical on every
+     * run and every box; everything after it is evidence for a reader and is
+     * allowed to carry the temp path, the uid, the hash or the timing that made
+     * the check interesting. Putting an observed value in front of this was the
+     * whole of #78: the check was renamed on every run, so a baseline and a
+     * candidate that ran the same suite compared as one check missing plus one
+     * new, and an unchanged failure read as one the candidate introduced.
+     */
+    static final String DIAG = " # got ";
+
+    /**
+     * The exact text a check line carries, ready to print.
+     *
+     * Separate from {@link #check} so the format is testable in-process. The
+     * alternative — asserting against captured {@code System.out} — would have
+     * to reach into the stream the suite is reporting on and would perturb the
+     * failure counter it also has to read.
+     *
+     * @param msg the check's identity; must not itself contain {@code " # "}
+     */
+    static String checkLine(boolean cond, String msg) {
+        // Thrown, not silently escaped: a msg carrying " # " would split into an
+        // identity that is a prefix of what the author wrote, and the rest would
+        // be filed as evidence -- a silently renamed check, which is the defect
+        // this separator exists to fix. #41's per-test catch contains the throw
+        // and counts it, so the suite reports it and keeps running.
+        if (msg != null && msg.contains(" # ")) {
+            throw new IllegalArgumentException(
+                    "a check's identity may not contain \" # \" (the diagnostic separator): " + msg);
+        }
+        return (cond ? OK_PREFIX : FAIL_PREFIX) + msg;
+    }
+
+    /** As {@link #checkLine(boolean, String)}, with {@code got} as the diagnostic. */
+    static String checkLine(boolean cond, String msg, Object got) {
+        return checkLine(cond, msg) + DIAG + rendered(got);
+    }
+
+    /**
+     * A diagnostic value as text.
+     *
+     * Arrays go through {@link Arrays#deepToString}: {@code String.valueOf} on
+     * an array prints {@code [Ljava.lang.String;@1b6d3586}, an identity hash
+     * that changes every run — exactly the kind of text #78 removed from the
+     * identity, and no more use to a reader in the diagnostic. deepToString
+     * wants an {@code Object[]}, so the value is wrapped and the wrapper's own
+     * brackets stripped back off; it handles a primitive array element too.
+     */
+    private static String rendered(Object got) {
+        if (got != null && got.getClass().isArray()) {
+            String s = Arrays.deepToString(new Object[] {got});
+            return s.substring(1, s.length() - 1);
+        }
+        return String.valueOf(got);
+    }
+
     private static void check(boolean cond, String msg) {
-        System.out.println((cond ? "ok  : " : "FAIL: ") + msg);
+        System.out.println(checkLine(cond, msg));
+        if (!cond) failures++;
+    }
+
+    /** As {@link #check(boolean, String)}, reporting the observed value as the diagnostic. */
+    private static void check(boolean cond, String msg, Object got) {
+        System.out.println(checkLine(cond, msg, got));
         if (!cond) failures++;
     }
 
@@ -50,25 +131,36 @@ public class BootTests {
     record NamedTest(String name, TestBody body) {}
 
     /**
-     * Run every test in the list and return one message per test that threw.
+     * One throwing test: the name it is reported under, and what it threw.
+     *
+     * Two fields rather than one sentence because the two halves land on
+     * opposite sides of {@link #DIAG} (#78). {@code test} is the check's
+     * identity and is the same text on every run; {@code detail} is a
+     * throwable's {@code toString()}, which routinely carries a temp path or a
+     * hash, and is diagnostic.
+     */
+    record Thrown(String test, String detail) {}
+
+    /**
+     * Run every test in the list and return one report per test that threw.
      *
      * The contract (#41, decided 2026-09-11 by the owner): every body is
      * invoked inside its own {@code catch (Throwable)}, so a throw ends that
      * test and nothing else — every later test in the list still runs. A
-     * caught Throwable is never rethrown; it comes back as a message naming
+     * caught Throwable is never rethrown; it comes back as a report naming
      * both the test it came from and the throwable, for the caller to hand to
      * {@link #check} so that it lands in the same failure count as every other
      * failure in this suite. A test that returns normally contributes no
-     * message.
+     * report.
      *
      * That this holds is a stated contract, not an accident of which methods
      * happen to declare {@code throws Exception}: it holds for every element
      * of the list, checked or unchecked, {@code Error} or {@code Exception}.
      *
-     * @return one message per throwing test; empty when none threw
+     * @return one report per throwing test; empty when none threw
      */
-    static List<String> runAll(List<NamedTest> tests) {
-        List<String> thrown = new ArrayList<>();
+    static List<Thrown> runAll(List<NamedTest> tests) {
+        List<Thrown> thrown = new ArrayList<>();
         for (NamedTest t : tests) {
             try {
                 t.body().run();
@@ -78,7 +170,7 @@ public class BootTests {
                 // has a null message, which would name the test and then say
                 // nothing at all about what happened to it. toString() always
                 // carries at least the type.
-                thrown.add(t.name() + " threw " + e);
+                thrown.add(new Thrown(t.name() + " threw", String.valueOf(e)));
             }
         }
         return thrown;
@@ -90,9 +182,9 @@ public class BootTests {
         // is the other half of #41's contract: a throw lands in the same
         // failure counter as every failed assertion, so the exit below still
         // goes non-zero. `set -e` is NOT what carries that to the gate:
-        // run-tests.sh:23 catches this status with `|| java_status=$?`, which
+        // run-tests.sh:29 catches this status with `|| java_status=$?`, which
         // is precisely the form that stops `set -e` firing, and fails the gate
-        // from the deferred `exit "$java_status"` at run-tests.sh:57 -- after
+        // from the deferred `exit "$java_status"` at run-tests.sh:97 -- after
         // the Python and installer sections have run, instead of killing the
         // script where the throw happened.
         //
@@ -102,10 +194,10 @@ public class BootTests {
         // point -- what it demonstrates is only worth anything if the path it
         // takes is the one a real throw would take. It is a hidden argument
         // rather than a separate main because the boundary under test is this
-        // class's own process: run-tests.sh:23 sees an exit status and a
+        // class's own process: run-tests.sh:29 sees an exit status and a
         // stream of output, and nothing else.
         boolean selfTest = List.of(args).contains("--fault-selftest");
-        for (String thrown : runAll(selfTest ? faultSelfTest() : allTests())) check(false, thrown);
+        for (Thrown t : runAll(selfTest ? faultSelfTest() : allTests())) check(false, t.test(), t.detail());
         if (failures > 0) {
             System.out.println(failures + " FAILURE(S)");
             System.exit(1);
@@ -174,6 +266,7 @@ public class BootTests {
                 new NamedTest("testDaemonClientRefusesWrongPeerUser", BootTests::testDaemonClientRefusesWrongPeerUser),
                 new NamedTest("testDaemonClientCloseIsTerminal", BootTests::testDaemonClientCloseIsTerminal),
                 new NamedTest("testProbeConnectIsBounded", BootTests::testProbeConnectIsBounded),
+                new NamedTest("testCheckLineFormat", BootTests::testCheckLineFormat),
                 new NamedTest("testRunnerCatchesEachTestAndKeepsGoing", BootTests::testRunnerCatchesEachTestAndKeepsGoing),
                 new NamedTest("testFaultSelfTestExitsNonZeroAfterContinuing", BootTests::testFaultSelfTestExitsNonZeroAfterContinuing),
                 // Last, and in this order: both mutate Bridge's process-wide static
@@ -188,6 +281,97 @@ public class BootTests {
     private static String firstMentioning(List<String> messages, String name) {
         for (String m : messages) if (m != null && m.contains(name)) return m;
         return null;
+    }
+
+    /**
+     * First throw report naming {@code test}, rendered as the line main() would
+     * print for it, or null. A separate name from {@link #firstMentioning}
+     * because erasure makes {@code List<Thrown>} and {@code List<String>}
+     * indistinguishable as overloads.
+     */
+    private static String firstThrown(List<Thrown> thrown, String test) {
+        for (Thrown t : thrown) {
+            if (t != null && (t.test().contains(test) || t.detail().contains(test))) {
+                return t.test() + DIAG + t.detail();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * #78's contract on the line this suite prints: a check's identity is
+     * everything before {@code " # "}, and it is the same text whether the
+     * check passed or failed.
+     *
+     * Both defects it fixes were invisible from inside a run and only showed up
+     * in a comparison of two runs, which is why this asserts the rendering
+     * rather than any behaviour: the Factory matches a baseline check against a
+     * candidate check by that identity, so a value spliced into it renamed the
+     * check every run (one check missing, one new — NOT_COMPARABLE), and a
+     * failing check renamed itself relative to its own passing line, so an
+     * unchanged failure read as one the candidate introduced. The second defect
+     * was {@code "FAIL: "}: no whitespace between the word and the name, so a
+     * failed boot check was not parsed as a leg at all.
+     *
+     * checkLine() is the seam because it is pure. Capturing {@code System.out}
+     * would assert the same text through the stream the suite reports on, and
+     * would have to run a failing check to see a FAIL line — which would move
+     * the failure counter this test is not allowed to touch.
+     */
+    private static void testCheckLineFormat() {
+        String msg = "a stable assertion";
+
+        String ok = checkLine(true, msg);
+        String bad = checkLine(false, msg);
+        check(ok.equals("ok  : " + msg), "a passing check line is the ok prefix and the identity", ok);
+        check(bad.equals("FAIL  : " + msg), "a failing check line is the FAIL prefix and the identity", bad);
+        check(ok.substring(OK_PREFIX.length()).equals(bad.substring(FAIL_PREFIX.length())),
+              "pass and fail carry byte-identical identities — the same check, not two",
+              q(ok) + " vs " + q(bad));
+
+        // The leg idiom whoever parses this output uses: <word><whitespace><name>.
+        // "FAIL: " failed it on the whitespace alone, which is the whole of the
+        // second defect in #78.
+        check(FAIL_PREFIX.matches("FAIL\\s+: "), "the FAIL prefix puts whitespace after the word",
+              q(FAIL_PREFIX));
+        check(bad.split("\\s+", 2)[0].equals("FAIL"),
+              "so a failing line's first whitespace-delimited word is exactly FAIL", q(bad));
+
+        String diag = checkLine(true, msg, 7);
+        check(diag.equals("ok  : " + msg + " # got 7"),
+              "the 3-arg form appends the observed value after the diagnostic separator", diag);
+        check(diag.split(" # ", 2)[0].equals(ok),
+              "and everything before the separator is the 2-arg form's line, unchanged", diag);
+        check(!ok.contains(" # ") && !bad.contains(" # "),
+              "the 2-arg form prints no separator at all, rather than an empty diagnostic",
+              q(ok) + " / " + q(bad));
+        check(checkLine(false, msg, 7).split(" # ", 2)[0].equals(bad),
+              "a failing 3-arg line keeps the identity too: only the prefix differs",
+              checkLine(false, msg, 7));
+
+        // An array as the value. String.valueOf would print
+        // [Ljava.lang.String;@1b6d3586 -- a per-run identity hash, exactly the
+        // text #78 exists to keep out of a check line, and no use as evidence
+        // either.
+        String arr = checkLine(true, msg, new String[] {"a", "b"});
+        check(arr.endsWith(" # got [a, b]"), "an array value renders its elements", arr);
+        check(checkLine(true, msg, new int[] {1, 2}).endsWith(" # got [1, 2]"),
+              "a primitive array too", checkLine(true, msg, new int[] {1, 2}));
+        check(!arr.contains("@"), "and no identity hash reaches the line", arr);
+        check(checkLine(true, msg, (Object) null).endsWith(" # got null"),
+              "a null value says so rather than throwing",
+              checkLine(true, msg, (Object) null));
+
+        // The identity may not contain the separator: it would silently split,
+        // filing the tail of what the author wrote as evidence and renaming the
+        // check -- the defect, arrived at from the other direction.
+        String refused = null;
+        try {
+            checkLine(true, "half an identity # and a diagnostic");
+        } catch (IllegalArgumentException e) {
+            refused = e.getMessage();
+        }
+        check(refused != null, "an identity containing the separator is refused, not split", refused);
     }
 
     /**
@@ -235,22 +419,22 @@ public class BootTests {
                 }),
                 new NamedTest("epsilon", () -> entered.add("epsilon")));
 
-        List<String> messages = runAll(tests);
+        List<Thrown> messages = runAll(tests);
 
         check(entered.equals(List.of("alpha", "beta", "gamma", "delta", "epsilon")),
-              "every test still runs, in order, after two of them throw (ran " + entered + ")");
+              "every test still runs, in order, after two of them throw", entered);
         check(messages.size() == 2,
-              "exactly the two tests that threw are reported, and no others (got "
-              + messages.size() + ": " + messages + ")");
+              "exactly the two tests that threw are reported, and no others",
+              messages.size() + ": " + messages);
 
-        String betaMsg = firstMentioning(messages, "beta");
-        String deltaMsg = firstMentioning(messages, "delta");
+        String betaMsg = firstThrown(messages, "beta");
+        String deltaMsg = firstThrown(messages, "delta");
         check(betaMsg != null && betaMsg.contains("AssertionError") && betaMsg.contains("boom-assert"),
               "an AssertionError is caught and reported against the test it came from, "
-              + "naming type and message (got " + q(betaMsg) + ")");
+              + "naming type and message", q(betaMsg));
         check(deltaMsg != null && deltaMsg.contains("Exception") && deltaMsg.contains("boom-checked"),
               "a checked Exception is caught and reported against the test it came from, "
-              + "naming type and message (got " + q(deltaMsg) + ")");
+              + "naming type and message", q(deltaMsg));
     }
 
     /** Printed by the --fault-selftest test listed *after* the one that throws. */
@@ -300,12 +484,12 @@ public class BootTests {
      * JVM process.
      *
      * All the gate ever sees of this suite is its exit status and its output —
-     * run-tests.sh:23 runs `java … dreamconnect.boot.BootTests` under
+     * run-tests.sh:29 runs `java … dreamconnect.boot.BootTests` under
      * `set -euo pipefail` (:4). That is why the masking the issue reports is a
      * property of this boundary and not of runAll(): a throw used to end main(),
      * and while that invocation was bare the non-zero status killed the script
-     * there, so the Python suites (:26-41) and both shell suites (:43, :47)
-     * never ran at all. The reader could not tell "one test threw" from "half
+     * there, so the Python suites (:32-46) and the three shell suites (:50, :54,
+     * :75) never ran at all. The reader could not tell "one test threw" from "half
      * the gate never executed".
      *
      * The contract, decided 2026-09-11 by the owner: catch per test, count it as
@@ -316,11 +500,13 @@ public class BootTests {
      *   prints FAULT_SELFTEST_CONTINUED;
      *
      *   still red — the throw is counted like every other failure, so the child
-     *   prints a `FAIL: ` line naming the test and the throwable and exits 1.
-     *   `FAIL: `, the "N FAILURE(S)" summary and exit 1 are the suite's own
-     *   pre-existing reporting (check(), :30-33; main's summary), not anything
-     *   #41 introduced — which is what "the same failure-counting mechanism the
-     *   rest of the suite uses" means.
+     *   prints a {@link #FAIL_PREFIX} line naming the test and the throwable and
+     *   exits 1. That prefix, the "N FAILURE(S)" summary and exit 1 are the
+     *   suite's own pre-existing reporting (check(); main's summary), not
+     *   anything #41 introduced — which is what "the same failure-counting
+     *   mechanism the rest of the suite uses" means. The assert below reads the
+     *   prefix off the constant rather than quoting it, because #78 changed its
+     *   text and a second copy here would have gone on asserting the old one.
      *
      * Asserting the status alone would pass for the wrong reason: a child that
      * dies at class load because the two --add-exports were not propagated also
@@ -354,22 +540,22 @@ public class BootTests {
         String out = Files.readString(log);
         Files.deleteIfExists(log);
         List<String> lines = List.of(out.split("\n"));
-        String failLine = firstMentioning(lines, "FAIL: ");
+        String failLine = firstMentioning(lines, FAIL_PREFIX);
 
         check(exited, "the --fault-selftest child exits rather than hanging");
         check(out.contains(FAULT_SELFTEST_CONTINUED),
-              "a test listed after the throwing one still runs: the child prints its marker "
-              + "(child wrote " + lines.size() + " lines, status " + status + ")");
+              "a test listed after the throwing one still runs: the child prints its marker",
+              lines.size() + " lines, status " + status);
         check(status == 1,
-              "and the child still exits 1, which run-tests.sh:23 captures and its deferred "
-              + "`exit \"$java_status\"` (:57) turns into a red gate only after the sections "
-              + "below the Java one have run (got status " + status + ")");
+              "and the child still exits 1, which run-tests.sh:29 captures and its deferred "
+              + "`exit \"$java_status\"` (:97) turns into a red gate only after the sections "
+              + "below the Java one have run", status);
         check(failLine != null
               && failLine.contains(FAULT_SELFTEST_THROWER)
               && failLine.contains("AssertionError")
               && failLine.contains(FAULT_SELFTEST_BOOM),
               "the throw is reported as a failure naming the test it came from and the "
-              + "throwable (got " + q(failLine) + ")");
+              + "throwable", q(failLine));
         check(!out.contains("ALL PASS"),
               "and the child does not report the run as passing");
     }
@@ -441,7 +627,7 @@ public class BootTests {
         }
         check(AwtEvdev.keysym(KeyEvent.VK_A) == 97, "VK_A -> keysym 97 ('a')");
         check(AwtEvdev.keysym(KeyEvent.VK_Z) == 122, "VK_Z -> keysym 122 ('z')");
-        check(allOk, "A-Z -> lowercase keysyms 97..122" + bad);
+        check(allOk, "A-Z -> lowercase keysyms 97..122", bad.isEmpty() ? "no mismatches" : bad.trim());
     }
 
     /** Digits are their own keysym: VK_0(48)->'0'(48) … VK_9(57)->'9'(57). */
@@ -457,7 +643,7 @@ public class BootTests {
         }
         check(AwtEvdev.keysym(KeyEvent.VK_0) == 48, "VK_0 -> keysym 48 ('0')");
         check(AwtEvdev.keysym(KeyEvent.VK_9) == 57, "VK_9 -> keysym 57 ('9')");
-        check(allOk, "0-9 -> keysyms 48..57" + bad);
+        check(allOk, "0-9 -> keysyms 48..57", bad.isEmpty() ? "no mismatches" : bad.trim());
     }
 
     /**
@@ -472,8 +658,10 @@ public class BootTests {
         check(AwtEvdev.keysym(KeyEvent.VK_CLOSE_BRACKET) == 93, "VK_CLOSE_BRACKET -> keysym 93 (']')");
         check(AwtEvdev.keysym(KeyEvent.VK_BACK_SLASH) == 92, "VK_BACK_SLASH -> keysym 92 ('\\')");
         check(AwtEvdev.keysym(KeyEvent.VK_SEMICOLON) == 59, "VK_SEMICOLON -> keysym 59 (';')");
-        check(AwtEvdev.keysym(KeyEvent.VK_QUOTE) == 39, "VK_QUOTE (vk 0xDE) -> keysym 39 (apostrophe), not the vk");
-        check(AwtEvdev.keysym(KeyEvent.VK_BACK_QUOTE) == 96, "VK_BACK_QUOTE (vk 0xC0) -> keysym 96 (grave), not the vk");
+        check(AwtEvdev.keysym(KeyEvent.VK_QUOTE) == 39,
+              "VK_QUOTE (vk 0xDE) -> keysym 39 (apostrophe), not the vk");
+        check(AwtEvdev.keysym(KeyEvent.VK_BACK_QUOTE) == 96,
+              "VK_BACK_QUOTE (vk 0xC0) -> keysym 96 (grave), not the vk");
         check(AwtEvdev.keysym(KeyEvent.VK_COMMA) == 44, "VK_COMMA -> keysym 44 (',')");
         check(AwtEvdev.keysym(KeyEvent.VK_PERIOD) == 46, "VK_PERIOD -> keysym 46 ('.')");
         check(AwtEvdev.keysym(KeyEvent.VK_SLASH) == 47, "VK_SLASH -> keysym 47 ('/')");
@@ -529,22 +717,24 @@ public class BootTests {
 
         peer.keyPress(KeyEvent.VK_A);
         check("KS 97 1".equals(d.last()),
-              "keysym-routed: keyPress(VK_A) -> \"KS 97 1\" (got \"" + d.last() + "\")");
+              "keysym-routed: keyPress(VK_A) -> \"KS 97 1\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_ENTER);
         check("K 28 1".equals(d.last()),
-              "evdev-routed: keyPress(VK_ENTER) -> \"K 28 1\" (got \"" + d.last() + "\")");
+              "evdev-routed: keyPress(VK_ENTER) -> \"K 28 1\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_F1);
         check("K 59 1".equals(d.last()),
-              "vk 0x70 is F1, not 'p': keyPress(VK_F1) -> \"K 59 1\", never the keysym 112 (got \""
-              + d.last() + "\")");
+              "vk 0x70 is F1, not 'p': keyPress(VK_F1) -> \"K 59 1\", never the keysym 112", "\""
+              + d.last() + "\"");
 
         peer.keyRelease(KeyEvent.VK_A);
         check("KS 97 0".equals(d.last()),
-              "release state 0: keyRelease(VK_A) -> \"KS 97 0\" (got \"" + d.last() + "\")");
+              "release state 0: keyRelease(VK_A) -> \"KS 97 0\"", q(d.last()));
 
-        check(d.sent.size() == 4, "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+        check(d.sent.size() == 4,
+              "one wire line per key event, no extras: the four routed keys",
+              d.sent.size() + ": " + d.sent);
     }
 
     /**
@@ -597,18 +787,18 @@ public class BootTests {
         // so a JDK that moved VK_SEPARATOR reports itself rather than quietly
         // making the #19 assertion at the bottom vacuous.
         check(KeyEvent.VK_SEPARATOR == 0x6C,
-              "AWT VK_SEPARATOR is 0x6C = 108, the same int as the 'l' keysym (got 0x"
-              + Integer.toHexString(KeyEvent.VK_SEPARATOR) + ")");
+              "AWT VK_SEPARATOR is 0x6C = 108, the same int as the 'l' keysym", "0x"
+              + Integer.toHexString(KeyEvent.VK_SEPARATOR));
 
         // Which table claims the vk. Asserted directly, because the KS-first
         // branch order in sendKey() would hide a leftover evdev entry from the
         // wire assertions below (#38: exactly one table, never both).
         check(AwtEvdev.keysym(KeyEvent.VK_SEPARATOR) == 65452,
               "keysym-routed (#40): AwtEvdev.keysym(VK_SEPARATOR) == 65452 (XK_KP_Separator, "
-              + "0xFFAC) (got " + AwtEvdev.keysym(KeyEvent.VK_SEPARATOR) + ")");
+              + "0xFFAC)", AwtEvdev.keysym(KeyEvent.VK_SEPARATOR));
         check(AwtEvdev.keycode(KeyEvent.VK_SEPARATOR) == -1,
               "and the evdev entry is gone, not merely shadowed: AwtEvdev.keycode(VK_SEPARATOR) "
-              + "== -1, no longer KEY_KPCOMMA 121 (got " + AwtEvdev.keycode(KeyEvent.VK_SEPARATOR) + ")");
+              + "== -1, no longer KEY_KPCOMMA 121", AwtEvdev.keycode(KeyEvent.VK_SEPARATOR));
 
         FakeDaemon d = new FakeDaemon();
         DreamConnectRobotPeer peer = new DreamConnectRobotPeer(d, null);
@@ -616,17 +806,18 @@ public class BootTests {
         peer.keyPress(KeyEvent.VK_SEPARATOR);
         check("KS 65452 1".equals(d.last()),
               "keyPress(VK_SEPARATOR) -> \"KS 65452 1\" (XK_KP_Separator), not the layout-dead "
-              + "evdev line \"K 121 1\" (got \"" + d.last() + "\")");
+              + "evdev line \"K 121 1\"", q(d.last()));
 
         peer.keyRelease(KeyEvent.VK_SEPARATOR);
         check("KS 65452 0".equals(d.last()),
-              "keyRelease(VK_SEPARATOR) -> \"KS 65452 0\" (got \"" + d.last() + "\")");
+              "keyRelease(VK_SEPARATOR) -> \"KS 65452 0\"", q(d.last()));
 
         check(d.sent.size() == 2,
-              "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+              "one wire line per key event, no extras: the numpad separator",
+              d.sent.size() + ": " + d.sent);
 
         check(!d.sent.contains("KS 108 1") && !d.sent.contains("KS 108 0"),
-              "#19 stays fixed: the 'l' keysym 108 never reaches the wire (got " + d.sent + ")");
+              "#19 stays fixed: the 'l' keysym 108 never reaches the wire", d.sent);
     }
 
     /**
@@ -687,20 +878,21 @@ public class BootTests {
 
         peer.keyPress(KeyEvent.VK_F13);
         check("K 183 1".equals(d.last()),
-              "keyPress(VK_F13) -> \"K 183 1\" (got \"" + d.last() + "\")");
+              "keyPress(VK_F13) -> \"K 183 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_F13);
         check("K 183 0".equals(d.last()),
-              "keyRelease(VK_F13) -> \"K 183 0\" (got \"" + d.last() + "\")");
+              "keyRelease(VK_F13) -> \"K 183 0\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_F24);
         check("K 194 1".equals(d.last()),
-              "keyPress(VK_F24) -> \"K 194 1\" (got \"" + d.last() + "\")");
+              "keyPress(VK_F24) -> \"K 194 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_F24);
         check("K 194 0".equals(d.last()),
-              "keyRelease(VK_F24) -> \"K 194 0\" (got \"" + d.last() + "\")");
+              "keyRelease(VK_F24) -> \"K 194 0\"", q(d.last()));
 
         check(d.sent.size() == 4,
-              "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+              "one wire line per key event, no extras: F13 and F24",
+              d.sent.size() + ": " + d.sent);
     }
 
     /**
@@ -731,13 +923,14 @@ public class BootTests {
 
         peer.keyPress(KeyEvent.VK_HELP);
         check("K 138 1".equals(d.last()),
-              "keyPress(VK_HELP) -> \"K 138 1\" (got \"" + d.last() + "\")");
+              "keyPress(VK_HELP) -> \"K 138 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_HELP);
         check("K 138 0".equals(d.last()),
-              "keyRelease(VK_HELP) -> \"K 138 0\" (got \"" + d.last() + "\")");
+              "keyRelease(VK_HELP) -> \"K 138 0\"", q(d.last()));
 
         check(d.sent.size() == 2,
-              "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+              "one wire line per key event, no extras: VK_HELP",
+              d.sent.size() + ": " + d.sent);
     }
 
     /**
@@ -779,17 +972,17 @@ public class BootTests {
 
         // Same evdev code as the non-numpad counterpart.
         check(AwtEvdev.keycode(KeyEvent.VK_KP_UP) == AwtEvdev.keycode(KeyEvent.VK_UP),
-              "VK_KP_UP shares VK_UP's evdev code (got " + AwtEvdev.keycode(KeyEvent.VK_KP_UP)
-              + " vs " + AwtEvdev.keycode(KeyEvent.VK_UP) + ")");
+              "VK_KP_UP shares VK_UP's evdev code", AwtEvdev.keycode(KeyEvent.VK_KP_UP)
+              + " vs " + AwtEvdev.keycode(KeyEvent.VK_UP));
         check(AwtEvdev.keycode(KeyEvent.VK_KP_DOWN) == AwtEvdev.keycode(KeyEvent.VK_DOWN),
-              "VK_KP_DOWN shares VK_DOWN's evdev code (got " + AwtEvdev.keycode(KeyEvent.VK_KP_DOWN)
-              + " vs " + AwtEvdev.keycode(KeyEvent.VK_DOWN) + ")");
+              "VK_KP_DOWN shares VK_DOWN's evdev code", AwtEvdev.keycode(KeyEvent.VK_KP_DOWN)
+              + " vs " + AwtEvdev.keycode(KeyEvent.VK_DOWN));
         check(AwtEvdev.keycode(KeyEvent.VK_KP_LEFT) == AwtEvdev.keycode(KeyEvent.VK_LEFT),
-              "VK_KP_LEFT shares VK_LEFT's evdev code (got " + AwtEvdev.keycode(KeyEvent.VK_KP_LEFT)
-              + " vs " + AwtEvdev.keycode(KeyEvent.VK_LEFT) + ")");
+              "VK_KP_LEFT shares VK_LEFT's evdev code", AwtEvdev.keycode(KeyEvent.VK_KP_LEFT)
+              + " vs " + AwtEvdev.keycode(KeyEvent.VK_LEFT));
         check(AwtEvdev.keycode(KeyEvent.VK_KP_RIGHT) == AwtEvdev.keycode(KeyEvent.VK_RIGHT),
-              "VK_KP_RIGHT shares VK_RIGHT's evdev code (got " + AwtEvdev.keycode(KeyEvent.VK_KP_RIGHT)
-              + " vs " + AwtEvdev.keycode(KeyEvent.VK_RIGHT) + ")");
+              "VK_KP_RIGHT shares VK_RIGHT's evdev code", AwtEvdev.keycode(KeyEvent.VK_KP_RIGHT)
+              + " vs " + AwtEvdev.keycode(KeyEvent.VK_RIGHT));
 
         // Absolute values, from input-event-codes.h — catches a transposition
         // within the arrow-code set that the equality checks above would miss
@@ -809,27 +1002,28 @@ public class BootTests {
         DreamConnectRobotPeer peer = new DreamConnectRobotPeer(d, null);
 
         peer.keyPress(KeyEvent.VK_KP_UP);
-        check("K 103 1".equals(d.last()), "keyPress(VK_KP_UP) -> \"K 103 1\" (got \"" + d.last() + "\")");
+        check("K 103 1".equals(d.last()), "keyPress(VK_KP_UP) -> \"K 103 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_KP_UP);
-        check("K 103 0".equals(d.last()), "keyRelease(VK_KP_UP) -> \"K 103 0\" (got \"" + d.last() + "\")");
+        check("K 103 0".equals(d.last()), "keyRelease(VK_KP_UP) -> \"K 103 0\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_KP_DOWN);
-        check("K 108 1".equals(d.last()), "keyPress(VK_KP_DOWN) -> \"K 108 1\" (got \"" + d.last() + "\")");
+        check("K 108 1".equals(d.last()), "keyPress(VK_KP_DOWN) -> \"K 108 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_KP_DOWN);
-        check("K 108 0".equals(d.last()), "keyRelease(VK_KP_DOWN) -> \"K 108 0\" (got \"" + d.last() + "\")");
+        check("K 108 0".equals(d.last()), "keyRelease(VK_KP_DOWN) -> \"K 108 0\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_KP_LEFT);
-        check("K 105 1".equals(d.last()), "keyPress(VK_KP_LEFT) -> \"K 105 1\" (got \"" + d.last() + "\")");
+        check("K 105 1".equals(d.last()), "keyPress(VK_KP_LEFT) -> \"K 105 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_KP_LEFT);
-        check("K 105 0".equals(d.last()), "keyRelease(VK_KP_LEFT) -> \"K 105 0\" (got \"" + d.last() + "\")");
+        check("K 105 0".equals(d.last()), "keyRelease(VK_KP_LEFT) -> \"K 105 0\"", q(d.last()));
 
         peer.keyPress(KeyEvent.VK_KP_RIGHT);
-        check("K 106 1".equals(d.last()), "keyPress(VK_KP_RIGHT) -> \"K 106 1\" (got \"" + d.last() + "\")");
+        check("K 106 1".equals(d.last()), "keyPress(VK_KP_RIGHT) -> \"K 106 1\"", q(d.last()));
         peer.keyRelease(KeyEvent.VK_KP_RIGHT);
-        check("K 106 0".equals(d.last()), "keyRelease(VK_KP_RIGHT) -> \"K 106 0\" (got \"" + d.last() + "\")");
+        check("K 106 0".equals(d.last()), "keyRelease(VK_KP_RIGHT) -> \"K 106 0\"", q(d.last()));
 
         check(d.sent.size() == 8,
-              "one wire line per key event, no extras (got " + d.sent.size() + ": " + d.sent + ")");
+              "one wire line per key event, no extras: the numpad arrows",
+              d.sent.size() + ": " + d.sent);
     }
 
     /**
@@ -878,13 +1072,11 @@ public class BootTests {
 
             peer.keyPress(vks[i]);
             check(d.sent.isEmpty(),
-                  "unmapped key is dropped: keyPress(" + names[i] + ") puts NO line on the wire (got "
-                  + d.sent + ")");
+                  "unmapped key is dropped: keyPress(" + names[i] + ") puts NO line on the wire", d.sent);
 
             peer.keyRelease(vks[i]);
             check(d.sent.isEmpty(),
-                  "unmapped key is dropped: keyRelease(" + names[i] + ") puts NO line on the wire (got "
-                  + d.sent + ")");
+                  "unmapped key is dropped: keyRelease(" + names[i] + ") puts NO line on the wire", d.sent);
         }
     }
 
@@ -929,7 +1121,7 @@ public class BootTests {
             peer.keyRelease(vk);
             check(d.sent.isEmpty(),
                   "no printable-ASCII fallback: press+release of " + label
-                  + " puts NO line on the wire (got " + d.sent + ")");
+                  + " puts NO line on the wire", d.sent);
         }
     }
 
@@ -963,9 +1155,9 @@ public class BootTests {
             stranded.add(f.getName() + " (0x" + Integer.toHexString(vk) + ")");
         }
         check(scanned >= 150,
-              "scanned KeyEvent's VK_ constants by reflection (got " + scanned + ", expected ~189)");
+              "scanned KeyEvent's VK_ constants by reflection", scanned + ", expected ~189");
         check(stranded.isEmpty(),
-              "no named AWT vk depended on the printable-ASCII fallback (got " + stranded + ")");
+              "no named AWT vk depended on the printable-ASCII fallback", stranded);
     }
 
     /**
@@ -1009,11 +1201,11 @@ public class BootTests {
         Map<Integer, Integer> KSYM = (Map<Integer, Integer>) ksymField.get(null);
 
         check(KEY.size() >= 70,
-              "sanity floor: AwtEvdev.KEY has >= 70 entries via reflection (got " + KEY.size()
-              + "); guards against a reflection bug silently handing back an empty/wrong map");
+              "sanity floor: AwtEvdev.KEY has >= 70 entries via reflection; guards against a "
+              + "reflection bug silently handing back an empty/wrong map", KEY.size());
         check(KSYM.size() >= 47,
-              "sanity floor: AwtEvdev.KSYM has >= 47 entries via reflection (got " + KSYM.size()
-              + "); guards against a reflection bug silently handing back an empty/wrong map");
+              "sanity floor: AwtEvdev.KSYM has >= 47 entries via reflection; guards against a "
+              + "reflection bug silently handing back an empty/wrong map", KSYM.size());
 
         List<String> overlaps = new ArrayList<>();
         for (Integer vk : KEY.keySet()) {
@@ -1024,8 +1216,8 @@ public class BootTests {
         }
         check(overlaps.isEmpty(),
               "AwtEvdev KEY and KSYM tables are disjoint (total check, via reflection, over "
-              + "every vk either table actually contains — not a bounded scan) "
-              + "(got " + overlaps.size() + " vk(s) in both" + (overlaps.isEmpty() ? "" : ": " + overlaps) + ")");
+              + "every vk either table actually contains — not a bounded scan)",
+              overlaps.size() + " vk(s) in both" + (overlaps.isEmpty() ? "" : ": " + overlaps));
     }
 
     private static void testFrameReader() throws Exception {
@@ -1056,7 +1248,7 @@ public class BootTests {
         FrameReader fr = new FrameReader(f.getAbsolutePath());
         int[] px = fr.pixels(0, 0, w, h);
         check(px.length == w * h, "pixels() length == w*h");
-        check(px[1] == 0xFF332211, "BGRx->ARGB at (1,0) == 0xFF332211 (got 0x" + Integer.toHexString(px[1]) + ")");
+        check(px[1] == 0xFF332211, "BGRx->ARGB at (1,0) == 0xFF332211", "0x" + Integer.toHexString(px[1]));
         check(px[0] == 0xFF000000, "unset pixel (0,0) == opaque black");
         check(fr.pixel(1, 0) == 0xFF332211, "pixel(1,0) == 0xFF332211");
         check(fr.pixel(99, 99) == 0xFF000000, "out-of-bounds pixel -> opaque black");
@@ -1093,7 +1285,8 @@ public class BootTests {
 
         FrameReader fr = new FrameReader(f.getAbsolutePath());
         int[] px = fr.pixels(0, 0, w, h);
-        check(px[1] == 0xFF332211, "mid-write pixels() returns real pixels, not black (got 0x" + Integer.toHexString(px[1]) + ")");
+        check(px[1] == 0xFF332211,
+              "mid-write pixels() returns real pixels, not black", "0x" + Integer.toHexString(px[1]));
     }
 
     /** A stand-in for ScreenConnect's Messages$LogonSessionInfo2: the curate
@@ -1119,17 +1312,17 @@ public class BootTests {
         // Only :0 survives, relabelled, and it is first because it is the only one.
         FakeLogon[] in = { new FakeLogon(":1024"), new FakeLogon(":0") };
         Object out = Bridge.curateLogonSessions(in, ":0", "[Backstage]");
-        check(out instanceof FakeLogon[], "curate returns an array of the same type");
+        check(out instanceof FakeLogon[], "curate (3-arg) returns an array of the same type");
         FakeLogon[] arr = (FakeLogon[]) out;
-        check(arr.length == 1, "curate drops the non-matching (greeter) session (got " + arr.length + ")");
+        check(arr.length == 1, "curate drops the non-matching (greeter) session", arr.length);
         check(":0".equals(sessionNameOf(arr[0])) == false && "[Backstage]".equals(arr[0].logonSessionName),
-              "the surviving session is relabelled to [Backstage] (got " + arr[0].logonSessionName + ")");
+              "the surviving session is relabelled to [Backstage]", arr[0].logonSessionName);
 
         // No entry matches our display: keep everything, just relabel — never
         // empty the picker (the operator must still be able to connect).
         FakeLogon[] in2 = { new FakeLogon(":1024"), new FakeLogon(":1025") };
         FakeLogon[] out2 = (FakeLogon[]) Bridge.curateLogonSessions(in2, ":7", "[Backstage]");
-        check(out2.length == 2, "no match: nothing is dropped (got " + out2.length + ")");
+        check(out2.length == 2, "no match: nothing is dropped", out2.length);
 
         // A human-readable name is left alone; a machine-y one is rewritten.
         FakeLogon[] in3 = { new FakeLogon(":0") };
@@ -1137,7 +1330,8 @@ public class BootTests {
         check("operator".equals(out3[0].logonSessionName), "machine-y :0 relabelled to the given label");
 
         // Null and single-object inputs must not throw.
-        check(Bridge.curateLogonSessions(null, ":0", "[Backstage]") == null, "null in, null out");
+        check(Bridge.curateLogonSessions(null, ":0", "[Backstage]") == null,
+              "null in, null out (3-arg)");
         FakeLogon single = new FakeLogon(":0");
         Object s = Bridge.curateLogonSessions(single, ":0", "[Backstage]");
         check(s == single && "[Backstage]".equals(single.logonSessionName),
@@ -1157,7 +1351,7 @@ public class BootTests {
 
     private static void testCaptureTuning() {
         // maxfps -> min frame interval in ms.
-        check(Bridge.perFrameMs("60") == 16, "maxfps=60 -> 16 ms min interval (got " + Bridge.perFrameMs("60") + ")");
+        check(Bridge.perFrameMs("60") == 16, "maxfps=60 -> 16 ms min interval", Bridge.perFrameMs("60"));
         check(Bridge.perFrameMs("20") == 50, "maxfps=20 -> 50 ms (SC's stock ceiling)");
         check(Bridge.perFrameMs("0") == 0, "maxfps=0 -> 0 (leave stock)");
         check(Bridge.perFrameMs("junk") == 0, "maxfps=junk -> 0 (ignored)");
@@ -1165,15 +1359,18 @@ public class BootTests {
 
         // setIntField reaches a private field on the SUPERCLASS.
         FakeCapturer c = new FakeCapturer();
-        check(Bridge.setIntField(c, "minFrameIntervalMilliseconds", 16), "setIntField finds the superclass field");
-        check(fieldInt(c, "minFrameIntervalMilliseconds") == 16, "the superclass field was actually set to 16");
+        check(Bridge.setIntField(c, "minFrameIntervalMilliseconds", 16),
+              "setIntField finds the superclass field");
+        check(fieldInt(c, "minFrameIntervalMilliseconds") == 16,
+              "the superclass field was actually set to 16");
         check(!Bridge.setIntField(c, "noSuchField", 1), "setIntField returns false for an unknown field");
 
         // configure(...) wires the args, and tuneCapturer applies them.
         Bridge.configure("maxfps=30,maxinterval=120,framemultiple=1");
         FakeCapturer c2 = new FakeCapturer();
         Bridge.tuneCapturer(c2);
-        check(fieldInt(c2, "minFrameIntervalMilliseconds") == 33, "tuneCapturer set min interval from maxfps=30 (got " + fieldInt(c2, "minFrameIntervalMilliseconds") + ")");
+        check(fieldInt(c2, "minFrameIntervalMilliseconds") == 33,
+              "tuneCapturer set min interval from maxfps=30", fieldInt(c2, "minFrameIntervalMilliseconds"));
         check(fieldInt(c2, "maxFrameIntervalMilliseconds") == 120, "tuneCapturer set max interval");
         check(fieldInt(c2, "frameDelayMultiple") == 1, "tuneCapturer set frame multiple");
 
@@ -1182,7 +1379,8 @@ public class BootTests {
         resetTuning();
         FakeCapturer c3 = new FakeCapturer();
         Bridge.tuneCapturer(c3);
-        check(fieldInt(c3, "minFrameIntervalMilliseconds") == 50, "no tuning configured -> stock 50 ms left as-is");
+        check(fieldInt(c3, "minFrameIntervalMilliseconds") == 50,
+              "no tuning configured -> stock 50 ms left as-is");
 
         // tuneCapturer must never throw on a null or a wrong-shaped object.
         Bridge.tuneCapturer(null);
@@ -1425,40 +1623,38 @@ public class BootTests {
      */
     private static void testNormalizeDisplay() {
         check(":0".equals(Bridge.normalizeDisplay(":0.0")),
-              "normalizeDisplay(\":0.0\") -> \":0\" (screen suffix dropped) (got "
-              + q(Bridge.normalizeDisplay(":0.0")) + ")");
+              "normalizeDisplay(\":0.0\") -> \":0\" (screen suffix dropped)",
+              q(Bridge.normalizeDisplay(":0.0")));
         check(":0".equals(Bridge.normalizeDisplay(":0")),
-              "normalizeDisplay(\":0\") -> \":0\" (already normal) (got "
-              + q(Bridge.normalizeDisplay(":0")) + ")");
+              "normalizeDisplay(\":0\") -> \":0\" (already normal)", q(Bridge.normalizeDisplay(":0")));
         check(":4".equals(Bridge.normalizeDisplay(":4.0")),
-              "normalizeDisplay(\":4.0\") -> \":4\" (got " + q(Bridge.normalizeDisplay(":4.0")) + ")");
+              "normalizeDisplay(\":4.0\") -> \":4\"", q(Bridge.normalizeDisplay(":4.0")));
         check(":10".equals(Bridge.normalizeDisplay(":10.0")),
-              "normalizeDisplay(\":10.0\") -> \":10\", not a fixed-width chop (got "
-              + q(Bridge.normalizeDisplay(":10.0")) + ")");
+              "normalizeDisplay(\":10.0\") -> \":10\", not a fixed-width chop",
+              q(Bridge.normalizeDisplay(":10.0")));
         check(":0".equals(Bridge.normalizeDisplay(":0.1")),
               "normalizeDisplay(\":0.1\") -> \":0\": screen 1 of display 0 is the same display, "
-              + "so stripping only a literal \".0\" is not enough (got "
-              + q(Bridge.normalizeDisplay(":0.1")) + ")");
+              + "so stripping only a literal \".0\" is not enough", q(Bridge.normalizeDisplay(":0.1")));
         check(":0".equals(Bridge.normalizeDisplay("  :0.0  ")),
-              "normalizeDisplay(\"  :0.0  \") -> \":0\" (trimmed; the daemon strips its side too) (got "
-              + q(Bridge.normalizeDisplay("  :0.0  ")) + ")");
+              "normalizeDisplay(\"  :0.0  \") -> \":0\" (trimmed; the daemon strips its side too)",
+              q(Bridge.normalizeDisplay("  :0.0  ")));
 
         check(Bridge.normalizeDisplay(null) == null,
-              "normalizeDisplay(null) -> null (got " + q(Bridge.normalizeDisplay(null)) + ")");
+              "normalizeDisplay(null) -> null", q(Bridge.normalizeDisplay(null)));
         check(Bridge.normalizeDisplay("") == null,
-              "normalizeDisplay(\"\") -> null (got " + q(Bridge.normalizeDisplay("")) + ")");
+              "normalizeDisplay(\"\") -> null", q(Bridge.normalizeDisplay("")));
         check(Bridge.normalizeDisplay("   ") == null,
-              "normalizeDisplay(\"   \") -> null (whitespace is not a display) (got "
-              + q(Bridge.normalizeDisplay("   ")) + ")");
+              "normalizeDisplay(\"   \") -> null (whitespace is not a display)",
+              q(Bridge.normalizeDisplay("   ")));
         check(Bridge.normalizeDisplay("\t") == null,
-              "normalizeDisplay(\"\\t\") -> null (got " + q(Bridge.normalizeDisplay("\t")) + ")");
+              "normalizeDisplay(\"\\t\") -> null", q(Bridge.normalizeDisplay("\t")));
         check(Bridge.normalizeDisplay("UNKNOWN") == null,
-              "normalizeDisplay(\"UNKNOWN\") -> null: the daemon's no-display reply is not a display (got "
-              + q(Bridge.normalizeDisplay("UNKNOWN")) + ")");
+              "normalizeDisplay(\"UNKNOWN\") -> null: the daemon's no-display reply is not a display",
+              q(Bridge.normalizeDisplay("UNKNOWN")));
 
         check("wayland-0".equals(Bridge.normalizeDisplay("wayland-0")),
-              "normalizeDisplay(\"wayland-0\") -> \"wayland-0\" unchanged (opaque token, matches only itself) (got "
-              + q(Bridge.normalizeDisplay("wayland-0")) + ")");
+              "normalizeDisplay(\"wayland-0\") -> \"wayland-0\" unchanged (opaque token, matches only itself)",
+              q(Bridge.normalizeDisplay("wayland-0")));
     }
 
     /**
@@ -1500,28 +1696,28 @@ public class BootTests {
     private static void testNormalizeDisplayRejectsProtocolError() {
         check(Bridge.normalizeDisplay("ERR unknown cmd DISPLAY") == null,
               "normalizeDisplay(\"ERR unknown cmd DISPLAY\") -> null: a pre-#50 daemon's error line "
-              + "is not a session (got " + q(Bridge.normalizeDisplay("ERR unknown cmd DISPLAY")) + ")");
+              + "is not a session", q(Bridge.normalizeDisplay("ERR unknown cmd DISPLAY")));
         check(Bridge.normalizeDisplay("ERR [Errno 2] No such file or directory") == null,
               "normalizeDisplay(\"ERR [Errno 2] …\") -> null: the daemon's other error shape, "
-              + "`ERR <exception text>`, is rejected by the same rule (got "
-              + q(Bridge.normalizeDisplay("ERR [Errno 2] No such file or directory")) + ")");
+              + "`ERR <exception text>`, is rejected by the same rule",
+              q(Bridge.normalizeDisplay("ERR [Errno 2] No such file or directory")));
         check(Bridge.normalizeDisplay("ERR") == null,
-              "normalizeDisplay(\"ERR\") -> null: a bare/truncated error line is still not a display (got "
-              + q(Bridge.normalizeDisplay("ERR")) + ")");
+              "normalizeDisplay(\"ERR\") -> null: a bare/truncated error line is still not a display",
+              q(Bridge.normalizeDisplay("ERR")));
         check(Bridge.normalizeDisplay("  ERR unknown cmd DISPLAY  ") == null,
-              "normalizeDisplay(\"  ERR unknown cmd DISPLAY  \") -> null: trimmed before the rule applies (got "
-              + q(Bridge.normalizeDisplay("  ERR unknown cmd DISPLAY  ")) + ")");
+              "normalizeDisplay(\"  ERR unknown cmd DISPLAY  \") -> null: trimmed before the rule applies",
+              q(Bridge.normalizeDisplay("  ERR unknown cmd DISPLAY  ")));
 
         // Guards that this rule was implemented as "reject the protocol's error
         // line", not as "reject anything that isn't :N". Deliberately repeats
         // the wayland-0 case from testNormalizeDisplay: there it pins the
         // opaque-token rule, here it is the alarm on over-rejection.
         check("wayland-0".equals(Bridge.normalizeDisplay("wayland-0")),
-              "opaque tokens still pass through: normalizeDisplay(\"wayland-0\") -> \"wayland-0\" (got "
-              + q(Bridge.normalizeDisplay("wayland-0")) + ")");
+              "opaque tokens still pass through: normalizeDisplay(\"wayland-0\") -> \"wayland-0\"",
+              q(Bridge.normalizeDisplay("wayland-0")));
         check("ERRBOX:0".equals(Bridge.normalizeDisplay("ERRBOX:0")),
               "\"ERRBOX:0\" is a display on a host named ERRBOX, not an error line: the rule is the "
-              + "ERR *token*, not the ERR prefix (got " + q(Bridge.normalizeDisplay("ERRBOX:0")) + ")");
+              + "ERR *token*, not the ERR prefix", q(Bridge.normalizeDisplay("ERRBOX:0")));
     }
 
     // Fixtures shared by the resolveEndpoint tests. Since round 4 these stand
@@ -1579,26 +1775,26 @@ public class BootTests {
         List<SessionEndpoint> all = List.of(BACKSTAGE, CONSOLE);
 
         check(Bridge.resolveEndpoint(":0", all, all, FALLBACK) == BACKSTAGE,
-              "child \":0\" + entry \":0\", live -> backstage daemon (got "
-              + name(Bridge.resolveEndpoint(":0", all, all, FALLBACK)) + ")");
+              "child \":0\" + entry \":0\", live -> backstage daemon",
+              name(Bridge.resolveEndpoint(":0", all, all, FALLBACK)));
         check(Bridge.resolveEndpoint(":0.0", all, all, FALLBACK) == BACKSTAGE,
-              "child \":0.0\" + entry \":0\" -> backstage: suffix on the child side only (got "
-              + name(Bridge.resolveEndpoint(":0.0", all, all, FALLBACK)) + ")");
+              "child \":0.0\" + entry \":0\" -> backstage: suffix on the child side only",
+              name(Bridge.resolveEndpoint(":0.0", all, all, FALLBACK)));
         check(Bridge.resolveEndpoint(":1", all, all, FALLBACK) == CONSOLE,
-              "child \":1\" + entry \":1.0\" -> console: suffix on the registry side only (got "
-              + name(Bridge.resolveEndpoint(":1", all, all, FALLBACK)) + ")");
+              "child \":1\" + entry \":1.0\" -> console: suffix on the registry side only",
+              name(Bridge.resolveEndpoint(":1", all, all, FALLBACK)));
         check(Bridge.resolveEndpoint(":1.0", all, all, FALLBACK) == CONSOLE,
-              "child \":1.0\" + entry \":1.0\" -> console (got "
-              + name(Bridge.resolveEndpoint(":1.0", all, all, FALLBACK)) + ")");
+              "child \":1.0\" + entry \":1.0\" -> console",
+              name(Bridge.resolveEndpoint(":1.0", all, all, FALLBACK)));
         check(Bridge.resolveEndpoint(" :1.0 ", all, all, FALLBACK) == CONSOLE,
-              "child \" :1.0 \" -> console: matching normalises, it is not raw equals (got "
-              + name(Bridge.resolveEndpoint(" :1.0 ", all, all, FALLBACK)) + ")");
+              "child \" :1.0 \" -> console: matching normalises, it is not raw equals",
+              name(Bridge.resolveEndpoint(" :1.0 ", all, all, FALLBACK)));
 
         // Only the live subset may be attached to: backstage registered and
         // live, console registered but down, child on backstage's display.
         check(Bridge.resolveEndpoint(":0", all, List.of(BACKSTAGE), FALLBACK) == BACKSTAGE,
-              "one session down does not disturb another that is up (got "
-              + name(Bridge.resolveEndpoint(":0", all, List.of(BACKSTAGE), FALLBACK)) + ")");
+              "one session down does not disturb another that is up",
+              name(Bridge.resolveEndpoint(":0", all, List.of(BACKSTAGE), FALLBACK)));
     }
 
     /**
@@ -1616,20 +1812,19 @@ public class BootTests {
         List<SessionEndpoint> all = List.of(BACKSTAGE, CONSOLE);
 
         check(Bridge.resolveEndpoint(":0", List.of(), List.of(), FALLBACK) == FALLBACK,
-              "no registry entries at all -> the static shm=/socket= args (got "
-              + name(Bridge.resolveEndpoint(":0", List.of(), List.of(), FALLBACK)) + ")");
+              "no registry entries at all -> the static shm=/socket= args",
+              name(Bridge.resolveEndpoint(":0", List.of(), List.of(), FALLBACK)));
         check(Bridge.resolveEndpoint(":0", null, null, FALLBACK) == FALLBACK,
-              "registry unreadable (null lists) -> the static shm=/socket= args (got "
-              + name(Bridge.resolveEndpoint(":0", null, null, FALLBACK)) + ")");
+              "registry unreadable (null lists) -> the static shm=/socket= args",
+              name(Bridge.resolveEndpoint(":0", null, null, FALLBACK)));
         check(Bridge.resolveEndpoint(null, all, all, FALLBACK) == FALLBACK,
-              "child with no DISPLAY (null) -> fallback (got "
-              + name(Bridge.resolveEndpoint(null, all, all, FALLBACK)) + ")");
+              "child with no DISPLAY (null) -> fallback",
+              name(Bridge.resolveEndpoint(null, all, all, FALLBACK)));
         check(Bridge.resolveEndpoint("", all, all, FALLBACK) == FALLBACK,
-              "child with empty DISPLAY -> fallback (got "
-              + name(Bridge.resolveEndpoint("", all, all, FALLBACK)) + ")");
+              "child with empty DISPLAY -> fallback", name(Bridge.resolveEndpoint("", all, all, FALLBACK)));
         check(Bridge.resolveEndpoint("   ", all, all, FALLBACK) == FALLBACK,
-              "child with blank DISPLAY -> fallback (got "
-              + name(Bridge.resolveEndpoint("   ", all, all, FALLBACK)) + ")");
+              "child with blank DISPLAY -> fallback",
+              name(Bridge.resolveEndpoint("   ", all, all, FALLBACK)));
     }
 
     /**
@@ -1649,8 +1844,7 @@ public class BootTests {
 
         check(Bridge.resolveEndpoint(":9", all, all, FALLBACK) == FALLBACK,
               "a display no entry describes -> the static args, NOT a refusal: the registry is not "
-              + "a complete list of sessions (got "
-              + name(Bridge.resolveEndpoint(":9", all, all, FALLBACK)) + ")");
+              + "a complete list of sessions", name(Bridge.resolveEndpoint(":9", all, all, FALLBACK)));
 
         // The demonstrated case, in its original shape: the registry knows only
         // the console session on :4; the SC service process is on :0, driven by
@@ -1661,8 +1855,8 @@ public class BootTests {
         SessionEndpoint onlyEntry = new SessionEndpoint(1001, "kogies", ":4",
                 "/dev/shm/dreamconnect.frame.1001", "/run/user/1001/dreamconnect.sock", "kogies");
         check(Bridge.resolveEndpoint(":0", List.of(onlyEntry), List.of(onlyEntry), FALLBACK) == FALLBACK,
-              "registering the first user session (:4) must not black out backstage on :0 (got "
-              + name(Bridge.resolveEndpoint(":0", List.of(onlyEntry), List.of(onlyEntry), FALLBACK)) + ")");
+              "registering the first user session (:4) must not black out backstage on :0",
+              name(Bridge.resolveEndpoint(":0", List.of(onlyEntry), List.of(onlyEntry), FALLBACK)));
     }
 
     /**
@@ -1686,17 +1880,18 @@ public class BootTests {
 
         check(Bridge.resolveEndpoint(":1", registered, List.of(BACKSTAGE), FALLBACK) == null,
               "the console session is registered for \":1\" but not live -> refuse, never the "
-              + "backstage fallback (got "
-              + name(Bridge.resolveEndpoint(":1", registered, List.of(BACKSTAGE), FALLBACK)) + ")");
+              + "backstage fallback",
+              name(Bridge.resolveEndpoint(":1", registered, List.of(BACKSTAGE), FALLBACK)));
         check(Bridge.resolveEndpoint(":1", registered, List.of(), FALLBACK) == null,
-              "nothing live at all, but \":1\" IS described -> still a refusal (got "
-              + name(Bridge.resolveEndpoint(":1", registered, List.of(), FALLBACK)) + ")");
+              "nothing live at all, but \":1\" IS described -> still a refusal",
+              name(Bridge.resolveEndpoint(":1", registered, List.of(), FALLBACK)));
         check(Bridge.resolveEndpoint(":1", registered, null, FALLBACK) == null,
-              "a null live list is no live sessions, not a licence to fall back (got "
-              + name(Bridge.resolveEndpoint(":1", registered, null, FALLBACK)) + ")");
+              "a null live list is no live sessions, not a licence to fall back",
+              name(Bridge.resolveEndpoint(":1", registered, null, FALLBACK)));
         check(Bridge.resolveEndpoint(":1", List.of(CONSOLE), List.of(), null) == null,
-              "refusal is not the fallback in disguise: null fallback, same answer (got "
-              + name(Bridge.resolveEndpoint(":1", List.of(CONSOLE), List.of(), null)) + ")");
+              "refusal is not the fallback in disguise: null fallback, same answer for a "
+              + "described-but-not-live display",
+              name(Bridge.resolveEndpoint(":1", List.of(CONSOLE), List.of(), null)));
 
         // The distinction, in one breath: same child display, same empty live
         // list, and the ONLY difference is whether the registry describes it.
@@ -1704,8 +1899,8 @@ public class BootTests {
         SessionEndpoint undescribed = Bridge.resolveEndpoint(":1", List.of(BACKSTAGE), List.of(), FALLBACK);
         check(described == null && undescribed == FALLBACK,
               "described-but-dead REFUSES while never-described FALLS BACK — different answers to "
-              + "different questions (got described=" + name(described)
-              + ", undescribed=" + name(undescribed) + ")");
+              + "different questions", "described=" + name(described)
+              + ", undescribed=" + name(undescribed));
     }
 
     /**
@@ -1728,19 +1923,19 @@ public class BootTests {
 
         check(Bridge.resolveEndpoint("UNKNOWN", List.of(unknown), List.of(unknown), FALLBACK) == FALLBACK,
               "an entry whose display is UNKNOWN is not matched, not even by a child whose DISPLAY "
-              + "says UNKNOWN — and since nothing describes that display, the answer is the fallback (got "
-              + name(Bridge.resolveEndpoint("UNKNOWN", List.of(unknown), List.of(unknown), FALLBACK)) + ")");
+              + "says UNKNOWN — and since nothing describes that display, the answer is the fallback",
+              name(Bridge.resolveEndpoint("UNKNOWN", List.of(unknown), List.of(unknown), FALLBACK)));
         check(Bridge.resolveEndpoint(null, List.of(nullDisplay), List.of(nullDisplay), FALLBACK) == FALLBACK,
-              "an entry with a null display is not matched by a child with no DISPLAY (got "
-              + name(Bridge.resolveEndpoint(null, List.of(nullDisplay), List.of(nullDisplay), FALLBACK)) + ")");
+              "an entry with a null display is not matched by a child with no DISPLAY",
+              name(Bridge.resolveEndpoint(null, List.of(nullDisplay), List.of(nullDisplay), FALLBACK)));
         check(Bridge.resolveEndpoint("   ", List.of(blankDisplay), List.of(blankDisplay), FALLBACK) == FALLBACK,
-              "an entry with a blank display is not matched by a child with a blank DISPLAY (got "
-              + name(Bridge.resolveEndpoint("   ", List.of(blankDisplay), List.of(blankDisplay), FALLBACK)) + ")");
+              "an entry with a blank display is not matched by a child with a blank DISPLAY",
+              name(Bridge.resolveEndpoint("   ", List.of(blankDisplay), List.of(blankDisplay), FALLBACK)));
 
         List<SessionEndpoint> mixed = List.of(unknown, nullDisplay, CONSOLE);
         check(Bridge.resolveEndpoint(":1", mixed, mixed, FALLBACK) == CONSOLE,
-              "an UNKNOWN/null entry earlier in the list does not shadow the real \":1\" session (got "
-              + name(Bridge.resolveEndpoint(":1", mixed, mixed, FALLBACK)) + ")");
+              "an UNKNOWN/null entry earlier in the list does not shadow the real \":1\" session",
+              name(Bridge.resolveEndpoint(":1", mixed, mixed, FALLBACK)));
     }
 
     /**
@@ -1763,17 +1958,17 @@ public class BootTests {
         check(Bridge.resolveEndpoint("ERR unknown cmd DISPLAY", List.of(preFifty), List.of(preFifty),
                                      FALLBACK) == FALLBACK,
               "an entry whose display is an error line is never matched, not even by a child carrying "
-              + "that same text (got " + name(Bridge.resolveEndpoint("ERR unknown cmd DISPLAY",
-                      List.of(preFifty), List.of(preFifty), FALLBACK)) + ")");
+              + "that same text", name(Bridge.resolveEndpoint("ERR unknown cmd DISPLAY",
+                      List.of(preFifty), List.of(preFifty), FALLBACK)));
         check(Bridge.resolveEndpoint(":1", List.of(preFifty), List.of(preFifty), FALLBACK) == FALLBACK,
               "an ERR-line entry describes no display, so \":1\" is undescribed and the static args "
-              + "stand (got " + name(Bridge.resolveEndpoint(":1", List.of(preFifty), List.of(preFifty),
-                      FALLBACK)) + ")");
+              + "stand", name(Bridge.resolveEndpoint(":1", List.of(preFifty), List.of(preFifty),
+                      FALLBACK)));
 
         List<SessionEndpoint> both = List.of(preFifty, CONSOLE);
         check(Bridge.resolveEndpoint(":1", both, both, FALLBACK) == CONSOLE,
-              "the ERR-line entry does not shadow the \":1\" session behind it (got "
-              + name(Bridge.resolveEndpoint(":1", both, both, FALLBACK)) + ")");
+              "the ERR-line entry does not shadow the \":1\" session behind it",
+              name(Bridge.resolveEndpoint(":1", both, both, FALLBACK)));
 
         // Over-rejection alarm: the ERR rule must not have become "only
         // :N-shaped displays are matchable". An opaque token still routes.
@@ -1782,8 +1977,8 @@ public class BootTests {
                 "/run/user/994/dreamconnect.sock", "opaque-token daemon");
         List<SessionEndpoint> withOpaque = List.of(preFifty, opaque);
         check(Bridge.resolveEndpoint("wayland-0", withOpaque, withOpaque, FALLBACK) == opaque,
-              "an opaque display token still resolves to the session registered for it (got "
-              + name(Bridge.resolveEndpoint("wayland-0", withOpaque, withOpaque, FALLBACK)) + ")");
+              "an opaque display token still resolves to the session registered for it",
+              name(Bridge.resolveEndpoint("wayland-0", withOpaque, withOpaque, FALLBACK)));
     }
 
     /**
@@ -1813,30 +2008,31 @@ public class BootTests {
         List<SessionEndpoint> reversed = List.of(staleClaim, firstClaim);
 
         check(Bridge.resolveEndpoint(":0", contested, contested, FALLBACK) == null,
-              "two entries claim \":0\" -> null (refuse), never a guess (got "
-              + name(Bridge.resolveEndpoint(":0", contested, contested, FALLBACK)) + ")");
+              "two entries claim \":0\" -> null (refuse), never a guess",
+              name(Bridge.resolveEndpoint(":0", contested, contested, FALLBACK)));
         check(Bridge.resolveEndpoint(":0", reversed, reversed, FALLBACK) == null,
-              "same two claims in the other order -> still null: refusal does not depend on list order (got "
-              + name(Bridge.resolveEndpoint(":0", reversed, reversed, FALLBACK)) + ")");
+              "same two claims in the other order -> still null: refusal does not depend on list order",
+              name(Bridge.resolveEndpoint(":0", reversed, reversed, FALLBACK)));
         check(Bridge.resolveEndpoint(":0.0", contested, contested, FALLBACK) == null,
-              "refusal holds when the child carries the screen suffix, i.e. after normalisation (got "
-              + name(Bridge.resolveEndpoint(":0.0", contested, contested, FALLBACK)) + ")");
+              "refusal holds when the child carries the screen suffix, i.e. after normalisation",
+              name(Bridge.resolveEndpoint(":0.0", contested, contested, FALLBACK)));
         check(Bridge.resolveEndpoint(":0", contested, List.of(firstClaim), FALLBACK) == null,
               "ONE of the two claimants being live does not break the tie: liveness proves a daemon "
-              + "answers, not that the registry meant that one (got "
-              + name(Bridge.resolveEndpoint(":0", contested, List.of(firstClaim), FALLBACK)) + ")");
+              + "answers, not that the registry meant that one",
+              name(Bridge.resolveEndpoint(":0", contested, List.of(firstClaim), FALLBACK)));
         check(Bridge.resolveEndpoint(":0", contested, List.of(), FALLBACK) == null,
-              "neither claimant live -> still a refusal, not a fallback: \":0\" is described (got "
-              + name(Bridge.resolveEndpoint(":0", contested, List.of(), FALLBACK)) + ")");
+              "neither claimant live -> still a refusal, not a fallback: \":0\" is described",
+              name(Bridge.resolveEndpoint(":0", contested, List.of(), FALLBACK)));
         check(Bridge.resolveEndpoint(":0", contested, contested, null) == null,
-              "refusal is not the fallback in disguise: null fallback, same answer (got "
-              + name(Bridge.resolveEndpoint(":0", contested, contested, null)) + ")");
+              "refusal is not the fallback in disguise: null fallback, same answer for an "
+              + "ambiguously claimed display",
+              name(Bridge.resolveEndpoint(":0", contested, contested, null)));
 
         // Ambiguity on one display must not condemn a different one.
         List<SessionEndpoint> plusConsole = List.of(firstClaim, staleClaim, CONSOLE);
         check(Bridge.resolveEndpoint(":1", plusConsole, plusConsole, FALLBACK) == CONSOLE,
-              "a contested \":0\" does not poison the uncontested \":1\" (got "
-              + name(Bridge.resolveEndpoint(":1", plusConsole, plusConsole, FALLBACK)) + ")");
+              "a contested \":0\" does not poison the uncontested \":1\"",
+              name(Bridge.resolveEndpoint(":1", plusConsole, plusConsole, FALLBACK)));
     }
 
     /**
@@ -1865,33 +2061,33 @@ public class BootTests {
      */
     private static void testSanitizeLabel() {
         check("kogies".equals(Bridge.sanitizeLabel("kogies")),
-              "sanitizeLabel(\"kogies\") -> \"kogies\" (got " + q(Bridge.sanitizeLabel("kogies")) + ")");
+              "sanitizeLabel(\"kogies\") -> \"kogies\"", q(Bridge.sanitizeLabel("kogies")));
         check("[Backstage]".equals(Bridge.sanitizeLabel("[Backstage]")),
-              "sanitizeLabel(\"[Backstage]\") -> unchanged: the shipped backstage label survives (got "
-              + q(Bridge.sanitizeLabel("[Backstage]")) + ")");
+              "sanitizeLabel(\"[Backstage]\") -> unchanged: the shipped backstage label survives",
+              q(Bridge.sanitizeLabel("[Backstage]")));
         check("kogies".equals(Bridge.sanitizeLabel("  kogies  ")),
-              "sanitizeLabel(\"  kogies  \") -> \"kogies\" (trimmed, as the daemon trims its side) (got "
-              + q(Bridge.sanitizeLabel("  kogies  ")) + ")");
+              "sanitizeLabel(\"  kogies  \") -> \"kogies\" (trimmed, as the daemon trims its side)",
+              q(Bridge.sanitizeLabel("  kogies  ")));
 
         check(Bridge.sanitizeLabel(null) == null,
-              "sanitizeLabel(null) -> null (got " + q(Bridge.sanitizeLabel(null)) + ")");
+              "sanitizeLabel(null) -> null", q(Bridge.sanitizeLabel(null)));
         check(Bridge.sanitizeLabel("") == null,
-              "sanitizeLabel(\"\") -> null (got " + q(Bridge.sanitizeLabel("")) + ")");
+              "sanitizeLabel(\"\") -> null", q(Bridge.sanitizeLabel("")));
         check(Bridge.sanitizeLabel("   ") == null,
-              "sanitizeLabel(\"   \") -> null: whitespace never names a session (got "
-              + q(Bridge.sanitizeLabel("   ")) + ")");
+              "sanitizeLabel(\"   \") -> null: whitespace never names a session",
+              q(Bridge.sanitizeLabel("   ")));
         check(Bridge.sanitizeLabel("ERR unknown cmd WHO") == null,
-              "sanitizeLabel(\"ERR unknown cmd WHO\") -> null: an error line is never a picker label (got "
-              + q(Bridge.sanitizeLabel("ERR unknown cmd WHO")) + ")");
+              "sanitizeLabel(\"ERR unknown cmd WHO\") -> null: an error line is never a picker label",
+              q(Bridge.sanitizeLabel("ERR unknown cmd WHO")));
         check(Bridge.sanitizeLabel("ERR [Errno 2] No such file or directory") == null,
-              "sanitizeLabel(\"ERR [Errno 2] …\") -> null: the daemon's other error shape too (got "
-              + q(Bridge.sanitizeLabel("ERR [Errno 2] No such file or directory")) + ")");
+              "sanitizeLabel(\"ERR [Errno 2] …\") -> null: the daemon's other error shape too",
+              q(Bridge.sanitizeLabel("ERR [Errno 2] No such file or directory")));
         check(Bridge.sanitizeLabel("ERR") == null,
-              "sanitizeLabel(\"ERR\") -> null (got " + q(Bridge.sanitizeLabel("ERR")) + ")");
+              "sanitizeLabel(\"ERR\") -> null", q(Bridge.sanitizeLabel("ERR")));
 
         check("ERROL".equals(Bridge.sanitizeLabel("ERROL")),
               "sanitizeLabel(\"ERROL\") -> \"ERROL\": a login name beginning with those letters is a name, "
-              + "not an error line — the rule is the ERR *token* (got " + q(Bridge.sanitizeLabel("ERROL")) + ")");
+              + "not an error line — the rule is the ERR *token*", q(Bridge.sanitizeLabel("ERROL")));
     }
 
     /**
@@ -1929,16 +2125,20 @@ public class BootTests {
             Files.createSymbolicLink(link, frame);
             Path subdir = Files.createDirectory(dir.resolve("frame.dir"));
 
+            // The uid is the box's, so it belongs after the separator (#78): this
+            // suite runs as whoever invoked the gate, and an identity naming 1000
+            // on one box and 501 on another is a different check on each.
             check(Bridge.usableShm(frame, myUid),
-                  "a regular file owned by uid " + myUid + " is usable as that session's frame");
+                  "a regular file owned by the current uid is usable as that session's frame", myUid);
             check(!Bridge.usableShm(frame, myUid + 1),
-                  "the same file is not usable for uid " + (myUid + 1) + " (wrong owner)");
+                  "the same file is not usable for the next uid up (wrong owner)", myUid + 1);
             check(!Bridge.usableShm(frame, myUid * 10),
-                  "uid " + (myUid * 10) + " does not match uid " + myUid
-                  + " — uids compare as values (the 10000-impersonates-1000 shape)");
+                  "ten times the current uid does not match it — uids compare as values "
+                  + "(the 10000-impersonates-1000 shape)", (myUid * 10) + " vs " + myUid);
             check(!Bridge.usableShm(link, myUid),
-                  "a SYMLINK is refused even when link and target are both owned by uid " + myUid
-                  + ": the spec requires a regular file, and whoever plants the link chooses the target");
+                  "a SYMLINK is refused even when link and target are both owned by the current "
+                  + "uid: the spec requires a regular file, and whoever plants the link chooses "
+                  + "the target", myUid);
             check(!Bridge.usableShm(subdir, myUid),
                   "a directory is not a frame");
             check(!Bridge.usableShm(dir.resolve("absent.frame"), myUid),
@@ -1986,14 +2186,16 @@ public class BootTests {
                      + "socket=/run/user/1000/dreamconnect.sock\n"
                      + "label=kogies\n";
         SessionEndpoint e = Bridge.parseRegistryEntry(entry);
-        check(e != null, "a complete entry parses (got null)");
+        check(e != null, "a complete entry parses", "null");
         if (e != null) {
-            check(e.uid() == 1000, "uid=1000 -> 1000 (got " + e.uid() + ")");
-            check("kogies".equals(e.user()), "user -> \"kogies\" (got " + q(e.user()) + ")");
-            check(":1".equals(e.display()), "display -> \":1\" verbatim, unnormalised (got " + q(e.display()) + ")");
-            check("/dev/shm/dreamconnect.frame.1000".equals(e.shm()), "shm -> the registered path (got " + q(e.shm()) + ")");
-            check("/run/user/1000/dreamconnect.sock".equals(e.socket()), "socket -> the registered path (got " + q(e.socket()) + ")");
-            check("kogies".equals(e.label()), "label -> \"kogies\" (got " + q(e.label()) + ")");
+            check(e.uid() == 1000, "uid=1000 -> 1000", e.uid());
+            check("kogies".equals(e.user()), "user -> \"kogies\"", q(e.user()));
+            check(":1".equals(e.display()), "display -> \":1\" verbatim, unnormalised", q(e.display()));
+            check("/dev/shm/dreamconnect.frame.1000".equals(e.shm()),
+                  "shm -> the registered path", q(e.shm()));
+            check("/run/user/1000/dreamconnect.sock".equals(e.socket()),
+                  "socket -> the registered path", q(e.socket()));
+            check("kogies".equals(e.label()), "label -> \"kogies\"", q(e.label()));
         }
 
         SessionEndpoint shuffled = Bridge.parseRegistryEntry(
@@ -2003,21 +2205,20 @@ public class BootTests {
         check(shuffled != null && shuffled.uid() == 992 && ":0".equals(shuffled.display())
                       && "backstage".equals(shuffled.user()) && "[Backstage]".equals(shuffled.label()),
               "key order is irrelevant, blank lines and whitespace are tolerated, and an unknown key "
-              + "(a field #53 might add later) is ignored rather than fatal (got "
-              + (shuffled == null ? "null" : shuffled.uid() + "/" + q(shuffled.display())
-                      + "/" + q(shuffled.user()) + "/" + q(shuffled.label())) + ")");
+              + "(a field #53 might add later) is ignored rather than fatal",
+              (shuffled == null ? "null" : shuffled.uid() + "/" + q(shuffled.display())
+                      + "/" + q(shuffled.user()) + "/" + q(shuffled.label())));
 
         SessionEndpoint eq = Bridge.parseRegistryEntry(
                 "uid=1000\nuser=kogies\ndisplay=:1\nshm=/dev/shm/f\nsocket=/run/user/1000/s\nlabel=a=b\n");
         check(eq != null && "a=b".equals(eq.label()),
-              "a value may contain '=': split on the first one only (got "
-              + (eq == null ? "null" : q(eq.label())) + ")");
+              "a value may contain '=': split on the first one only", (eq == null ? "null" : q(eq.label())));
 
         SessionEndpoint noLabel = Bridge.parseRegistryEntry(
                 "uid=1000\nuser=kogies\ndisplay=:1\nshm=/dev/shm/f\nsocket=/run/user/1000/s\n");
         check(noLabel != null && noLabel.label() == null,
-              "label is optional — cosmetic, so its absence is an unnamed endpoint, not a rejected one (got "
-              + (noLabel == null ? "null (entry rejected)" : q(noLabel.label())) + ")");
+              "label is optional — cosmetic, so its absence is an unnamed endpoint, not a rejected one",
+              (noLabel == null ? "null (entry rejected)" : q(noLabel.label())));
 
         check(Bridge.parseRegistryEntry(
                 "uid=1000\nuser=kogies\ndisplay=:1\nshm=/dev/shm/f\n") == null,
@@ -2058,14 +2259,17 @@ public class BootTests {
 
             chmod(dir, "rwxr-xr-x");
             chmod(f, "rw-r--r--");
-            check(Bridge.trustedFile(f, myUid), "0644 file owned by uid " + myUid + " is trusted");
-            check(Bridge.trustedFile(dir, myUid), "0755 directory owned by uid " + myUid + " is trusted");
+            // uid after the separator, as in testUsableShm: it is the box's, not
+            // the check's.
+            check(Bridge.trustedFile(f, myUid), "0644 file owned by the current uid is trusted", myUid);
+            check(Bridge.trustedFile(dir, myUid),
+                  "0755 directory owned by the current uid is trusted", myUid);
 
             chmod(f, "rw-------");
-            check(Bridge.trustedFile(f, myUid), "0600 file owned by uid " + myUid + " is trusted");
+            check(Bridge.trustedFile(f, myUid), "0600 file owned by the current uid is trusted", myUid);
 
             check(!Bridge.trustedFile(f, myUid + 1),
-                  "the same file is not trusted for uid " + (myUid + 1) + " (wrong owner)");
+                  "the same file is not trusted for the next uid up (wrong owner)", myUid + 1);
 
             chmod(f, "rw-rw-r--");
             check(!Bridge.trustedFile(f, myUid), "a group-writable (0664) entry is not trusted");
@@ -2074,12 +2278,15 @@ public class BootTests {
             chmod(f, "rw-r--r--");
 
             chmod(dir, "rwxrwxr-x");
-            check(!Bridge.trustedFile(dir, myUid), "a group-writable (0775) registry directory is not trusted");
+            check(!Bridge.trustedFile(dir, myUid),
+                  "a group-writable (0775) registry directory is not trusted");
             chmod(dir, "rwxr-xrwx");
-            check(!Bridge.trustedFile(dir, myUid), "an other-writable (0757) registry directory is not trusted");
+            check(!Bridge.trustedFile(dir, myUid),
+                  "an other-writable (0757) registry directory is not trusted");
             chmod(dir, "rwxr-xr-x");
 
-            check(!Bridge.trustedFile(dir.resolve("absent"), myUid), "a path that does not exist is not trusted");
+            check(!Bridge.trustedFile(dir.resolve("absent"), myUid),
+                  "a path that does not exist is not trusted");
         } finally {
             rmTree(dir);
         }
@@ -2118,38 +2325,38 @@ public class BootTests {
 
             List<SessionEndpoint> found = Bridge.readRegistry(dir, myUid);
             check(found != null && found.size() == 2,
-                  "a trusted registry directory yields its entries (got "
-                  + (found == null ? "null" : String.valueOf(found.size())) + ")");
+                  "a trusted registry directory yields its entries",
+                  (found == null ? "null" : String.valueOf(found.size())));
             if (found != null && found.size() == 2) {
                 SessionEndpoint console = null;
                 for (SessionEndpoint e : found) if (e != null && ":1".equals(e.display())) console = e;
                 check(console != null && console.uid() == 1000
                               && "/run/user/1000/dreamconnect.sock".equals(console.socket()),
-                      "entries are parsed, not just counted (got " + name(console) + ")");
+                      "entries are parsed, not just counted", name(console));
             }
 
             chmod(dir, "rwxrwxr-x");
             List<SessionEndpoint> groupWritable = Bridge.readRegistry(dir, myUid);
             check(groupWritable != null && groupWritable.isEmpty(),
-                  "a group-writable registry directory is NO registry: its entries are all ignored (got "
-                  + (groupWritable == null ? "null" : String.valueOf(groupWritable.size())) + ")");
+                  "a group-writable registry directory is NO registry: its entries are all ignored",
+                  (groupWritable == null ? "null" : String.valueOf(groupWritable.size())));
 
             chmod(dir, "rwxr-xrwx");
             List<SessionEndpoint> otherWritable = Bridge.readRegistry(dir, myUid);
             check(otherWritable != null && otherWritable.isEmpty(),
-                  "an other-writable registry directory is no registry either (got "
-                  + (otherWritable == null ? "null" : String.valueOf(otherWritable.size())) + ")");
+                  "an other-writable registry directory is no registry either",
+                  (otherWritable == null ? "null" : String.valueOf(otherWritable.size())));
             chmod(dir, "rwxr-xr-x");
 
             List<SessionEndpoint> wrongOwner = Bridge.readRegistry(dir, myUid + 1);
             check(wrongOwner != null && wrongOwner.isEmpty(),
-                  "a registry directory owned by someone other than the required uid is no registry (got "
-                  + (wrongOwner == null ? "null" : String.valueOf(wrongOwner.size())) + ")");
+                  "a registry directory owned by someone other than the required uid is no registry",
+                  (wrongOwner == null ? "null" : String.valueOf(wrongOwner.size())));
 
             List<SessionEndpoint> absent = Bridge.readRegistry(dir.resolve("nope"), myUid);
             check(absent != null && absent.isEmpty(),
                   "no registry directory at all -> empty list, never null: that is what falls back to "
-                  + "the static args (got " + (absent == null ? "null" : String.valueOf(absent.size())) + ")");
+                  + "the static args", (absent == null ? "null" : String.valueOf(absent.size())));
         } finally {
             rmTree(dir);
         }
@@ -2211,19 +2418,19 @@ public class BootTests {
         Object out = Bridge.curateLogonSessions(probe, ":0", "[Backstage]",
                 List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
 
-        check(out instanceof FakeLogon[], "curate returns an array of the same type (got " + out + ")");
+        check(out instanceof FakeLogon[], "curate (registry-aware) returns an array of the same type", out);
         if (!(out instanceof FakeLogon[])) return;
         FakeLogon[] arr = (FakeLogon[]) out;
         check(arr.length == 2,
               "both sessions with a live daemon are kept — a second session is no longer misleading, "
-              + "it resolves to its own daemon (got " + namesOf(out) + ")");
+              + "it resolves to its own daemon", namesOf(out));
         String all = namesOf(out);
         check(all.contains("[Backstage]"),
-              "the backstage entry is named from ITS registry entry (got " + all + ")");
+              "the backstage entry is named from ITS registry entry", all);
         check(all.contains("kogies"),
-              "and the attended session from its own, not from one static label (got " + all + ")");
+              "and the attended session from its own, not from one static label", all);
         check(!all.contains(":1024"),
-              "the greeter, with nothing registered behind it, is gone (got " + all + ")");
+              "the greeter, with nothing registered behind it, is gone", all);
     }
 
     /**
@@ -2247,16 +2454,15 @@ public class BootTests {
         FakeLogon[] backstageFirst = (FakeLogon[]) Bridge.curateLogonSessions(
                 probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
         check(backstageFirst.length == 2 && "[Backstage]".equals(backstageFirst[0].logonSessionName),
-              "configured :0 -> backstage is first, so SC's auto-pick lands on it (got "
-              + namesOf(backstageFirst) + ")");
+              "configured :0 -> backstage is first, so SC's auto-pick lands on it", namesOf(backstageFirst));
 
         FakeLogon[] probe2 = { new FakeLogon(":0"), new FakeLogon(":1024"), new FakeLogon(":4") };
         FakeLogon[] consoleFirst = (FakeLogon[]) Bridge.curateLogonSessions(
                 probe2, ":4", "kogies", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
         check(consoleFirst.length == 2 && "kogies".equals(consoleFirst[0].logonSessionName),
               "configured :4 -> the attended session is first: auto-pick follows what this JVM is "
-              + "pointed at, which is what makes the rule work on a box with no backstage (got "
-              + namesOf(consoleFirst) + ")");
+              + "pointed at, which is what makes the rule work on a box with no backstage",
+              namesOf(consoleFirst));
     }
 
     /**
@@ -2281,14 +2487,14 @@ public class BootTests {
         FakeLogon[] a = (FakeLogon[]) Bridge.curateLogonSessions(
                 probeBare, ":0", CFG, List.of(suffixed), List.of(suffixed));
         check(a.length == 1 && "[Backstage]".equals(a[0].logonSessionName),
-              "probe \":0\" matches a session registered as \":0.0\", and is named from THAT session "
-              + "(got " + namesOf(a) + "; the static-args label would mean it never matched)");
+              "probe \":0\" matches a session registered as \":0.0\", and is named from THAT session",
+              namesOf(a) + "; the static-args label would mean it never matched");
 
         FakeLogon[] probeSuffixed = { new FakeLogon(":0.0"), new FakeLogon(":1024") };
         FakeLogon[] b = (FakeLogon[]) Bridge.curateLogonSessions(
                 probeSuffixed, ":0.0", CFG, List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
         check(b.length == 1 && "[Backstage]".equals(b[0].logonSessionName),
-              "and probe \":0.0\" matches a session registered as \":0\" (got " + namesOf(b) + ")");
+              "and probe \":0.0\" matches a session registered as \":0\"", namesOf(b));
     }
 
     /**
@@ -2314,8 +2520,8 @@ public class BootTests {
         FakeLogon[] greeterGone = (FakeLogon[]) Bridge.curateLogonSessions(
                 probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
         check(greeterGone.length == 1 && !namesOf(greeterGone).contains(":1024"),
-              "the greeter is dropped: nothing is registered behind it, so selecting it refuses (got "
-              + namesOf(greeterGone) + ")");
+              "the greeter is dropped: nothing is registered behind it, so selecting it refuses",
+              namesOf(greeterGone));
 
         // Registered but not live: :4 is absent from the live list.
         FakeLogon[] probe2 = { new FakeLogon(":0"), new FakeLogon(":4") };
@@ -2323,7 +2529,7 @@ public class BootTests {
                 probe2, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE));
         check(deadGone.length == 1 && !namesOf(deadGone).contains(":4"),
               "a session whose daemon is not live is dropped too — selecting it would refuse and "
-              + "show black (got " + namesOf(deadGone) + ")");
+              + "show black", namesOf(deadGone));
 
         SessionEndpoint duplicate = new SessionEndpoint(1001, "ghost", ":4",
                 "/dev/shm/dreamconnect.frame.1001", "/run/user/1001/dreamconnect.sock", "stale");
@@ -2333,7 +2539,7 @@ public class BootTests {
                 List.of(LIVE_BACKSTAGE, LIVE_CONSOLE, duplicate));
         check(ambiguousGone.length == 1 && !namesOf(ambiguousGone).contains(":4"),
               "a display two live sessions claim is dropped: #51 refuses an ambiguous display, so "
-              + "offering it can only produce black (got " + namesOf(ambiguousGone) + ")");
+              + "offering it can only produce black", namesOf(ambiguousGone));
 
         // Curation filters what the probe returned; it can never invent an
         // entry, because the logonSessionID that selects a session is SC's.
@@ -2341,8 +2547,8 @@ public class BootTests {
         FakeLogon[] noGain = (FakeLogon[]) Bridge.curateLogonSessions(
                 probe4, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
         check(noGain.length <= probe4.length,
-              "a live session the probe did not enumerate is not added — we have no session id for it (got "
-              + namesOf(noGain) + ")");
+              "a live session the probe did not enumerate is not added — we have no session id for it",
+              namesOf(noGain));
     }
 
     /**
@@ -2361,14 +2567,14 @@ public class BootTests {
         FakeLogon[] today = (FakeLogon[]) Bridge.curateLogonSessions(a, ":0", "[Backstage]");
         FakeLogon[] empty = (FakeLogon[]) Bridge.curateLogonSessions(b, ":0", "[Backstage]", List.of(), List.of());
         check(namesOf(empty).equals(namesOf(today)),
-              "an empty registry curates exactly as the 3-arg form does today (today=" + namesOf(today)
-              + " empty-registry=" + namesOf(empty) + ")");
+              "an empty registry curates exactly as the 3-arg form does today",
+              "today=" + namesOf(today) + " empty-registry=" + namesOf(empty));
 
         FakeLogon[] c = { new FakeLogon(":1024"), new FakeLogon(":0") };
         FakeLogon[] nul = (FakeLogon[]) Bridge.curateLogonSessions(c, ":0", "[Backstage]", null, null);
         check(namesOf(nul).equals(namesOf(today)),
-              "and so does a null live list — a discovery that threw must not change the picker (got "
-              + namesOf(nul) + ")");
+              "and so does a null live list — a discovery that threw must not change the picker",
+              namesOf(nul));
     }
 
     /**
@@ -2389,15 +2595,14 @@ public class BootTests {
         check(out.length > 0 && ":7".equals(sessionNameOf(out[0])) || out.length > 0
                       && "operator".equals(sessionNameOf(out[0])),
               "no probe entry matches any live session -> the picker keeps the CONFIGURED session (:7) "
-              + "and offers it first, rather than merely being non-empty (got " + namesOf(out) + ")");
+              + "and offers it first, rather than merely being non-empty", namesOf(out));
 
         FakeLogon[] none = (FakeLogon[]) Bridge.curateLogonSessions(
                 new FakeLogon[0], ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
-        check(none.length == 0, "an empty probe stays empty — curation invents nothing (got "
-              + namesOf(none) + ")");
+        check(none.length == 0, "an empty probe stays empty — curation invents nothing", namesOf(none));
 
         check(Bridge.curateLogonSessions(null, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE)) == null,
-              "null in, null out");
+              "null in, null out (registry-aware)");
         FakeLogon single = new FakeLogon(":0");
         Object s = Bridge.curateLogonSessions(single, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE), List.of(LIVE_BACKSTAGE));
         check(s == single, "a single (non-array) session is returned as itself, never wrapped or dropped");
@@ -2420,11 +2625,10 @@ public class BootTests {
             FakeLogon[] out = (FakeLogon[]) Bridge.curateLogonSessions(
                     probe, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE, LIVE_CONSOLE));
             check(out.length == 3,
-                  "curate=off keeps every entry the probe returned, greeter included (got "
-                  + namesOf(out) + ")");
+                  "curate=off keeps every entry the probe returned, greeter included", namesOf(out));
             check(namesOf(out).contains(":1024"),
-                  "including the unbacked one, which is the entry an operator is usually diagnosing (got "
-                  + namesOf(out) + ")");
+                  "including the unbacked one, which is the entry an operator is usually diagnosing",
+                  namesOf(out));
         } finally {
             Bridge.configure("curate=on");
         }
@@ -2432,7 +2636,7 @@ public class BootTests {
         FakeLogon[] back = (FakeLogon[]) Bridge.curateLogonSessions(
                 probe2, ":0", "[Backstage]", List.of(LIVE_BACKSTAGE, LIVE_CONSOLE), List.of(LIVE_BACKSTAGE));
         check(back.length == 1,
-              "and curation resumes once the knob is back on (got " + namesOf(back) + ")");
+              "and curation resumes once the knob is back on", namesOf(back));
     }
 
     // ---- issue #52 round 2: what the green suite was hiding ----------------
@@ -2475,7 +2679,7 @@ public class BootTests {
 
         check(out.length == 1 && "[Backstage]".equals(out[0].logonSessionName),
               "only :0 survives: :4 is claimed by TWO registered sessions (one live), :5 is "
-              + "registered but dead, :1024 is unregistered (got " + namesOf(out) + ")");
+              + "registered but dead, :1024 is unregistered", namesOf(out));
 
         // The equivalence itself, display by display, against the shipped
         // resolver — this is what stops the two rules drifting again.
@@ -2489,10 +2693,13 @@ public class BootTests {
             FakeLogon[] curated = (FakeLogon[]) Bridge.curateLogonSessions(
                     one, ":99", "static-args", registered, live);
             boolean offered = curated.length == 1 && !"static-args".equals(curated[0].logonSessionName);
+            // The display stays in the identity: `displays` is a fixed list, so
+            // these four names are the same four on every run. Only the two
+            // measured booleans move.
             check(offered == resolvable,
-                  "display " + d + ": curation offers it (" + offered + ") exactly when resolution "
-                  + "accepts it (" + resolvable + ") — the picker must never offer what selecting "
-                  + "would refuse");
+                  "display " + d + ": curation offers it exactly when resolution accepts it — "
+                  + "the picker must never offer what selecting would refuse",
+                  "offered=" + offered + " resolvable=" + resolvable);
         }
     }
 
@@ -2522,13 +2729,13 @@ public class BootTests {
 
         check(out.length == 2,
               "the configured session stays in the picker while its daemon is down, alongside the "
-              + "one that is up (got " + namesOf(out) + ")");
+              + "one that is up", namesOf(out));
         check(out.length > 0 && "[Backstage]".equals(out[0].logonSessionName),
               "and it is STILL FIRST, so auto-pick lands on the session the operator expects rather "
-              + "than silently inside an attended user's desktop (got " + namesOf(out) + ")");
+              + "than silently inside an attended user's desktop", namesOf(out));
         check(!namesOf(out).contains(":1024"),
-              "the exception is for the configured session only — the greeter is still dropped (got "
-              + namesOf(out) + ")");
+              "the exception is for the configured session only — the greeter is still dropped",
+              namesOf(out));
 
         // Same when the registry does not describe the configured display at
         // all: it resolves to the static args, so it works, and dropping it
@@ -2538,7 +2745,7 @@ public class BootTests {
                 probe2, ":9", "static-args", registered, live);
         check(out2.length > 0 && "static-args".equals(sessionNameOf(out2[0])),
               "a configured display the registry never mentions is kept and first: it resolves to "
-              + "the static shm=/socket= args, which is a working session (got " + namesOf(out2) + ")");
+              + "the static shm=/socket= args, which is a working session", namesOf(out2));
     }
 
     /**
@@ -2564,10 +2771,10 @@ public class BootTests {
 
         check(":0".equals(good.logonSessionName),
               "a throw mid-curation leaves NO entry renamed: either the whole picker is curated or "
-              + "none of it is (got \"" + good.logonSessionName + "\")");
+              + "none of it is", q(good.logonSessionName));
         check(out == mixed,
-              "and the caller gets its own array back untouched, never a partly rewritten one (got "
-              + (out == mixed ? "the original" : String.valueOf(out)) + ")");
+              "and the caller gets its own array back untouched, never a partly rewritten one",
+              (out == mixed ? "the original" : String.valueOf(out)));
 
         // ROUND 3 (breaker): the case above throws during the SCAN, before any
         // renaming starts, so it never exercised the relabel loop itself. This
@@ -2583,10 +2790,10 @@ public class BootTests {
 
         check(":0".equals(renamable.logonSessionName),
               "a throw in the RELABEL loop leaves no entry renamed either: the picker is curated "
-              + "whole or not at all (got \"" + renamable.logonSessionName + "\")");
+              + "whole or not at all", q(renamable.logonSessionName));
         check(out2 == halfWritable,
-              "and the original array is what comes back (got "
-              + (out2 == halfWritable ? "the original" : String.valueOf(out2)) + ")");
+              "and the original array is what comes back",
+              (out2 == halfWritable ? "the original" : String.valueOf(out2)));
     }
 
     /**
@@ -2608,10 +2815,10 @@ public class BootTests {
 
         check(out.length == 1,
               "\":0\" and \":0.0\" are one session, so the picker shows one row, not two identical "
-              + "ones the operator has to choose between (got " + namesOf(out) + ")");
+              + "ones the operator has to choose between", namesOf(out));
         check(out.length == 1 && out[0] == first,
               "and it is the first in probe order, so the picker does not reshuffle between "
-              + "reconnects (got " + namesOf(out) + ")");
+              + "reconnects", namesOf(out));
     }
 
     /**
@@ -2657,30 +2864,30 @@ public class BootTests {
             long r0 = Bridge.registryReadCount();
             Bridge.readRegistry(dir, uidOf(dir));
             check(Bridge.registryReadCount() > r0,
-                  "precondition: registryReadCount() counts a real registry read (" + r0 + " -> "
-                  + Bridge.registryReadCount() + ")");
+                  "precondition: registryReadCount() counts a real registry read",
+                  r0 + " -> " + Bridge.registryReadCount());
             long l0 = Bridge.logonLabelCount();
             Bridge.logonLabel();
             check(Bridge.logonLabelCount() > l0,
-                  "precondition: logonLabelCount() counts a real logonLabel() call (" + l0 + " -> "
-                  + Bridge.logonLabelCount() + ")");
+                  "precondition: logonLabelCount() counts a real logonLabel() call",
+                  l0 + " -> " + Bridge.logonLabelCount());
 
             long reads = Bridge.registryReadCount();
             long labels = Bridge.logonLabelCount();
             Object nul = Bridge.curateLogonSessions((Object) null);
             check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
                   "null: no registry read and no label computed — the 3-arg form ignores the label "
-                  + "for null, so computing one is waste that pulls discovery in behind it (reads "
-                  + reads + " -> " + Bridge.registryReadCount() + ", labels " + labels + " -> "
-                  + Bridge.logonLabelCount() + ")");
+                  + "for null, so computing one is waste that pulls discovery in behind it",
+                  "reads " + reads + " -> " + Bridge.registryReadCount() + ", labels " + labels
+                  + " -> " + Bridge.logonLabelCount());
             check(nul == null, "and null still comes back as null");
 
             reads = Bridge.registryReadCount();
             Object notAnArray = Bridge.curateLogonSessions(new FakeLogon(":0"));
             check(Bridge.registryReadCount() == reads,
                   "a single session (the One hook): no registry read — the label may be computed, it "
-                  + "is what renames the entry, but nothing may open a socket per registered session "
-                  + "(reads " + reads + " -> " + Bridge.registryReadCount() + ")");
+                  + "is what renames the entry, but nothing may open a socket per registered session",
+                  "reads " + reads + " -> " + Bridge.registryReadCount());
             check(notAnArray != null, "and the single session is still returned to the caller");
 
             reads = Bridge.registryReadCount();
@@ -2689,20 +2896,22 @@ public class BootTests {
             check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
                   "an EMPTY array does no discovery: there is nothing to curate, and this is the "
                   + "state a backstage restart produces — repeated every ~6 s probe, uncached, "
-                  + "forever (reads " + reads + " -> " + Bridge.registryReadCount() + ", labels "
-                  + labels + " -> " + Bridge.logonLabelCount() + ")");
+                  + "forever",
+                  "reads " + reads + " -> " + Bridge.registryReadCount() + ", labels " + labels
+                  + " -> " + Bridge.logonLabelCount());
             check(empty instanceof FakeLogon[] && ((FakeLogon[]) empty).length == 0,
-                  "and it comes back empty, not null (got " + namesOf(empty) + ")");
+                  "and it comes back empty, not null", namesOf(empty));
 
             reads = Bridge.registryReadCount();
             labels = Bridge.logonLabelCount();
             Object nulls = Bridge.curateLogonSessions(new FakeLogon[] { null });
             check(Bridge.registryReadCount() == reads && Bridge.logonLabelCount() == labels,
                   "an array of nothing but nulls likewise: scanning for one usable element is free, "
-                  + "discovery is not (reads " + reads + " -> " + Bridge.registryReadCount()
-                  + ", labels " + labels + " -> " + Bridge.logonLabelCount() + ")");
+                  + "discovery is not",
+                  "reads " + reads + " -> " + Bridge.registryReadCount() + ", labels " + labels
+                  + " -> " + Bridge.logonLabelCount());
             check(nulls instanceof FakeLogon[] && ((FakeLogon[]) nulls).length == 1,
-                  "and the caller's array is handed back unchanged (got " + namesOf(nulls) + ")");
+                  "and the caller's array is handed back unchanged", namesOf(nulls));
 
             // Repeat: the cost must not come back on the next heartbeat either.
             reads = Bridge.registryReadCount();
@@ -2712,8 +2921,8 @@ public class BootTests {
             check(Bridge.registryReadCount() == reads,
                   "and it stays free across successive probes — the demonstrated defect was "
                   + "reads=3,4,5 on three calls, because the empty result is never cached and "
-                  + "logonProbeSkip therefore never arms (reads " + reads + " -> "
-                  + Bridge.registryReadCount() + ")");
+                  + "logonProbeSkip therefore never arms",
+                  "reads " + reads + " -> " + Bridge.registryReadCount());
         } finally {
             rmTree(dir);
         }
@@ -2761,34 +2970,34 @@ public class BootTests {
 
         check(Bridge.resolveEndpoint(":4", onlyBackstage, onlyBackstage, FALLBACK) == null,
               "the registry says the fallback's own shm+socket are display \":0\", so falling back "
-              + "on \":4\" would show backstage under this session's name -> refuse (got "
-              + name(Bridge.resolveEndpoint(":4", onlyBackstage, onlyBackstage, FALLBACK)) + ")");
+              + "on \":4\" would show backstage under this session's name -> refuse",
+              name(Bridge.resolveEndpoint(":4", onlyBackstage, onlyBackstage, FALLBACK)));
 
         SessionEndpoint sameSocketOnly = new SessionEndpoint(992, "backstage", ":0",
                 "/dev/shm/dreamconnect.frame.992", FALLBACK.socket(), "[Backstage]");
         check(Bridge.resolveEndpoint(":4", List.of(sameSocketOnly), List.of(sameSocketOnly),
                                      FALLBACK) == null,
               "a shared SOCKET alone is enough: the operator's keystrokes and clipboard would go to "
-              + "a session the registry names as \":0\" (got "
-              + name(Bridge.resolveEndpoint(":4", List.of(sameSocketOnly), List.of(sameSocketOnly),
-                      FALLBACK)) + ")");
+              + "a session the registry names as \":0\"",
+              name(Bridge.resolveEndpoint(":4", List.of(sameSocketOnly), List.of(sameSocketOnly),
+                      FALLBACK)));
 
         SessionEndpoint sameShmOnly = new SessionEndpoint(992, "backstage", ":0",
                 FALLBACK.shm(), "/run/user/992/dreamconnect.sock", "[Backstage]");
         check(Bridge.resolveEndpoint(":4", List.of(sameShmOnly), List.of(sameShmOnly),
                                      FALLBACK) == null,
               "a shared SHM alone is enough: the operator would watch a session the registry names "
-              + "as \":0\" (got " + name(Bridge.resolveEndpoint(":4", List.of(sameShmOnly),
-                      List.of(sameShmOnly), FALLBACK)) + ")");
+              + "as \":0\"", name(Bridge.resolveEndpoint(":4", List.of(sameShmOnly),
+                      List.of(sameShmOnly), FALLBACK)));
 
         // The legitimate arm — no evidence the fallback is wrong.
         check(Bridge.resolveEndpoint(":4", List.of(), List.of(), FALLBACK) == FALLBACK,
-              "no registry at all -> the static args still work, as they always have (got "
-              + name(Bridge.resolveEndpoint(":4", List.of(), List.of(), FALLBACK)) + ")");
+              "no registry at all -> the static args still work, as they always have",
+              name(Bridge.resolveEndpoint(":4", List.of(), List.of(), FALLBACK)));
         check(Bridge.resolveEndpoint(":4", List.of(CONSOLE), List.of(CONSOLE), FALLBACK) == FALLBACK,
               "a registry that describes some OTHER session, on other paths, says nothing about the "
-              + "fallback -> still falls back (got "
-              + name(Bridge.resolveEndpoint(":4", List.of(CONSOLE), List.of(CONSOLE), FALLBACK)) + ")");
+              + "fallback -> still falls back",
+              name(Bridge.resolveEndpoint(":4", List.of(CONSOLE), List.of(CONSOLE), FALLBACK)));
 
         // And the discriminator must not misfire when the registry describes
         // the fallback's endpoint for THIS display: that is a match, not a
@@ -2798,9 +3007,9 @@ public class BootTests {
         check(Bridge.resolveEndpoint(":4", List.of(fallbackPathsHere), List.of(fallbackPathsHere),
                                      FALLBACK) == fallbackPathsHere,
               "the same paths registered for THIS display resolve to that entry — now authenticated "
-              + "as its user, which the bare fallback never was (got "
-              + name(Bridge.resolveEndpoint(":4", List.of(fallbackPathsHere),
-                      List.of(fallbackPathsHere), FALLBACK)) + ")");
+              + "as its user, which the bare fallback never was",
+              name(Bridge.resolveEndpoint(":4", List.of(fallbackPathsHere),
+                      List.of(fallbackPathsHere), FALLBACK)));
     }
 
     /**
@@ -2835,17 +3044,15 @@ public class BootTests {
                 c.close();
                 String reply = c.send("PING");
                 check(reply == null,
-                      "send() after close() does not silently reconnect (got " + q(reply) + ")");
+                      "send() after close() does not silently reconnect", q(reply));
 
                 c.input("K 28 1");   // the keystroke path, which never reads a reply
                 settle();
                 check(srv.connections() == 1,
-                      "a closed client opens no second connection (server accepted "
-                      + srv.connections() + ")");
+                      "a closed client opens no second connection", srv.connections());
                 check(srv.bytes() == afterFirst,
                       "and no further byte reaches the daemon after close() — a retired client must "
-                      + "not carry input to a session the operator left (server saw \"" + srv.seen()
-                      + "\")");
+                      + "not carry input to a session the operator left", q(srv.seen()));
             }
         } finally {
             rmTree(dir);
@@ -2885,14 +3092,12 @@ public class BootTests {
 
             List<SessionEndpoint> found = Bridge.readRegistry(dir, myUid);
             check(found != null && found.size() == 1,
-                  "only the uid-named file is an entry; .bak/.tmp/named strays are not (got "
-                  + describe(found) + ")");
+                  "only the uid-named file is an entry; .bak/.tmp/named strays are not", describe(found));
 
             if (found != null) {
                 check(Bridge.resolveEndpoint(":1", found, found, FALLBACK) != null,
                       "so the session still resolves instead of being permanently refused as "
-                      + "ambiguous (got " + name(Bridge.resolveEndpoint(":1", found, found, FALLBACK))
-                      + ")");
+                      + "ambiguous", name(Bridge.resolveEndpoint(":1", found, found, FALLBACK)));
             }
         } finally {
             rmTree(dir);
@@ -2957,17 +3162,15 @@ public class BootTests {
                         List.of(good, wrongUser, linkedShm, missingShm, noSocket, garbage));
 
                 check(live != null && live.size() == 1 && live.get(0) == good,
-                      "only the entry whose frame and socket both check out is live (got "
-                      + describe(live) + ")");
+                      "only the entry whose frame and socket both check out is live", describe(live));
                 check(live != null && !live.contains(wrongUser),
                       "an entry claiming a user the socket's peer is not is dropped — this is the "
-                      + "redirect defence (got " + describe(live) + ")");
+                      + "redirect defence", describe(live));
                 check(live != null && !live.contains(linkedShm),
-                      "an entry whose shm is a symlink is dropped even though the socket is fine (got "
-                      + describe(live) + ")");
+                      "an entry whose shm is a symlink is dropped even though the socket is fine",
+                      describe(live));
                 check(live != null && !live.contains(garbage),
-                      "a socket that does not answer PING with PONG is not a daemon (got "
-                      + describe(live) + ")");
+                      "a socket that does not answer PING with PONG is not a daemon", describe(live));
             }
         } finally {
             rmTree(dir);
@@ -3016,10 +3219,10 @@ public class BootTests {
 
                 check(thrown == null,
                       "a malformed entry does not throw out of liveSessions — an escape here sends "
-                      + "EVERY session to the fallback (threw " + thrown + ")");
+                      + "EVERY session to the fallback", thrown);
                 check(live != null && live.size() == 1 && live.get(0) == good,
                       "a NUL byte or empty path in one entry drops only that entry; the sessions "
-                      + "behind it survive (got " + describe(live) + ")");
+                      + "behind it survive", describe(live));
             }
         } finally {
             rmTree(dir);
@@ -3060,11 +3263,10 @@ public class BootTests {
             List<SessionEndpoint> found = Bridge.readRegistry(dir, myUid);
             check(found != null && found.size() == 1,
                   "a group-writable entry, an unparseable entry and an unreadable entry each drop "
-                  + "ONLY themselves (got " + describe(found) + ")");
+                  + "ONLY themselves", describe(found));
             if (found != null && found.size() == 1) {
                 check(":1".equals(found.get(0).display()) && found.get(0).uid() == 1000,
-                      "and the good entry beside them is returned intact (got "
-                      + name(found.get(0)) + ")");
+                      "and the good entry beside them is returned intact", name(found.get(0)));
             }
         } finally {
             rmTree(dir);
@@ -3111,11 +3313,11 @@ public class BootTests {
      */
     private static void testAttachedClientIsPeerAuthenticated() {
         check("kogies".equals(Bridge.clientFor(CONSOLE).expectedUser()),
-              "the client built for a registry session demands that session's user (got "
-              + q(Bridge.clientFor(CONSOLE).expectedUser()) + ")");
+              "the client built for a registry session demands that session's user",
+              q(Bridge.clientFor(CONSOLE).expectedUser()));
         check(Bridge.clientFor(FALLBACK).expectedUser() == null,
               "the client for the operator's own static args has no user to demand — it answers to "
-              + "no registry entry (got " + q(Bridge.clientFor(FALLBACK).expectedUser()) + ")");
+              + "no registry entry", q(Bridge.clientFor(FALLBACK).expectedUser()));
 
         // Deliberately NOT run in isolation. By the time this executes, the
         // curation tests above have already driven Bridge's picker path, which
@@ -3128,8 +3330,8 @@ public class BootTests {
         DaemonClient attached = Bridge.attachTo(CONSOLE);
         check(attached != null && "kogies".equals(attached.expectedUser()),
               "the client attach() carries input on demands the resolved session's user, even when "
-              + "an unauthenticated client was already built by the picker path (got "
-              + (attached == null ? "null" : q(attached.expectedUser())) + ")");
+              + "an unauthenticated client was already built by the picker path",
+              (attached == null ? "null" : q(attached.expectedUser())));
         check(attached != null && attached != Bridge.clientFor(FALLBACK),
               "and it is not the client for the static args reused under a new name");
     }
@@ -3177,11 +3379,11 @@ public class BootTests {
                 String label = Bridge.logonLabel();
                 check("[Backstage]".equals(label),
                       "the resolved entry's label= is the picker name from the first call, not the "
-                      + "login name WHO would give (got " + q(label) + ")");
+                      + "login name WHO would give", q(label));
                 settle();
                 check(!srv.seen().contains("WHO"),
                       "and the daemon was never asked WHO: the registry already said what to call "
-                      + "this session (server saw \"" + srv.seen() + "\")");
+                      + "this session", q(srv.seen()));
             }
         } finally {
             rmTree(dir);
@@ -3221,20 +3423,21 @@ public class BootTests {
 
                 try (SocketChannel c = SocketChannel.open(UnixDomainSocketAddress.of(sock))) {
                     check(me.equals(DaemonClient.peerUser(c)),
-                          "peerUser() of a live connection is the listening account \"" + me + "\" (got "
-                          + q(DaemonClient.peerUser(c)) + ")");
+                          "peerUser() of a live connection is the account this suite runs as",
+                          q(DaemonClient.peerUser(c)) + " for listener " + q(me));
                 }
                 try (SocketChannel viaLink = SocketChannel.open(UnixDomainSocketAddress.of(link))) {
                     check(me.equals(DaemonClient.peerUser(viaLink)),
-                          "reached through a symlink, the answer is still the listener's identity \"" + me
-                          + "\" — the path is not the authority (got " + q(DaemonClient.peerUser(viaLink)) + ")");
+                          "reached through a symlink, the answer is still the listener's identity — "
+                          + "the path is not the authority",
+                          q(DaemonClient.peerUser(viaLink)) + " for listener " + q(me));
                 }
             }
             SocketChannel closed = SocketChannel.open(StandardProtocolFamily.UNIX);
             closed.close();
             check(DaemonClient.peerUser(closed) == null,
-                  "an unconnected channel has no peer: null, not an exception (got "
-                  + q(DaemonClient.peerUser(closed)) + ")");
+                  "an unconnected channel has no peer: null, not an exception",
+                  q(DaemonClient.peerUser(closed)));
         } finally {
             rmTree(dir);
         }
@@ -3266,8 +3469,8 @@ public class BootTests {
                 String reply = c.send("PING");
                 c.close();
                 check("PONG".equals(reply),
-                      "a socket answered by the expected user \"" + me + "\" is used normally (got "
-                      + q(reply) + ")");
+                      "a socket answered by the expected user is used normally",
+                      q(reply) + " from " + q(me));
             }
 
             Path bad = dir.resolve("bad.sock");
@@ -3276,11 +3479,10 @@ public class BootTests {
                 String reply = c.send("PING");
                 c.close();
                 check(reply == null,
-                      "a socket answered by anyone other than the expected user yields no reply (got "
-                      + q(reply) + ")");
+                      "a socket answered by anyone other than the expected user yields no reply", q(reply));
                 check(srv.bytesRead() == 0,
                       "and NOTHING was sent to it: the operator's commands must never reach an "
-                      + "unauthenticated peer (server read " + srv.bytesRead() + " bytes)");
+                      + "unauthenticated peer", srv.bytesRead() + " bytes read");
             }
         } finally {
             rmTree(dir);
@@ -3333,7 +3535,7 @@ public class BootTests {
                 }
             }
             check(!pending.isEmpty(),
-                  "test precondition: the trap socket accepted queued connects (got " + pending.size() + ")");
+                  "test precondition: the trap socket accepted queued connects", pending.size());
 
             DaemonClient probe = new DaemonClient(sock.toString());
             java.util.concurrent.atomic.AtomicBoolean done =
@@ -3353,11 +3555,12 @@ public class BootTests {
 
             check(done.get(),
                   "probing a bound-but-never-accepted socket returns within " + BOUND_MS
-                  + " ms (still blocked after " + tookMs + " ms — an unprivileged user can wedge the root JVM)");
+                  + " ms — an unprivileged user who binds and never accepts can otherwise wedge "
+                  + "the root JVM", tookMs + " ms");
             if (done.get()) {
                 check(reply.get() == null,
-                      "a probe that could not connect reports failure (null), never a fabricated reply (got "
-                      + q(reply.get()) + ")");
+                      "a probe that could not connect reports failure (null), never a fabricated reply",
+                      q(reply.get()));
             }
         } finally {
             for (SocketChannel c : pending) {
