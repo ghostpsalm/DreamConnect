@@ -53,20 +53,32 @@ set -uo pipefail
 
 FAILURES=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
+# `assertion failed:`, not a result word, and the first one kept for the case
+# line -- see test_install.sh's fail() (#81). This suite enforces the leg form
+# on BootTests; until #81 its own case lines were `PASS: ` and parsed as nothing.
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
+}
 
 assert_eq() {  # actual expected label
   [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"
 }
 
 [ -n "${DC_BOOT_CLASSES:-}" ] \
-  || { echo "FAIL: DC_BOOT_CLASSES is not set -- run this through ./run-tests.sh"; exit 1; }
+  || { echo "cannot run: DC_BOOT_CLASSES is not set -- run this through ./run-tests.sh"; exit 1; }
 [ -f "$DC_BOOT_CLASSES/dreamconnect/boot/BootTests.class" ] \
-  || { echo "FAIL: no compiled BootTests under $DC_BOOT_CLASSES"; exit 1; }
+  || { echo "cannot run: no compiled BootTests under $DC_BOOT_CLASSES"; exit 1; }
 [ -n "${DC_BOOT_EXPORTS:-}" ] \
-  || { echo "FAIL: DC_BOOT_EXPORTS is not set -- run this through ./run-tests.sh"; exit 1; }
+  || { echo "cannot run: DC_BOOT_EXPORTS is not set -- run this through ./run-tests.sh"; exit 1; }
 read -r -a EXPORTS <<<"$DC_BOOT_EXPORTS"
+HARNESS_LIB="$(cd "$(dirname "$0")/.." && pwd)/test-harness-lib.sh"
+[ -f "$HARNESS_LIB" ] || { echo "cannot run: test-harness-lib.sh not found at $HARNESS_LIB"; exit 1; }
+# shellcheck source=../test-harness-lib.sh
+. "$HARNESS_LIB"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -102,7 +114,7 @@ boot_constant() {  # NAME -> its value
   # Empty is a failure, not a value: an assertion against the empty string would
   # match any FAIL line at all and look like it had checked something.
   if [ -z "$value" ]; then
-    echo "FAIL: could not read $name out of the compiled BootTests" >&2
+    echo "cannot run: could not read $name out of the compiled BootTests" >&2
     return 1
   fi
   printf '%s\n' "$value"
@@ -233,7 +245,10 @@ test_no_identity_repeats_within_a_run() {
   dupes="$(identities "$FIRST" | sort | uniq -d)"
   if [ -n "$dupes" ]; then
     fail "$(printf '%s\n' "$dupes" | wc -l) identity(ies) printed more than once in one run"
-    printf '%s\n' "$dupes" | head -10 | sed 's/^/    /'
+    # `repeated:` in front, not bare indentation: the parser allows leading
+    # whitespace, so an indented copy of a BootTests line would be read as one
+    # more check, filed under this suite (#81).
+    printf '%s\n' "$dupes" | head -10 | sed 's/^/    repeated: /'
   fi
 }
 
@@ -246,8 +261,9 @@ for CURRENT in \
   test_the_fork_guard_declines_as_a_counted_failure
 do
   before=$FAILURES
+  FIRST_FAILURE=""
   "$CURRENT"
-  if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
+  case_line "$CURRENT" "$((FAILURES - before))" 0 "$FIRST_FAILURE"
 done
 
 if [ "$FAILURES" -ne 0 ]; then

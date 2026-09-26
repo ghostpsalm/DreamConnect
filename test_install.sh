@@ -27,8 +27,17 @@ SELF="$HERE/test_install.sh"
 # --- tiny assert harness -----------------------------------------------------
 FAILURES=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
+# `assertion failed:`, not the `FAIL: ` it used to be: a detail line must not
+# begin with a result word, or whoever parses this output for checks (#81) has to
+# be trusted to tell it from the case line below it. The case line carries the
+# first of these as its diagnostic; all of them stay here, in full.
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
+}
 
 # A mistyped helper is a missing assertion, not a passing test: the shell prints
 # "command not found", the test keeps going and the suite still reports PASS.
@@ -39,7 +48,7 @@ fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 # A file survives that -- and also catches a typo inside a command substitution,
 # where the counter could never have survived either.
 command_not_found_handle() {
-  echo "  FAIL: $CURRENT: unknown command [$1] - a typo, or a test that emptied PATH"
+  echo "  assertion failed: $CURRENT: unknown command [$1] - a typo, or a test that emptied PATH"
   [ -n "${NOT_FOUND_LOG:-}" ] && printf '%s: %s\n' "$CURRENT" "$1" >> "$NOT_FOUND_LOG"
   return 127
 }
@@ -64,31 +73,27 @@ assert_not_contains() {  # haystack needle label
 assert_file_exists()  { [ -e "$1" ] || fail "$2: expected file to exist: $1"; }
 assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"; return 0; }
 
-# One status line per case, decided from both counter deltas (#68). The loop used
-# to read the FAILURES delta alone, so a case that reported SKIP -- which happens
-# on ordinary boxes here: no non-C locale, no passwordless sudo, a mode 000 file
-# that stays readable -- was also printed "PASS: <case>", a named claim that
-# coverage ran when it had not. A function taking the deltas as arguments rather
-# than the three-way `if` inlined in the loop: the inline form is one line shorter
-# and cannot be tested, since arranging an outcome through the real skip()/fail()
-# would move the very counters being reported on. skip() itself is defined further
-# down, beside the locale cases that first needed it.
-case_status_line() {  # name fail_delta skip_delta
-  if [ "$2" -gt 0 ]; then
-    echo "FAILED: $1"
-  elif [ "$3" -gt 0 ]; then
-    echo "SKIPPED: $1 ($3 check(s) skipped)"
-  else
-    echo "PASS: $1"
-  fi
-}
+# One status line per case, decided from both counter deltas (#68) by case_line
+# in test-harness-lib.sh, called from run_case below. The loop used to read the
+# FAILURES delta alone, so a case that reported a skip -- which happens on
+# ordinary boxes here: no non-C locale, no passwordless sudo, a mode 000 file
+# that stays readable -- was also printed as a pass, a named claim that coverage
+# ran when it had not. skip() itself is defined further down, beside the locale
+# cases that first needed it.
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 NOT_FOUND_LOG="$TMP/unknown-commands"
 
 # --- the seam ----------------------------------------------------------------
-[ -f "$LIB" ] || { echo "FAIL: install-lib.sh not found at $LIB"; exit 1; }
+# `cannot run:` rather than a result word: no case has run yet, so there is no
+# check here to report, only a suite that could not start -- which its exit
+# status says.
+[ -f "$LIB" ] || { echo "cannot run: install-lib.sh not found at $LIB"; exit 1; }
+[ -f "$HERE/test-harness-lib.sh" ] \
+  || { echo "cannot run: test-harness-lib.sh not found at $HERE/test-harness-lib.sh"; exit 1; }
+# shellcheck source=test-harness-lib.sh
+. "$HERE/test-harness-lib.sh"
 # shellcheck source=install-lib.sh
 . "$LIB"
 
@@ -4625,7 +4630,10 @@ test_a_bare_rerun_keeps_the_account_created_by_the_installer_removable() {
 
 # Loud skip: a box without a given locale must not silently lose the coverage.
 SKIPPED=0
-skip() { echo "  SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
+# `skipped:` for the same reason fail() says `assertion failed:` (#81): the case
+# line is the one that declares the skip, and a detail line that began with the
+# word could be read as a second declaration.
+skip() { echo "  skipped: $*"; SKIPPED=$((SKIPPED + 1)); }
 
 # The locales this box actually has, out of a candidate list chosen for their
 # LC_CTYPE: en_US.utf8 is the one demonstrated to accept "é" today, tr_TR.utf8 is
@@ -10733,26 +10741,31 @@ test_install_sh_shows_the_agent_build_output_when_the_build_fails() {
 # about -- and would leave this case reporting its own arranged failure.
 test_a_skipped_case_is_never_reported_as_a_pass() {
   local out
-  out="$(case_status_line some_case 0 0)"
-  assert_eq "$out" "PASS: some_case" "a case with no failures and no skips passes"
+  local ok skipped failed
+  ok="$(case_line some_case 0 0)"
+  assert_eq "$ok" "ok  : some_case" "a case with no failures and no skips passes"
 
-  out="$(case_status_line some_case 2 0)"
-  assert_eq "$out" "FAILED: some_case" "a case with failures is reported as failed"
+  failed="$(case_line some_case 2 0)"
+  assert_eq "$failed" "FAIL  : some_case # 2 assertion failure(s)" "a case with failures is reported as failed"
 
-  out="$(case_status_line some_case 0 1)"
-  assert_not_contains "$out" "PASS:" \
-    "a skipped case must never appear in the PASS list -- that is the false claim #68 is about"
-  assert_eq "$out" "SKIPPED: some_case (1 check(s) skipped)" \
-    "a skipped case is named on its own SKIPPED line, with how many checks it skipped"
+  skipped="$(case_line some_case 0 1)"
+  assert_not_contains "$skipped" "ok  :" \
+    "a skipped case must never be reported as a pass -- that is the false claim #68 is about"
+  assert_eq "$skipped" "SKIP  : some_case" \
+    "a skipped case is named on its own SKIP line"
+  # #81: all three outcomes are one check. A count after the skip's name would
+  # have made it a different one -- the parser does not split a skip at " # ".
+  assert_eq "$(case_identity "$skipped")" "$(case_identity "$ok")" "a skip keeps the identity its pass has"
+  assert_eq "$(case_identity "$failed")" "$(case_identity "$ok")" "a failure keeps the identity its pass has"
 
-  # A case that both failed and skipped reads as FAILED: the failure is the
+  # A case that both failed and skipped reads as FAIL: the failure is the
   # actionable half, and the skip is still counted in the footer.
-  out="$(case_status_line some_case 1 1)"
-  assert_eq "$out" "FAILED: some_case" "failure outranks a skip in the same case"
+  assert_eq "$(case_line some_case 1 1)" "FAIL  : some_case # 1 assertion failure(s)" \
+    "failure outranks a skip in the same case"
 }
 
-# The wiring (#68). The formatter case above stays green with case_status_line
-# orphaned and the result loop still deciding from the FAILURES delta alone --
+# The wiring (#68). The formatter case above stays green with case_line's skip
+# count left out of run_case, and the result loop still deciding from the FAILURES delta alone --
 # which is where the defect actually lived, so the formatter's unit test alone
 # does not hold it shut. This case therefore runs the real loop: it reads the
 # `for CURRENT in ... done` block back out of this file and evals it in a subshell
@@ -10764,10 +10777,12 @@ test_a_skipped_case_is_never_reported_as_a_pass() {
 test_the_result_loop_reports_a_real_skip_as_skipped() {
   local loop names first second third out
   loop="$(awk '/^for CURRENT in/,/^done$/' "$SELF")"
-  assert_contains "$loop" "case_status_line" \
-    "result loop: it must decide each case's status through case_status_line, or a skip can be printed as a PASS again (#68)"
-  assert_contains "$loop" "hash -r" \
-    "result loop: it must still clear bash's command hash between cases, or a shim is bypassed in silence"
+  # The loop hands each case to run_case (#81), which clears the hash and prints
+  # the line, so that is where these two properties are read from.
+  assert_contains "$loop" "run_case" \
+    "result loop: it must run each case through run_case, or a skip can be printed as a pass again (#68)"
+  assert_contains "$(declare -f run_case)" "hash -r" \
+    "run_case: it must still clear bash's command hash between cases, or a shim is bypassed in silence"
 
   # Names come from the loop's own header, so the stubs cannot drift from the
   # cases it runs. This case is in that list too, and is stubbed like the rest --
@@ -10792,17 +10807,202 @@ test_the_result_loop_reports_a_real_skip_as_skipped() {
     eval "$loop"
   )"
 
-  # Whole-line matches: "PASS: $first" as a substring would also match a longer
+  # Whole-line matches: "ok  : $first" as a substring would also match a longer
   # case name that starts with $first, and the claim here is about $first's line.
-  printf '%s\n' "$out" | grep -Fxq "SKIPPED: $first (1 check(s) skipped)" \
-    || fail "result loop: a case that skipped must be reported as SKIPPED, named, with how many checks. Output was: [$out]"
-  if printf '%s\n' "$out" | grep -Fxq "PASS: $first"; then
-    fail "result loop: the case that skipped is still named in the PASS list -- that is exactly #68. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "SKIP  : $first" \
+    || fail "result loop: a case that skipped must be reported as a SKIP, named. Output was: [$out]"
+  if printf '%s\n' "$out" | grep -Fxq "ok  : $first"; then
+    fail "result loop: the case that skipped is still reported as a pass -- that is exactly #68. Output was: [$out]"
   fi
-  printf '%s\n' "$out" | grep -Fxq "FAILED: $second" \
-    || fail "result loop: a case that failed must be reported as FAILED. Output was: [$out]"
-  printf '%s\n' "$out" | grep -Fxq "PASS: $third" \
-    || fail "result loop: a case that neither failed nor skipped must still be reported as PASS. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "FAIL  : $second # 1 assertion failure(s)" \
+    || fail "result loop: a case that failed must be reported as FAIL. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "ok  : $third" \
+    || fail "result loop: a case that neither failed nor skipped must still be reported as a pass. Output was: [$out]"
+}
+
+# --- #81: every case is a check whoever parses this output can see -----------
+#
+# The case line is printed by case_line from test-harness-lib.sh, the one
+# formatter every shell harness shares. These pin its contract -- BootTests'
+# form, identity stable, run-specific text only after " # " -- and the per-case
+# bookkeeping around it, and they guard the class: a harness that goes back to
+# printing its own `PASS: ` line is a harness whose cases vanish again.
+
+# One case, run and reported. A function rather than the loop body it used to be
+# so the bookkeeping is itself testable: arranging an outcome through the real
+# loop would move the very counters being reported on. Names are prefixed
+# because bash scoping is dynamic: a test that assigned a bare `before=` would
+# otherwise rewrite this function's own count mid-case.
+run_case() {  # name
+  local _rc_before=$FAILURES _rc_skip_before=${SKIPPED:-0} _rc_nf_before=0 _rc_nf_after=0 _rc_nf_delta
+  FIRST_FAILURE=""
+  # An unknown command is recorded by command_not_found_handle in a file, since
+  # it runs in a subshell and cannot touch FAILURES; the summary below adds them
+  # up. Counted per case here too, so the case that hit one is the case that
+  # reports FAIL -- until #81 it printed a pass and only the suite went red.
+  [ -f "$NOT_FOUND_LOG" ] && _rc_nf_before="$(wc -l < "$NOT_FOUND_LOG")"
+  # bash caches where it found a command, and clears that cache only when PATH is
+  # assigned IN THE SHELL -- not when PATH arrives as a prefix on a function call,
+  # which is how every shimmed helper in this file overrides it. So a test that
+  # ran the real systemctl/dconf/userdel leaves it hashed, and the next test's
+  # shim is bypassed in silence: the assertions then pass or fail against the
+  # host's own tools. Clear the table between tests so a shim is always reached.
+  hash -r
+  "$1"
+  [ -f "$NOT_FOUND_LOG" ] && _rc_nf_after="$(wc -l < "$NOT_FOUND_LOG")"
+  _rc_nf_delta=$((_rc_nf_after - _rc_nf_before))
+  [ "$_rc_nf_delta" -eq 0 ] || [ -n "$FIRST_FAILURE" ] \
+    || FIRST_FAILURE="unknown command: $(tail -n 1 "$NOT_FOUND_LOG")"
+  case_line "$1" "$((FAILURES - _rc_before + _rc_nf_delta))" "$((${SKIPPED:-0} - _rc_skip_before))" \
+    "$FIRST_FAILURE"
+}
+
+# The identity: everything before the first " # ", with the result word and its
+# separator taken off -- what makes a pass, a failure and a skip one check.
+case_identity() {  # line
+  local ident="${1%%" # "*}"
+  ident="${ident#"$CASE_OK_PREFIX"}"
+  ident="${ident#"$CASE_SKIP_PREFIX"}"
+  printf '%s' "${ident#"$CASE_FAIL_PREFIX"}"
+}
+
+test_a_passing_case_prints_the_boottests_ok_form() {
+  assert_eq "$(case_line test_some_case 0 0)" "ok  : test_some_case" \
+    "a case with no failures: 'ok', two spaces, ': ', the name, and nothing after it"
+  assert_eq "$(case_line test_some_case 0 0 "ignored when passing")" "ok  : test_some_case" \
+    "a passing case carries no diagnostic, even if one is handed in"
+}
+
+test_a_failing_case_keeps_its_identity_and_puts_the_detail_after_the_separator() {
+  local pass fail1 fail2
+  pass="$(case_line test_some_case 0 0)"
+  fail1="$(case_line test_some_case 1 0 "label: expected [a], got [/tmp/tmp.X1]")"
+  fail2="$(case_line test_some_case 3 0 "label: expected [a], got [/tmp/tmp.Q9]")"
+  assert_eq "$fail1" "FAIL  : test_some_case # 1 assertion failure(s); first: label: expected [a], got [/tmp/tmp.X1]" \
+    "a failing case: 'FAIL', two spaces, ': ', the name, then ' # ' and the evidence"
+  assert_eq "$(case_identity "$fail1")" "$(case_identity "$pass")" \
+    "pass and fail carry the same identity -- one check, not two"
+  assert_eq "$(case_identity "$fail2")" "$(case_identity "$fail1")" \
+    "a different count and a different temp path change the diagnostic, never the identity"
+  assert_eq "$(case_line test_some_case 2 0)" "FAIL  : test_some_case # 2 assertion failure(s)" \
+    "with no first failure recorded, the count alone is the diagnostic"
+}
+
+test_both_forms_are_word_whitespace_name() {
+  # The parser's own shape, asserted loosely enough that a colon straight after
+  # the word -- the defect -- would not match.
+  local l
+  for l in "$(case_line test_x 0 0)" "$(case_line test_x 1 0 detail)" "$(case_line test_x 0 1)"; do
+    [[ "$l" =~ ^(ok|FAIL|SKIP)[[:space:]]+[^[:space:]] ]] \
+      || fail "not <word><whitespace><name>: [$l]"
+  done
+}
+
+test_a_multiline_or_huge_first_failure_stays_on_the_case_line() {
+  local out big
+  out="$(case_line test_x 1 0 "$(printf 'line one\nok  : looks like a check\nline three')")"
+  assert_eq "$(printf '%s\n' "$out" | wc -l)" "1" \
+    "a multi-line failure is flattened: a continuation line starting with a result word would be parsed as a check of its own"
+  assert_contains "$out" "line one ok  : looks like a check line three" "the flattened text is all there"
+  # \r, \v and \f too: Python's splitlines() breaks on each, and this suite
+  # compares values carrying \r\n.
+  local brk
+  for brk in $'\r' $'\v' $'\f'; do
+    out="$(case_line test_x 1 0 "got [foo${brk}ok  : phantom]")"
+    case "$out" in
+      *"$brk"*) fail "a first failure containing $(printf '%q' "$brk") reached the case line unflattened" ;;
+    esac
+  done
+  big="$(printf 'x%.0s' $(seq 1 5000))"
+  out="$(case_line test_x 1 0 "$big")"
+  [ "${#out}" -lt 300 ] || fail "a 5000-character failure made a ${#out}-character case line"
+  assert_contains "$out" "..." "a cut diagnostic says it was cut"
+}
+
+test_case_line_refuses_what_would_rename_or_fake_a_check() {
+  local out rc
+  out="$(case_line "test_a # b" 0 0 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "a name containing ' # ' is refused"
+  assert_not_contains "$out" "ok  :" "and no result line is printed for it"
+  out="$(case_line "" 0 0 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "an empty name is refused"
+  assert_not_contains "$out" "ok  :" "and no result line is printed for it"
+  out="$(case_line test_x "" 0 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "a missing failure count is refused, not read as a pass"
+  assert_not_contains "$out" "ok  :" "and no result line is printed for it"
+  out="$(case_line test_x "1x" 0 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "a non-numeric failure count is refused"
+  assert_not_contains "$out" "ok  :" "and no result line is printed for it"
+  out="$(case_line test_x 0 "" 2>&1)"; rc=$?
+  assert_eq "$rc" "1" "a missing skip count is refused, not read as a pass"
+  assert_not_contains "$out" "ok  :" "and no result line is printed for it"
+}
+
+test_a_multiline_assertion_leaves_no_line_that_looks_like_a_check() {
+  local out
+  out="$(assertion_failed "$(printf 'label: got [ok  : phantom one\nFAIL  : phantom two\r\nok  : phantom three]')")"
+  if printf '%s\n' "$out" | tr '\r\v\f' '\n\n\n' | command grep -qE '^[[:space:]]*(ok|FAIL|FAILED|PASS|PASSED|SKIP|skip)[[:space:]]'; then
+    fail "a continuation of a failure message starts with a result word: [$out]"
+  fi
+  assert_eq "$(printf '%s\n' "$out" | wc -l)" "4" "every line of the message is kept, one output line each"
+  assert_contains "$out" "    | FAIL  : phantom two" "continuation lines are marked, not dropped"
+}
+
+# run_case, driven in a subshell with its own counters and its own not-found
+# log: the arranged failures must not leak into this suite's real totals.
+test_run_case_reports_each_outcome_under_the_same_identity() {
+  local out
+  out="$(
+    FAILURES=0 SKIPPED=0 NOT_FOUND_LOG="$TMP/runcase-notfound-1"
+    fail() { FAILURES=$((FAILURES + 1)); [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"; }
+    skip() { SKIPPED=$((SKIPPED + 1)); }
+    arranged_pass() { :; }
+    arranged_fail() { fail "first thing"; fail "second thing"; }
+    arranged_skip() { skip "no such locale"; }
+    run_case arranged_pass
+    run_case arranged_fail
+    run_case arranged_skip
+  )"
+  assert_eq "$out" "$(printf '%s\n%s\n%s' 'ok  : arranged_pass' 'FAIL  : arranged_fail # 2 assertion failure(s); first: first thing' 'SKIP  : arranged_skip')" \
+    "run_case prints one case line per case, with the count and the first failure after the separator"
+}
+
+test_run_case_fails_the_case_that_ran_an_unknown_command() {
+  local out
+  out="$(
+    FAILURES=0 NOT_FOUND_LOG="$TMP/runcase-notfound-2"
+    : > "$NOT_FOUND_LOG"
+    arranged_typo() { CURRENT=arranged_typo; dc_no_such_helper_81 >/dev/null; }
+    arranged_after() { :; }
+    run_case arranged_typo
+    run_case arranged_after
+  )"
+  assert_contains "$out" "FAIL  : arranged_typo # 1 assertion failure(s); first: unknown command: arranged_typo: dc_no_such_helper_81" \
+    "a case whose assertion helper does not exist is that case's failure, not a pass with a red footer"
+  assert_contains "$out" "ok  : arranged_after" "and the next case is not charged for it"
+}
+
+# The class, not one script: every shell harness in the repo prints its case
+# lines through case_line and none prints the old forms. Found by name, so a new
+# harness is covered the day it is added. Read as text, as the call-site tests in
+# this file are: running every harness from inside one of them would run the gate
+# inside the gate.
+test_every_shell_harness_prints_its_cases_through_case_line() {
+  local f n=0 rel hits
+  while IFS= read -r f; do
+    n=$((n + 1))
+    rel="${f#"$HERE"/}"
+    command grep -q 'test-harness-lib[.]sh' "$f" \
+      || fail "$rel: does not source test-harness-lib.sh, the shared case formatter"
+    command grep -q 'case_line "[$]' "$f" \
+      || fail "$rel: does not print its cases through case_line"
+    # Regexes, not the literal lines: this file is one of the harnesses scanned,
+    # and a literal would match the assertion that forbids it.
+    hits="$(command grep -nE "(echo|printf) +['\"] *(PASS|FAILED|FAIL): " "$f" | cut -d: -f1 | tr '\n' ' ')"
+    [ -z "$hits" ] \
+      || fail "$rel: prints a PASS:/FAILED:/FAIL: line, which no parser counts as a check (line(s) $hits)"
+  done < <(find "$HERE" -maxdepth 2 -name 'test_*.sh' -type f -not -path '*/.git/*' | sort)
+  [ "$n" -ge 5 ] || fail "found only $n shell harness(es) under $HERE; expected at least the five that exist today"
 }
 
 for CURRENT in \
@@ -11102,19 +11302,18 @@ for CURRENT in \
   test_run_capturing_refuses_a_call_with_no_command \
   test_install_sh_shows_the_agent_build_output_when_the_build_fails \
   test_a_skipped_case_is_never_reported_as_a_pass \
-  test_the_result_loop_reports_a_real_skip_as_skipped
+  test_the_result_loop_reports_a_real_skip_as_skipped \
+  test_a_passing_case_prints_the_boottests_ok_form \
+  test_a_failing_case_keeps_its_identity_and_puts_the_detail_after_the_separator \
+  test_both_forms_are_word_whitespace_name \
+  test_a_multiline_or_huge_first_failure_stays_on_the_case_line \
+  test_case_line_refuses_what_would_rename_or_fake_a_check \
+  test_a_multiline_assertion_leaves_no_line_that_looks_like_a_check \
+  test_run_case_reports_each_outcome_under_the_same_identity \
+  test_run_case_fails_the_case_that_ran_an_unknown_command \
+  test_every_shell_harness_prints_its_cases_through_case_line
 do
-  before=$FAILURES
-  before_skipped=${SKIPPED:-0}
-  # bash caches where it found a command, and clears that cache only when PATH is
-  # assigned IN THE SHELL -- not when PATH arrives as a prefix on a function call,
-  # which is how every shimmed helper in this file overrides it. So a test that
-  # ran the real systemctl/dconf/userdel leaves it hashed, and the next test's
-  # shim is bypassed in silence: the assertions then pass or fail against the
-  # host's own tools. Clear the table between tests so a shim is always reached.
-  hash -r
-  "$CURRENT"
-  case_status_line "$CURRENT" "$((FAILURES - before))" "$((${SKIPPED:-0} - before_skipped))"
+  run_case "$CURRENT"
 done
 
 [ "${SKIPPED:-0}" -eq 0 ] \

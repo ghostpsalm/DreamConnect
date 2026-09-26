@@ -51,12 +51,16 @@ SELF="$HERE/test_build.sh"
 # a correct jar is, and a suite that cannot tell must stop, not carry on with a
 # guess. `. ` under `set -uo pipefail` -- no -e -- so each read is guarded.
 [ -f "$HERE/fixture-lib.sh" ] \
-  || { echo "FAIL: fixture-lib.sh not found at $HERE/fixture-lib.sh"; exit 1; }
+  || { echo "cannot run: fixture-lib.sh not found at $HERE/fixture-lib.sh"; exit 1; }
 . "$HERE/fixture-lib.sh"
 BB_VERSION="$(bb_version)" \
-  || { echo "FAIL: could not read BYTEBUDDY_VERSION from $BUILD_SH"; exit 1; }
+  || { echo "cannot run: could not read BYTEBUDDY_VERSION from $BUILD_SH"; exit 1; }
 BB_SHA256="$(bb_sha256)" \
-  || { echo "FAIL: could not read BB_SHA256 from $BUILD_SH"; exit 1; }
+  || { echo "cannot run: could not read BB_SHA256 from $BUILD_SH"; exit 1; }
+[ -f "$HERE/../test-harness-lib.sh" ] \
+  || { echo "cannot run: test-harness-lib.sh not found at $HERE/../test-harness-lib.sh"; exit 1; }
+# shellcheck source=../test-harness-lib.sh
+. "$HERE/../test-harness-lib.sh"
 BB_JAR_NAME="byte-buddy-$BB_VERSION.jar"
 REAL_CACHE="$HERE/lib/$BB_JAR_NAME"
 NET_MARKER="NETWORK-BLOCKED-BY-TEST"
@@ -65,26 +69,25 @@ NET_MARKER="NETWORK-BLOCKED-BY-TEST"
 FAILURES=0
 SKIPPED=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
-skip() { echo "  SKIP: $*"; SKIPPED=$((SKIPPED + 1)); }
-
-# One status line per case, decided from both counter deltas (#68). The loop used
-# to read the FAILURES delta alone, so a case that reported SKIP and returned
-# early was printed "PASS: <case>" -- a named claim that coverage ran when it had
-# not, next to a footer count that named no case. A function taking the deltas as
-# arguments rather than the three-way `if` inlined in the loop: the inline form is
-# one line shorter and cannot be tested, since arranging an outcome through the
-# real skip()/fail() would move the very counters being reported on.
-case_status_line() {  # name fail_delta skip_delta
-  if [ "$2" -gt 0 ]; then
-    echo "FAILED: $1"
-  elif [ "$3" -gt 0 ]; then
-    echo "SKIPPED: $1 ($3 check(s) skipped)"
-  else
-    echo "PASS: $1"
-  fi
+# `assertion failed:`, not a result word, and the first one kept for the case
+# line -- see test_install.sh's fail() (#81).
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
 }
+# `skipped:` for the same reason fail() says `assertion failed:` (#81): the case
+# line below is the one that declares the skip, and a detail line that began
+# with the word could be read as a second declaration.
+skip() { echo "  skipped: $*"; SKIPPED=$((SKIPPED + 1)); }
+
+# Each case's status line is decided from both counter deltas (#68), by
+# case_line in test-harness-lib.sh. The loop used to read the FAILURES delta
+# alone, so a case that reported a skip and returned early was printed as a pass
+# -- a named claim that coverage ran when it had not, next to a footer count that
+# named no case.
 
 assert_eq() {  # actual expected label
   [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"
@@ -113,7 +116,7 @@ assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -f "$BUILD_SH" ] || { echo "FAIL: build.sh not found at $BUILD_SH"; exit 1; }
+[ -f "$BUILD_SH" ] || { echo "cannot run: build.sh not found at $BUILD_SH"; exit 1; }
 
 # --- the seam ----------------------------------------------------------------
 
@@ -491,26 +494,26 @@ test_a_correctly_hashed_cached_jar_still_builds() {
 # this case reporting its own arranged failure.
 test_a_skipped_case_is_never_reported_as_a_pass() {
   local out
-  out="$(case_status_line some_case 0 0)"
-  assert_eq "$out" "PASS: some_case" "a case with no failures and no skips passes"
+  out="$(case_line some_case 0 0)"
+  assert_eq "$out" "ok  : some_case" "a case with no failures and no skips passes"
 
-  out="$(case_status_line some_case 2 0)"
-  assert_eq "$out" "FAILED: some_case" "a case with failures is reported as failed"
+  out="$(case_line some_case 2 0)"
+  assert_eq "$out" "FAIL  : some_case # 2 assertion failure(s)" "a case with failures is reported as failed"
 
-  out="$(case_status_line some_case 0 1)"
-  assert_not_contains "$out" "PASS:" \
-    "a skipped case must never appear in the PASS list -- that is the false claim #68 is about"
-  assert_eq "$out" "SKIPPED: some_case (1 check(s) skipped)" \
-    "a skipped case is named on its own SKIPPED line, with how many checks it skipped"
+  out="$(case_line some_case 0 1)"
+  assert_not_contains "$out" "ok  :" \
+    "a skipped case must never be reported as a pass -- that is the false claim #68 is about"
+  assert_eq "$out" "SKIP  : some_case" \
+    "a skipped case is named on its own SKIP line, under the identity its pass would have had"
 
-  # A case that both failed and skipped reads as FAILED: the failure is the
+  # A case that both failed and skipped reads as FAIL: the failure is the
   # actionable half, and the skip is still counted in the footer.
-  out="$(case_status_line some_case 1 1)"
-  assert_eq "$out" "FAILED: some_case" "failure outranks a skip in the same case"
+  out="$(case_line some_case 1 1)"
+  assert_eq "$out" "FAIL  : some_case # 1 assertion failure(s)" "failure outranks a skip in the same case"
 }
 
-# The wiring (#68). The formatter case above stays green with case_status_line
-# orphaned and the result loop still deciding from the FAILURES delta alone --
+# The wiring (#68). The formatter case above stays green with case_line's skip
+# count left out of the loop, and the result loop still deciding from the FAILURES delta alone --
 # which is where the defect actually lived, so the formatter's unit test alone
 # does not hold it shut. This case therefore runs the real loop: it reads the
 # `for CURRENT in ... done` block back out of this file and evals it in a subshell
@@ -522,8 +525,8 @@ test_a_skipped_case_is_never_reported_as_a_pass() {
 test_the_result_loop_reports_a_real_skip_as_skipped() {
   local loop names first second third out
   loop="$(awk '/^for CURRENT in/,/^done$/' "$SELF")"
-  assert_contains "$loop" "case_status_line" \
-    "result loop: it must decide each case's status through case_status_line, or a skip can be printed as a PASS again (#68)"
+  assert_contains "$loop" "case_line" \
+    "result loop: it must decide each case's status through case_line, or a skip can be printed as a pass again (#68)"
 
   # Names come from the loop's own header, so the stubs cannot drift from the
   # cases it runs. This case is in that list too, and is stubbed like the rest --
@@ -548,17 +551,17 @@ test_the_result_loop_reports_a_real_skip_as_skipped() {
     eval "$loop"
   )"
 
-  # Whole-line matches: "PASS: $first" as a substring would also match a longer
+  # Whole-line matches: "ok  : $first" as a substring would also match a longer
   # case name that starts with $first, and the claim here is about $first's line.
-  printf '%s\n' "$out" | grep -Fxq "SKIPPED: $first (1 check(s) skipped)" \
-    || fail "result loop: a case that skipped must be reported as SKIPPED, named, with how many checks. Output was: [$out]"
-  if printf '%s\n' "$out" | grep -Fxq "PASS: $first"; then
-    fail "result loop: the case that skipped is still named in the PASS list -- that is exactly #68. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "SKIP  : $first" \
+    || fail "result loop: a case that skipped must be reported as a SKIP, named. Output was: [$out]"
+  if printf '%s\n' "$out" | grep -Fxq "ok  : $first"; then
+    fail "result loop: the case that skipped is still reported as a pass -- that is exactly #68. Output was: [$out]"
   fi
-  printf '%s\n' "$out" | grep -Fxq "FAILED: $second" \
-    || fail "result loop: a case that failed must be reported as FAILED. Output was: [$out]"
-  printf '%s\n' "$out" | grep -Fxq "PASS: $third" \
-    || fail "result loop: a case that neither failed nor skipped must still be reported as PASS. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "FAIL  : $second # 1 assertion failure(s)" \
+    || fail "result loop: a case that failed must be reported as FAIL. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "ok  : $third" \
+    || fail "result loop: a case that neither failed nor skipped must still be reported as a pass. Output was: [$out]"
 }
 
 # Safety rail: whatever the two cases above did, they did it in the sandbox.
@@ -580,8 +583,9 @@ for CURRENT in \
 do
   before=$FAILURES
   before_skipped=$SKIPPED
+  FIRST_FAILURE=""
   "$CURRENT"
-  case_status_line "$CURRENT" "$((FAILURES - before))" "$((SKIPPED - before_skipped))"
+  case_line "$CURRENT" "$((FAILURES - before))" "$((SKIPPED - before_skipped))" "$FIRST_FAILURE"
 done
 
 [ "${SKIPPED:-0}" -eq 0 ] \

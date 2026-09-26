@@ -50,8 +50,17 @@ verdict_re() {  # suite -> an ERE matching its verdict line and nothing else
 # --- tiny assert harness (same shape as agent/test_fixture_fetch.sh) ----------
 FAILURES=0
 CURRENT="<none>"
+FIRST_FAILURE=""
 
-fail() { echo "  FAIL: $*"; FAILURES=$((FAILURES + 1)); }
+# `assertion failed:`, not a result word, and the first one kept for the case
+# line -- see test_install.sh's fail() (#81). Here it matters twice over: the
+# values this suite compares are gate output, full of `== ... ==` and
+# `FAILED (exit N) ...` lines, and assertion_failed prefixes every one of them.
+fail() {
+  assertion_failed "$*"
+  FAILURES=$((FAILURES + 1))
+  [ -n "$FIRST_FAILURE" ] || FIRST_FAILURE="$*"
+}
 
 assert_eq() {  # actual expected label
   [ "$1" = "$2" ] || fail "$3: expected [$2], got [$1]"
@@ -83,8 +92,12 @@ assert_matches_once() {  # text ere label
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-[ -f "$GATE_LIB" ] || { echo "FAIL: gate-lib.sh not found at $GATE_LIB"; exit 1; }
-[ -f "$RUN_TESTS" ] || { echo "FAIL: run-tests.sh not found at $RUN_TESTS"; exit 1; }
+[ -f "$GATE_LIB" ] || { echo "cannot run: gate-lib.sh not found at $GATE_LIB"; exit 1; }
+[ -f "$RUN_TESTS" ] || { echo "cannot run: run-tests.sh not found at $RUN_TESTS"; exit 1; }
+[ -f "$HERE/test-harness-lib.sh" ] \
+  || { echo "cannot run: test-harness-lib.sh not found at $HERE/test-harness-lib.sh"; exit 1; }
+# shellcheck source=test-harness-lib.sh
+. "$HERE/test-harness-lib.sh"
 
 # --- the seam ----------------------------------------------------------------
 
@@ -297,8 +310,9 @@ for CURRENT in \
   test_the_runner_arms_the_verdict_trap
 do
   before=$FAILURES
+  FIRST_FAILURE=""
   "$CURRENT"
-  if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
+  case_line "$CURRENT" "$((FAILURES - before))" 0 "$FIRST_FAILURE"
 done
 
 if [ "$FAILURES" -ne 0 ]; then

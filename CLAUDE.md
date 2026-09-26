@@ -53,18 +53,18 @@ free-text `FAILED: the Java boot tests (exit 1) -- see ...` parsed as nothing, s
 failed had that leg recorded as *passed*. Both lines come from `gate-lib.sh` — a new section uses
 `section "<name>"` rather than `echo`, and gets its verdict from the ERR trap for free.
 
-**A case that skipped prints `SKIPPED:`, never `PASS:` (#68).** The shell suites' result loops used to
-decide a case's status from the `FAILURES` delta alone, so a case that reported `SKIP` and returned
-early was also named in the `PASS` list — the footer's `N skipped check(s)` was true but named no case,
-and a reader scanning the `PASS`/`FAILED` column read coverage that never ran. Each suite with a
-`skip()` (`agent/test_build.sh`, `test_install.sh`) now has a `case_status_line <name> <fail_delta>
-<skip_delta>` formatter: `FAILED:` beats `SKIPPED:` beats `PASS:`. It is a function rather than an `if`
-inlined in the loop precisely so the rule is itself tested — arranging an outcome through the real
+**A case that skipped says so, never pass (#68).** The shell suites' result loops used to decide a
+case's status from the `FAILURES` delta alone, so a case that reported a skip and returned early was
+also printed as a pass — the footer's `N skipped check(s)` was true but named no case, and a reader
+scanning the results read coverage that never ran. Each loop now hands both deltas to `case_line`
+(`test-harness-lib.sh`, below): a failure beats a skip beats a pass, and a skip prints `SKIP  : <case>`.
+The rule is a function precisely so it is itself tested — arranging an outcome through the real
 `skip()`/`fail()` would move the counters being reported on, which is how this defect shipped. The
-loop that calls it is covered too, and by execution rather than by reading its text: each suite's
-`test_the_result_loop_reports_a_real_skip_as_skipped` extracts its own `for CURRENT in … done` block
-and evals it against stubbed cases. Testing the formatter alone left the one line the defect lived on
-free to revert green, and a restated copy of the loop body would only ever agree with itself.
+loop that calls it is covered too, and by execution rather than by reading its text: each suite with a
+`skip()` has `test_the_result_loop_reports_a_real_skip_as_skipped`, which extracts its own
+`for CURRENT in … done` block and evals it against stubbed cases. Testing the formatter alone left the
+one line the defect lived on free to revert green, and a restated copy of the loop body would only ever
+agree with itself.
 
 **The suite is hermetic, with exactly one sanctioned exception (#46).** `run-tests.sh` calls
 `scripts/fetch-test-fixtures.sh` once per box, before the agent-build suite, to put a verified
@@ -113,6 +113,7 @@ real system.
 | `agent/boot/` | `agent/test/`, run by `BootTests` | Bootstrap classes compiled with `--add-exports java.desktop/...` |
 | `gate-lib.sh` | sourced by `run-tests.sh` and `test_gate_verdict.sh` | Holds **definitions only** like `install-lib.sh`. `section` prints `== <name> ==` and `suite_failed` prints `FAILED (exit N) <name>`, both off one variable, so a suite's header and its verdict cannot disagree. |
 | `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
+| `test-harness-lib.sh` | sourced by every `test_*.sh` harness, tested in `test_install.sh` | Holds **definitions only**. `case_line` is the one place a shell case's result line is formatted, so four harnesses cannot drift into four forms. |
 
 Two rails in `test_install.sh` that must not be removed: it **refuses to run as root**, because slices
 drive `useradd`/`userdel` and `dconf` and a test that forgets a fixture override must not be able to
@@ -139,6 +140,19 @@ does it well and it is the local style, not decoration — see `wait_for_user_bu
 timeout regex is `0|[1-9][0-9]*` and not `[0-9]+` (`$(( ))` reads a leading zero as octal, so `08`
 aborts the expansion in a way that is not a `return`, and the caller's `|| die` never runs). Match
 that: say what was ruled out and why.
+
+**Test output is read by a parser, not only by you (#78, #81).** A check line is `ok  : <name>`,
+`FAIL  : <name> # <diagnostic>`, or in a shell harness `SKIP  : <name>` (#68) — the word, whitespace,
+then the name. Everything before the first ` # ` is the check's identity and must be byte-identical on
+every run and every box; anything that varies (temp paths, counts, captured output) goes after it. A
+skip carries nothing after its name, because the parser does not split a skip line at ` # ` and a count
+there would rename the check. BootTests prints these through `checkLine`; the shell harnesses through
+`case_line` in `test-harness-lib.sh`, never an `echo` of their own. A detail line must not begin with a
+result word — `fail()` prints `assertion failed:`, `skip()` prints `skipped:`, a harness that cannot
+start prints `cannot run:` — and must not be an indented copy of a check line, since the parser allows
+leading whitespace. `test_every_shell_harness_prints_its_cases_through_case_line` holds every
+`test_*.sh` to this, so a new harness is covered the day it is added. The Python suites still print
+unittest's own lines, which parse as nothing; only their `== … ==` sections are checks.
 
 **Shell**: `set -euo pipefail`. Refuse bad input in the function's own voice and `return 1` — never let
 it reach arithmetic, where `set -u` aborts the shell and the caller's `|| die` never runs.
