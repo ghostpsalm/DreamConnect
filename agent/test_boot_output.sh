@@ -192,10 +192,12 @@ test_two_runs_print_the_same_identities_in_the_same_order() {
 test_no_line_announces_a_skip() {
   local out skips
   for out in "$FIRST" "$GUARDED"; do
-    skips="$(grep -a -E '^[Ss][Kk][Ii][Pp]' "$out" || true)"
+    # Leading whitespace allowed: an indented `  skip: ...` declines coverage just
+    # as well, and the suite prints no indented lines of its own to trip on.
+    skips="$(grep -a -E '^[[:space:]]*[Ss][Kk][Ii][Pp]' "$out" || true)"
     if [ -n "$skips" ]; then
       fail "$(printf '%s\n' "$skips" | wc -l) line(s) of $(basename "$out") announce a skip that no counter sees"
-      printf '%s\n' "$skips" | head -5 | sed 's/^/    /'
+      printf '%s\n' "$skips" | head -5 | sed 's/^/    announced: /'
     fi
   done
 }

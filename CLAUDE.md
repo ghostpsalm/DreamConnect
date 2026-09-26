@@ -66,7 +66,7 @@ anything still printed `ALL TESTS PASSED`. An unmet jar fixture is now a **failu
 one case proving #41's process boundary could decline to run while the suite printed `ALL PASS`. Its
 fork guard is now a counted failure, and `agent/test_boot_output.sh` runs the suite a third time with
 the guard set — asserting exit 1 and that one FAIL line, the guard's — and asserts that no line of
-either run's stdout begins with a skip word at all. The guarded run is what makes the first half
+either run's stdout begins with a skip word, indented or not. The guarded run is what makes the first half
 testable: the branch executes on no other run, so without it the failure could be turned back into a
 skip with the gate still green.
 
