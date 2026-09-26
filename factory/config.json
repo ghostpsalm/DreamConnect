@@ -1,0 +1,11 @@
+{
+  "approved_commands": [
+    "javac",
+    "java",
+    "bash test_install.sh",
+    "bash agent/test_fixture_fetch.sh",
+    "bash agent/test_build.sh",
+    "git rev-parse",
+    "mktemp"
+  ]
+}
