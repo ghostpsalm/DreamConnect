@@ -47,6 +47,12 @@ that can disagree with the one that actually executes.
 
 **Green before committing.**
 
+**A failed suite says `FAILED (exit N) <suite>`, alone on one line** (#80), where `<suite>` is the name
+in its own `== <suite> ==` header. That is the generic suite-verdict form; the runner's earlier
+free-text `FAILED: the Java boot tests (exit 1) -- see ...` parsed as nothing, so a run whose Java leg
+failed had that leg recorded as *passed*. Both lines come from `gate-lib.sh` — a new section uses
+`section "<name>"` rather than `echo`, and gets its verdict from the ERR trap for free.
+
 **The suite is hermetic, with exactly one sanctioned exception (#46).** `run-tests.sh` calls
 `scripts/fetch-test-fixtures.sh` once per box, before the agent-build suite, to put a verified
 `byte-buddy-<version>.jar` in `${XDG_CACHE_HOME:-~/.cache}/dreamconnect/fixtures` and export its path
@@ -83,6 +89,7 @@ real system.
 | `install-lib.sh` | sourced by `test_install.sh` | Holds **definitions only**, so sourcing must stay free of side effects. `install.sh` itself cannot be unit-tested: it demands root and does top-level work before anything is callable. |
 | `runtime/*.py` | `runtime/test_*.py` | Command parsing and session logic, separated from D-Bus and PipeWire I/O |
 | `agent/boot/` | `agent/test/`, run by `BootTests` | Bootstrap classes compiled with `--add-exports java.desktop/...` |
+| `gate-lib.sh` | sourced by `run-tests.sh` and `test_gate_verdict.sh` | Holds **definitions only** like `install-lib.sh`. `section` prints `== <name> ==` and `suite_failed` prints `FAILED (exit N) <name>`, both off one variable, so a suite's header and its verdict cannot disagree. |
 | `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
 
 Two rails in `test_install.sh` that must not be removed: it **refuses to run as root**, because slices
