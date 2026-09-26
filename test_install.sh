@@ -19,6 +19,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LIB="$HERE/install-lib.sh"
+# This file, by an absolute path: the result-loop wiring case (#68) reads its own
+# loop back out of it. Spelled out rather than "$0", which is relative when the
+# suite is invoked as `bash test_install.sh` and cases here change directory.
+SELF="$HERE/test_install.sh"
 
 # --- tiny assert harness -----------------------------------------------------
 FAILURES=0
@@ -59,6 +63,25 @@ assert_not_contains() {  # haystack needle label
 
 assert_file_exists()  { [ -e "$1" ] || fail "$2: expected file to exist: $1"; }
 assert_file_absent()  { [ -e "$1" ] && fail "$2: expected file NOT to exist: $1"; return 0; }
+
+# One status line per case, decided from both counter deltas (#68). The loop used
+# to read the FAILURES delta alone, so a case that reported SKIP -- which happens
+# on ordinary boxes here: no non-C locale, no passwordless sudo, a mode 000 file
+# that stays readable -- was also printed "PASS: <case>", a named claim that
+# coverage ran when it had not. A function taking the deltas as arguments rather
+# than the three-way `if` inlined in the loop: the inline form is one line shorter
+# and cannot be tested, since arranging an outcome through the real skip()/fail()
+# would move the very counters being reported on. skip() itself is defined further
+# down, beside the locale cases that first needed it.
+case_status_line() {  # name fail_delta skip_delta
+  if [ "$2" -gt 0 ]; then
+    echo "FAILED: $1"
+  elif [ "$3" -gt 0 ]; then
+    echo "SKIPPED: $1 ($3 check(s) skipped)"
+  else
+    echo "PASS: $1"
+  fi
+}
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -10703,6 +10726,85 @@ test_install_sh_shows_the_agent_build_output_when_the_build_fails() {
   assert_not_contains "$stmt" "|| :" "build call site: install.sh:$built swallows a failed agent build"
 }
 
+# The suite's own reporting rule (#68). This is the gate's largest suite and it
+# skips for real on ordinary boxes, so the false PASS was reachable here every
+# run. Driven through the formatter with literal deltas rather than by calling
+# skip()/fail() for real, which would perturb the counters this case is asserting
+# about -- and would leave this case reporting its own arranged failure.
+test_a_skipped_case_is_never_reported_as_a_pass() {
+  local out
+  out="$(case_status_line some_case 0 0)"
+  assert_eq "$out" "PASS: some_case" "a case with no failures and no skips passes"
+
+  out="$(case_status_line some_case 2 0)"
+  assert_eq "$out" "FAILED: some_case" "a case with failures is reported as failed"
+
+  out="$(case_status_line some_case 0 1)"
+  assert_not_contains "$out" "PASS:" \
+    "a skipped case must never appear in the PASS list -- that is the false claim #68 is about"
+  assert_eq "$out" "SKIPPED: some_case (1 check(s) skipped)" \
+    "a skipped case is named on its own SKIPPED line, with how many checks it skipped"
+
+  # A case that both failed and skipped reads as FAILED: the failure is the
+  # actionable half, and the skip is still counted in the footer.
+  out="$(case_status_line some_case 1 1)"
+  assert_eq "$out" "FAILED: some_case" "failure outranks a skip in the same case"
+}
+
+# The wiring (#68). The formatter case above stays green with case_status_line
+# orphaned and the result loop still deciding from the FAILURES delta alone --
+# which is where the defect actually lived, so the formatter's unit test alone
+# does not hold it shut. This case therefore runs the real loop: it reads the
+# `for CURRENT in ... done` block back out of this file and evals it in a subshell
+# where every case the loop names is a stub -- the first skipping, the second
+# failing, the rest clean -- over the subshell's own counters, so the suite's real
+# FAILURES and SKIPPED are untouched by the arrangement. Read back rather than
+# restated: a restated loop body is a second copy that can agree with itself while
+# the loop that actually runs is wrong, which is this defect's whole failure mode.
+test_the_result_loop_reports_a_real_skip_as_skipped() {
+  local loop names first second third out
+  loop="$(awk '/^for CURRENT in/,/^done$/' "$SELF")"
+  assert_contains "$loop" "case_status_line" \
+    "result loop: it must decide each case's status through case_status_line, or a skip can be printed as a PASS again (#68)"
+  assert_contains "$loop" "hash -r" \
+    "result loop: it must still clear bash's command hash between cases, or a shim is bypassed in silence"
+
+  # Names come from the loop's own header, so the stubs cannot drift from the
+  # cases it runs. This case is in that list too, and is stubbed like the rest --
+  # that is what stops the eval below from recursing.
+  names="$(printf '%s\n' "$loop" | sed -n '/^for CURRENT in/,/^do$/p' | grep -oE 'test_[A-Za-z0-9_]+')"
+  first="$(printf '%s\n' "$names" | sed -n 1p)"
+  second="$(printf '%s\n' "$names" | sed -n 2p)"
+  third="$(printf '%s\n' "$names" | sed -n 3p)"
+  [ -n "$third" ] \
+    || { fail "result loop: could not read three case names out of $SELF"; return 0; }
+
+  out="$(
+    FAILURES=0
+    SKIPPED=0
+    fail() { FAILURES=$((FAILURES + 1)); }
+    skip() { SKIPPED=$((SKIPPED + 1)); }
+    while read -r stub; do
+      [ -n "$stub" ] && eval "$stub() { :; }"
+    done <<<"$names"
+    eval "$first() { skip 'arranged skip'; }"
+    eval "$second() { fail 'arranged failure'; }"
+    eval "$loop"
+  )"
+
+  # Whole-line matches: "PASS: $first" as a substring would also match a longer
+  # case name that starts with $first, and the claim here is about $first's line.
+  printf '%s\n' "$out" | grep -Fxq "SKIPPED: $first (1 check(s) skipped)" \
+    || fail "result loop: a case that skipped must be reported as SKIPPED, named, with how many checks. Output was: [$out]"
+  if printf '%s\n' "$out" | grep -Fxq "PASS: $first"; then
+    fail "result loop: the case that skipped is still named in the PASS list -- that is exactly #68. Output was: [$out]"
+  fi
+  printf '%s\n' "$out" | grep -Fxq "FAILED: $second" \
+    || fail "result loop: a case that failed must be reported as FAILED. Output was: [$out]"
+  printf '%s\n' "$out" | grep -Fxq "PASS: $third" \
+    || fail "result loop: a case that neither failed nor skipped must still be reported as PASS. Output was: [$out]"
+}
+
 for CURRENT in \
   test_daemon_unit_and_agent_dropin_agree_on_the_shm_path \
   test_install_sh_restarts_the_units_so_a_rerun_applies_changes \
@@ -10998,9 +11100,12 @@ for CURRENT in \
   test_run_capturing_prints_the_log_before_set_e_can_abort \
   test_run_capturing_leaves_no_temporary_file_behind \
   test_run_capturing_refuses_a_call_with_no_command \
-  test_install_sh_shows_the_agent_build_output_when_the_build_fails
+  test_install_sh_shows_the_agent_build_output_when_the_build_fails \
+  test_a_skipped_case_is_never_reported_as_a_pass \
+  test_the_result_loop_reports_a_real_skip_as_skipped
 do
   before=$FAILURES
+  before_skipped=${SKIPPED:-0}
   # bash caches where it found a command, and clears that cache only when PATH is
   # assigned IN THE SHELL -- not when PATH arrives as a prefix on a function call,
   # which is how every shimmed helper in this file overrides it. So a test that
@@ -11009,7 +11114,7 @@ do
   # host's own tools. Clear the table between tests so a shim is always reached.
   hash -r
   "$CURRENT"
-  if [ "$FAILURES" -eq "$before" ]; then echo "PASS: $CURRENT"; else echo "FAILED: $CURRENT"; fi
+  case_status_line "$CURRENT" "$((FAILURES - before))" "$((${SKIPPED:-0} - before_skipped))"
 done
 
 [ "${SKIPPED:-0}" -eq 0 ] \

@@ -47,6 +47,19 @@ that can disagree with the one that actually executes.
 
 **Green before committing.**
 
+**A case that skipped prints `SKIPPED:`, never `PASS:` (#68).** The shell suites' result loops used to
+decide a case's status from the `FAILURES` delta alone, so a case that reported `SKIP` and returned
+early was also named in the `PASS` list — the footer's `N skipped check(s)` was true but named no case,
+and a reader scanning the `PASS`/`FAILED` column read coverage that never ran. Each suite with a
+`skip()` (`agent/test_build.sh`, `test_install.sh`) now has a `case_status_line <name> <fail_delta>
+<skip_delta>` formatter: `FAILED:` beats `SKIPPED:` beats `PASS:`. It is a function rather than an `if`
+inlined in the loop precisely so the rule is itself tested — arranging an outcome through the real
+`skip()`/`fail()` would move the counters being reported on, which is how this defect shipped. The
+loop that calls it is covered too, and by execution rather than by reading its text: each suite's
+`test_the_result_loop_reports_a_real_skip_as_skipped` extracts its own `for CURRENT in … done` block
+and evals it against stubbed cases. Testing the formatter alone left the one line the defect lived on
+free to revert green, and a restated copy of the loop body would only ever agree with itself.
+
 **The suite is hermetic, with exactly one sanctioned exception (#46).** `run-tests.sh` calls
 `scripts/fetch-test-fixtures.sh` once per box, before the agent-build suite, to put a verified
 `byte-buddy-<version>.jar` in `${XDG_CACHE_HOME:-~/.cache}/dreamconnect/fixtures` and export its path
