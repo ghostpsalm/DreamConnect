@@ -321,6 +321,8 @@ test_the_runner_prints_the_java_verdict_where_it_fails() {
   bottom="$(awk '/^section "/ {last=NR} {line[NR]=$0} END {for (i=last; i<=NR; i++) print line[i]}' "$RUN_TESTS")"
   assert_not_contains "$bottom" 'suite_failed "$java_status"' \
     "runner: a second Java verdict at the bottom would read as the suite failing twice"
+  assert_not_contains "$bottom" 'suite_verdict "$java_status"' \
+    "runner: a second Java verdict at the bottom would read as the suite failing twice"
 }
 
 test_the_runner_arms_the_verdict_trap() {
