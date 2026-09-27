@@ -6,6 +6,8 @@
     "bash agent/test_fixture_fetch.sh",
     "bash agent/test_build.sh",
     "git rev-parse",
-    "mktemp"
+    "mktemp",
+    "bash test_gate_verdict.sh",
+    "bash agent/test_boot_output.sh"
   ]
 }
