@@ -1,0 +1,35 @@
+name: gate
+
+# Runs the repo gate (./run-tests.sh) on every PR and on pushes to main, so a
+# green tick actually means the Java boot tests, the Python daemon tests, and
+# the installer shell tests all passed. Before this, nothing verified a PR —
+# branches merged UNVERIFIED. Keep this in step with run-tests.sh's needs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # BootTests compiles agent/boot + agent/test and needs java.desktop
+      # internals (--add-exports in run-tests.sh); a full JDK provides them.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # runtime/dreamconnect_daemon.py imports gi + requires the Gst 1.0
+      # typelib at module load, so test_daemon.py can't import without them.
+      - name: Install PyGObject + GStreamer introspection
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi gir1.2-glib-2.0 gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base
+
+      - name: Gate
+        run: ./run-tests.sh
