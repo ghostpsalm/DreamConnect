@@ -7133,15 +7133,39 @@ make_probe_bin() {  # dir python3_kind
 # Like run_wait_bus, but in a child shell whose PATH is <bin>, and watchdogged:
 # what this asserts is that the wait ENDS, and the behaviour it is written
 # against sits out the full timeout.
+#
+# BUS_MS is measured INSIDE the child, around the one call under test (#59). The
+# parent used to bracket the whole command substitution, and that window billed
+# `timeout`, `env`, a fresh bash, `hash -r` and sourcing all of install-lib.sh to
+# the wait — while a background python3 was still settling after binding the
+# fixture socket. Under load that startup alone crossed the 1000 ms budget with
+# wait_for_user_bus having returned at once, and the gate refused the commit.
+# Subtracting a measured no-op baseline was ruled out: two load-sensitive
+# samples are noisier than one, and the second can land on a quieter instant
+# than the first. The child writes its elapsed ms to a file because its stdout
+# is the function's and is discarded, and its stderr is BUS_ERR, whose wording
+# the assertions below match against. `date` is reachable on the narrowed PATH
+# because make_probe_bin symlinks it for the poll loop's sake.
 run_wait_bus_on_path() {  # bin runtime_root uid timeout_arg poll_interval watchdog_seconds
-  local start end
-  start="$(date +%s%3N)"
+  local elapsed_file="$TMP/bus-probe-elapsed" ms
+  rm -f "$elapsed_file"
   BUS_ERR="$(DC_RUNTIME_DIR_ROOT="$2" DC_BUS_POLL_INTERVAL="$5" \
              timeout "$6" env PATH="$1" "$1/bash" -c \
-               'set -uo pipefail; hash -r; . "$1"; wait_for_user_bus "$2" "$3"' \
-             _ "$LIB" "$3" "$4" 2>&1 >/dev/null)"; BUS_RC=$?
-  end="$(date +%s%3N)"
-  BUS_MS=$((end - start))
+               'set -uo pipefail; hash -r; . "$1"
+                start="$(date +%s%3N)"
+                wait_for_user_bus "$2" "$3"; rc=$?
+                end="$(date +%s%3N)"
+                printf "%s\n" "$((end - start))" > "$4"
+                exit "$rc"' \
+             _ "$LIB" "$3" "$4" "$elapsed_file" 2>&1 >/dev/null)"; BUS_RC=$?
+  # -1 when the child never wrote a measurement (the watchdog killed it, or the
+  # timing code itself broke): an absent number must not read as "instant".
+  ms="$(cat "$elapsed_file" 2>/dev/null || true)"
+  case "$ms" in
+    ''|*[!0-9]*) BUS_MS=-1 ;;
+    *)           BUS_MS=$ms ;;
+  esac
+  rm -f "$elapsed_file"
   return 0
 }
 
@@ -7154,6 +7178,12 @@ assert_bus_probe_unrunnable() {  # label uid
     fail "$1: still polling when the watchdog fired — a probe that cannot run will not start running"
     return 0; }
   assert_eq "$BUS_RC" "1" "$1: fails with the same status any other unusable bus gives (stderr: $BUS_ERR)"
+  # The rail before the budget: without it an unwritten measurement (-1) would
+  # sail under 1000 and a wait that was never timed would pass as instant.
+  [ "$BUS_MS" -ge 0 ] || \
+    fail "$1: the child shell recorded no elapsed time for wait_for_user_bus, so nothing below about its speed is proven"
+  # 1000 ms against timeout_arg=2: the window is now the call alone, so this
+  # means "did not serve its timeout", not "startup happened to be quick".
   [ "$BUS_MS" -lt 1000 ] || \
     fail "$1: took ${BUS_MS}ms — waiting cannot fix an unrunnable probe, so the wait must end at once rather than at the timeout"
   # The fixture directories deliberately do not spell "python3": the existing
@@ -7529,19 +7559,34 @@ test_xprobe_wrapper_gives_up_on_a_hanging_display_whatever_its_number() {
   done
 }
 
+# Timed in milliseconds, not `$SECONDS` (#59). `$SECONDS` is a whole number of
+# seconds since the shell started, so a difference of two readings counts second
+# BOUNDARIES CROSSED, not time spent: a cache hit that genuinely costs ~20 ms
+# read 1 when it straddled one boundary and 2 when a loaded box let the subshell
+# and wrapper straddle two — and `-le 1` then refused a commit on an unchanged
+# tree. On a millisecond clock the two outcomes are unmistakable: the uncached
+# probe just above pays the full DREAMCONNECT_XPROBE_TIMEOUT=1 (1000 ms), so a
+# budget of 500 ms is far above what a hit costs and far below what a miss costs;
+# anything in between would mean the memo was consulted and then ignored.
 test_xprobe_wrapper_short_circuits_a_display_already_known_dead() {
-  local d start elapsed
+  local d start end elapsed
   [ -f "$XPROBE" ] || return 0
   d="$TMP/xprobe-cache"
   stage_xprobe "$d"
   fake_tool "$d/real/xdpyinfo" 'sleep 30'
   run_xprobe "$d" ":1025"                      # first probe pays the timeout
-  start=$SECONDS
+  # The memo must be there before the second probe is timed: a wrapper that
+  # stopped finding the fake tool would also return "fast", for the wrong
+  # reason, and the budget below could not tell the two apart.
+  assert_file_exists "$d/run/dreamconnect-xprobe/_1025" \
+    "the first probe of a hanging display must leave a memo behind"
+  start="$(date +%s%3N)"
   run_xprobe "$d" ":1025"                      # second must be instant
-  elapsed=$((SECONDS - start))
+  end="$(date +%s%3N)"
+  elapsed=$((end - start))
   [ "$XP_RC" -ne 0 ] || fail "a cached dead display must keep failing"
-  [ "$elapsed" -le 1 ] || \
-    fail "a known-dead display cost ${elapsed}s again — SC re-probes every few seconds, so this must be free"
+  [ "$elapsed" -lt 500 ] || \
+    fail "a known-dead display cost ${elapsed}ms again — SC re-probes every few seconds, so this must be free"
 }
 
 test_xprobe_wrapper_does_not_blacklist_other_displays() {
