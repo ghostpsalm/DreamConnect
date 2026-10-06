@@ -80,12 +80,18 @@ def stale_registrations(registered_displays, published_displays):
     """uids whose entry names a display the session no longer publishes.
 
     `registered_displays` — {uid: display} as the registry entry records it.
-    `published_displays`  — {uid: display} as the session publishes it now.
+    `published_displays`  — {uid: display} as the session's display reads now,
+                            from whichever source could place it: the envfile a
+                            backstage session publishes, or, for an attended
+                            session that publishes none, its user manager's own
+                            DISPLAY (#63). The rule is blind to which; there is
+                            one rule, not one per source.
 
     Stale means the two disagree, which needs both of them to exist and to say
-    something. A uid missing from either map tells us nothing: the
-    `manager_display` fallback registers without ever writing an envfile, so an
-    absent published value is the normal case for it, not drift. A blank value
+    something. A uid missing from either map tells us nothing. Since #63 an
+    absent published value means both sources were silent -- not, as it did when
+    only envfiles were read, that this is a manager_display registration
+    behaving normally -- and silence still tells us nothing. A blank value
     is treated the same way rather than as a difference -- an unreadable or
     half-written envfile would otherwise provoke a restart every reconcile, and
     the reconcile runs on a timer, so that is a restart storm and not a one-off.
