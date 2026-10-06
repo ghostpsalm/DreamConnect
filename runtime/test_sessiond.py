@@ -53,8 +53,14 @@ def entry_text(uid, display, user="backstage", label="backstage"):
 
 
 def write_entry(registry_dir, uid, display, **kw):
+    write_entry_text(registry_dir, uid, entry_text(uid, display, **kw))
+
+
+def write_entry_text(registry_dir, uid, text):
+    """An entry written verbatim, for shapes `render_registry_entry` cannot
+    emit -- a key with leading whitespace, or two `display=` lines (#66)."""
     with open(os.path.join(registry_dir, str(uid)), "w") as f:
-        f.write(entry_text(uid, display, **kw))
+        f.write(text)
 
 
 def envfile_text(display, uid=BACKSTAGE_UID):
@@ -254,7 +260,7 @@ class TestEntryDisplay(unittest.TestCase):
     def test_a_label_that_looks_like_a_display_is_still_a_label(self):
         # An entry's key is only what precedes the first `=` on the line
         # (Bridge.java:228-231), and the label is free text that may contain one
-        # (BootTests.java:1735 uses `label=a=b`). The agent's own parser is a
+        # (BootTests.testParseRegistryEntry parses `label=a=b`). The agent's own parser is a
         # last-wins loop, so a reader that copies it but tests keys by substring
         # would read :9 off the label and restart register@ every 30s for a
         # session that never moved.
@@ -268,6 +274,43 @@ class TestEntryDisplay(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             write_entry(d, BACKSTAGE_UID, "")
             self.assertFalse(sd.entry_display(d, BACKSTAGE_UID))
+
+    def test_a_key_is_trimmed_before_it_is_compared(self):
+        # Bridge.java:230 trims the key, so ` display=:2` is a display to the
+        # agent; before #66 it was not one to the supervisor. render_registry_entry
+        # is the sole writer and emits `display=%s`, so no shipped entry has a
+        # leading space -- the entry is built inline here because `entry_text`
+        # cannot express a shape its writer cannot produce.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID,
+                             f"uid={BACKSTAGE_UID}\n display=:2\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
+
+    def test_a_later_blank_display_leaves_the_earlier_one_standing(self):
+        # Bridge.java:232 `continue`s on a blank value, so the last *non-blank*
+        # wins; before #66 this read "" and the two parsers disagreed about the
+        # same text. An entry holds one `display=` line, so again the writer
+        # cannot produce this shape.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display=:1\ndisplay=\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":1")
+
+    def test_a_later_whitespace_only_display_is_blank_too(self):
+        # Bridge.java:231-232 trims the value and THEN skips it if empty, so a
+        # `display=` holding only whitespace is unset to the agent and must be to
+        # the supervisor too. Without this case the strip() in front of the
+        # blank test was pinned by nothing: dropping it read "   " as a display
+        # and still passed every other case (#66's reviewer, run-66-07a37fbe).
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display=:1\ndisplay=   \n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":1")
+
+    def test_a_display_value_is_trimmed(self):
+        # The same trim, on the value that does count: ` :2 ` is `:2` to the
+        # agent, so a padded value must not read as a moved display.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display= :2 \n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
 
     def test_a_missing_entry_is_none_not_an_error(self):
         # register@'s ExecStop removes the entry, so it can vanish between the
