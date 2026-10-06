@@ -99,10 +99,15 @@ comment: two constants can disagree, and a pinned hash that disagrees with the o
 is the exact failure #43 exists to catch. If the constant cannot be read, the fetcher fails loudly and
 never falls back.
 
-**There is no CI.** `.github/workflows/ci.yml` exists in the working tree but is **untracked and on no
-branch**, so GitHub has never run it and a push triggers nothing. The gate above is the only check
-that exists. Do not describe a push here as verified by CI; if the workflow is ever committed, correct
-this paragraph in the same change.
+**CI runs the same gate on Ubuntu.** `.github/workflows/ci.yml` is committed (faf2e05) and runs
+`./run-tests.sh` on `ubuntu-latest` for every `pull_request` and every push to `main`; the Factory's
+landing requires that check green, so a red workflow blocks every candidate, whatever its own
+evidence says (#88). A green local gate is not CI: this box is Fedora, the runner is Ubuntu, and the
+first difference that bit was `/bin/sh`. On Fedora it is bash; on Ubuntu it is dash, which has no
+`$SECONDS` (and, before 0.5.13, no `pipefail`). A harness therefore runs a bash-shebang script with `bash`, never `sh`
+-- `run_publisher` in `test_install.sh` did, and was green here and red on the runner (#88).
+Production is unaffected because systemd and `dreamconnect-session` execute the file through its
+shebang; only a harness names the interpreter, because the file is mode 0644 in git.
 
 ## Seams
 

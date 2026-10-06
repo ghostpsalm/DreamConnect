@@ -7576,9 +7576,18 @@ EOF
   chmod +x "$1/bin/systemctl"
 }
 
+# The publisher is run with `bash`, never `sh` (#88). Its shebang names bash and
+# it needs bash: `$SECONDS` for its deadline and `set -o pipefail`. On Fedora
+# /bin/sh is bash, so `sh "$PUBLISHER"` happened to work there; on Ubuntu /bin/sh
+# is dash, which stops at `SECONDS: parameter not set` with exit 2 before an env
+# file is written -- the three red cases on the CI runner. Production never goes
+# through `sh`: systemd and dreamconnect-session execute the file directly, so
+# the shebang chooses. The harness cannot do the same, because the file is mode
+# 0644 in git (the installer sets 0755), so it must name the interpreter, and
+# the interpreter it names must be the one the shebang does.
 run_publisher() {  # dir -> sets PUB_RC
   ( PATH="$1/bin:$PATH"; XDG_RUNTIME_DIR="$1/run" \
-    DREAMCONNECT_DISPLAY_TIMEOUT=3 sh "$PUBLISHER" >/dev/null 2>&1 )
+    DREAMCONNECT_DISPLAY_TIMEOUT=3 bash "$PUBLISHER" >/dev/null 2>&1 )
   PUB_RC=$?
 }
 
@@ -7656,6 +7665,26 @@ test_publisher_fails_when_no_display_ever_appears() {
   [ "$elapsed" -lt 20 ] || fail "publisher ignored its timeout (${elapsed}s)"
   assert_file_absent "$d/run/dreamconnect-display.env" \
     "no env file may be left behind when there is no display"
+}
+
+# The guard for #88. A box whose /bin/sh is bash cannot execute the defect, so
+# this reads the invocation form out of run_publisher itself, as the result-loop
+# case reads run_case. It proves the harness names the interpreter the shebang
+# names, not how dash behaves; the Ubuntu runner is the check that executes it.
+test_the_publisher_is_run_with_the_interpreter_its_shebang_names() {
+  local shebang body
+  [ -f "$PUBLISHER" ] || { fail "backstage env publisher is missing"; return 0; }
+  shebang="$(head -n 1 "$PUBLISHER")"
+  assert_contains "$shebang" "bash" \
+    "publisher: its shebang names bash, which is what this case holds the harness to"
+  body="$(declare -f run_publisher)"
+  assert_contains "$body" 'bash "$PUBLISHER"' \
+    "run_publisher: it must run the publisher with bash, the interpreter its shebang names (#88)"
+  # A space or `;` before `sh` is what rules out matching the `sh` inside `bash`.
+  assert_not_contains "$body" ' sh "$PUBLISHER"' \
+    "run_publisher: it must not run the publisher with sh -- dash on Ubuntu has no \$SECONDS (#88)"
+  assert_not_contains "$body" ';sh "$PUBLISHER"' \
+    "run_publisher: it must not run the publisher with sh -- dash on Ubuntu has no \$SECONDS (#88)"
 }
 
 # --- slice 11: sudo for the display-host account ------------------------------
@@ -11034,6 +11063,7 @@ for CURRENT in \
   test_publisher_publishes_a_stable_xauthority_path \
   test_publisher_keeps_the_published_xauthority_owner_only \
   test_publisher_fails_when_no_display_ever_appears \
+  test_the_publisher_is_run_with_the_interpreter_its_shebang_names \
   test_every_tool_in_the_probe_chain_is_shadowed \
   test_xprobe_wrapper_searches_more_than_usr_bin \
   test_xprobe_wrapper_passes_a_healthy_display_through \
