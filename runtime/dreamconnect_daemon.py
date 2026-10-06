@@ -428,6 +428,30 @@ class Session:
             log(f"desktop-area query failed: {e}")
             return None
 
+    def stop(self):
+        """End the Mutter RemoteDesktop session, which is what releases the
+        virtual monitor it conjured.
+
+        Named to match GreeterSession.stop so the exit path in main() never has
+        to branch on which mode it is in. A no-op when no session is held: a
+        failed start leaves rd_path None, and _rd would then aim the call at a
+        path of None instead of doing nothing.
+
+        The identifiers are cleared even when Stop raises. The commonest reason
+        it raises is that Mutter already closed the session, and leaving rd_path
+        naming a corpse would let a later stop — or a later start — believe
+        there is still a session there.
+        """
+        if not self.rd_path:
+            return
+        try:
+            self._rd("Stop")
+        finally:
+            self.rd_path = None
+            self.sc_path = None
+            self.stream_path = None
+            self.node_id = None
+
     def start(self):
         # Drop any subscriptions from a previous session — start() is re-entered
         # on recovery, and the old rd_path/stream_path are gone, so leaving them
@@ -457,17 +481,12 @@ class Session:
         #
         # Failure is tolerated on purpose: the commonest reason we are here is
         # that Mutter already closed the session, and refusing to recover from
-        # that would trade a leaked monitor for a dead bridge. The identifiers
-        # are cleared either way, so a later stop can never aim at a corpse.
-        if self.rd_path:
-            try:
-                self._rd("Stop")
-            except Exception as e:  # noqa: BLE001
-                log(f"previous session would not stop ({e}); continuing")
-            self.rd_path = None
-            self.sc_path = None
-            self.stream_path = None
-            self.node_id = None
+        # that would trade a leaked monitor for a dead bridge. stop() clears the
+        # identifiers either way, so a later stop can never aim at a corpse.
+        try:
+            self.stop()
+        except Exception as e:  # noqa: BLE001
+            log(f"previous session would not stop ({e}); continuing")
 
         self.rd_path = self.bus.call_sync(
             RD_DEST, RD_PATH, RD_IFACE, "CreateSession", None, None,
@@ -883,6 +902,27 @@ class ControlServer(threading.Thread):
         return f"ERR unknown cmd {cmd}"
 
 
+def shutdown(session):
+    """Release everything a session holds, on the way out of main().
+
+    Restore any local blank + wake lock before releasing the session, so we
+    never leave the box blanked/awake after the daemon exits. Greeter mode
+    releases an Xvfb and an RDP client instead of a Mutter session; leaving
+    either behind would hold the private display against the next start.
+
+    Each step is best-effort and independent on purpose: a set_blank that
+    raises must not be able to keep the Mutter session — and with it the
+    virtual monitor Mutter conjured for it — alive past our exit (#55).
+    """
+    for cleanup in (lambda: session.set_blank(False),
+                    session._release_wake_lock,
+                    session.stop):
+        try:
+            cleanup()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--monitor", default="HDMI-2")
@@ -945,66 +985,70 @@ def main():
 
     Gst.init(None)
     frame = FrameBuffer(args.shm)
-    if args.greeter:
-        # Greeter mode owns no Mutter session, so it needs no session bus — it
-        # is an RDP client of the local remote-login service. Importing here
-        # keeps python-xlib off the dependency path for the normal modes.
-        from dreamconnect_greeter import GreeterSession
-        width, height = greeter_size
-        session = GreeterSession(frame, width=width, height=height,
-                                 display=args.greeter_display,
-                                 rdp_host=args.rdp_host, rdp_port=args.rdp_port,
-                                 rdp_user=args.rdp_user,
-                                 password_file=args.rdp_password_file,
-                                 stall_timeout_ms=args.stall_timeout_ms)
-    else:
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
-                          virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
-    session.start()
-    # Greeter mode answers the picker with its own private display, not the
-    # daemon's inherited $DISPLAY: the agent matches a picker entry to a daemon
-    # by display, and this session's pixels live on the Xvfb, not wherever the
-    # unit happened to start.
-    picker_display = (args.greeter_display if args.greeter
-                      else resolve_display(args.display, os.environ))
-    ControlServer(args.socket, session, display=picker_display,
-                  label=args.label).start()
 
-    # Poll for a stalled capture pipeline a few times per timeout window. Disabled
-    # when the timeout is 0.
-    if args.stall_timeout_ms > 0:
-        interval = max(1, args.stall_timeout_ms // 2000)
-        GLib.timeout_add_seconds(interval, session._watchdog)
-
-    loop = GLib.MainLoop()
-
-    def _stop(*_):
-        log("shutting down")
-        loop.quit()
-        return GLib.SOURCE_REMOVE
-
-    # systemd stops us with SIGTERM (not KeyboardInterrupt), so handle both —
-    # otherwise a stop/restart while the monitor is blanked would leave the
-    # panel dark (gamma still zeroed).
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _stop)
-    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _stop)
+    # Everything from here down is guarded: the session is created *inside* the
+    # try, not before it, because a start() that fails past CreateSession
+    # already holds a virtual monitor, and so does a session that started fine
+    # but tripped over the ControlServer or the watchdog below. The unit is
+    # Restart=always/RestartSec=2, so an exit that skips the release adds a
+    # monitor every two seconds — the live 2560x720 screen and `Added virtual
+    # monitor` x25 this issue was reported for (#55).
+    #
+    # A finally, never an except: the exception still propagates, so the
+    # process exits non-zero and systemd sees the failure it should.
+    session = None
     try:
+        if args.greeter:
+            # Greeter mode owns no Mutter session, so it needs no session bus —
+            # it is an RDP client of the local remote-login service. Importing
+            # here keeps python-xlib off the dependency path for the normal modes.
+            from dreamconnect_greeter import GreeterSession
+            width, height = greeter_size
+            session = GreeterSession(frame, width=width, height=height,
+                                     display=args.greeter_display,
+                                     rdp_host=args.rdp_host, rdp_port=args.rdp_port,
+                                     rdp_user=args.rdp_user,
+                                     password_file=args.rdp_password_file,
+                                     stall_timeout_ms=args.stall_timeout_ms)
+        else:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            session = Session(bus, args.monitor, frame, all_monitors=args.all_monitors,
+                              virtual=virtual, stall_timeout_ms=args.stall_timeout_ms)
+        session.start()
+        # Greeter mode answers the picker with its own private display, not the
+        # daemon's inherited $DISPLAY: the agent matches a picker entry to a
+        # daemon by display, and this session's pixels live on the Xvfb, not
+        # wherever the unit happened to start.
+        picker_display = (args.greeter_display if args.greeter
+                          else resolve_display(args.display, os.environ))
+        ControlServer(args.socket, session, display=picker_display,
+                      label=args.label).start()
+
+        # Poll for a stalled capture pipeline a few times per timeout window.
+        # Disabled when the timeout is 0.
+        if args.stall_timeout_ms > 0:
+            interval = max(1, args.stall_timeout_ms // 2000)
+            GLib.timeout_add_seconds(interval, session._watchdog)
+
+        loop = GLib.MainLoop()
+
+        def _stop(*_):
+            log("shutting down")
+            loop.quit()
+            return GLib.SOURCE_REMOVE
+
+        # systemd stops us with SIGTERM (not KeyboardInterrupt), so handle both —
+        # otherwise a stop/restart while the monitor is blanked would leave the
+        # panel dark (gamma still zeroed).
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, _stop)
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, _stop)
         loop.run()
     finally:
-        # Restore any local blank + wake lock before releasing the session, so
-        # we never leave the box blanked/awake after the daemon exits. Greeter
-        # mode releases an Xvfb and an RDP client instead of a Mutter session;
-        # leaving either behind would hold the private display against the next
-        # start.
-        release = session.stop if args.greeter else (lambda: session._rd("Stop"))
-        for cleanup in (lambda: session.set_blank(False),
-                        session._release_wake_lock,
-                        release):
-            try:
-                cleanup()
-            except Exception:  # noqa: BLE001
-                pass
+        # The None guard is load-bearing now that the try opens before the
+        # session exists: a Gio.bus_get_sync that fails must surface as itself,
+        # not as an AttributeError raised out of the cleanup that masks it.
+        if session is not None:
+            shutdown(session)
 
 
 if __name__ == "__main__":
