@@ -10,5 +10,5 @@
     "bash test_gate_verdict.sh",
     "bash agent/test_boot_output.sh"
   ],
-  "auto_merge": true
+  "auto_merge": false
 }
