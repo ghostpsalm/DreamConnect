@@ -36,6 +36,33 @@ if ! command -v sha256sum >/dev/null 2>&1; then
   exit 1
 fi
 
+# Copy first, then hash the copy, and consume only the copy (#48). Hashing
+# $BB_JAR and then reading it again for javac and unzip let anyone who could
+# write lib/ swap the bytes between the check and the use, and the swapped-in
+# jar was shaded into the agent unhashed. Copying *after* the check would only
+# narrow that window, not close it: the copy is a third read of a path someone
+# else can still write. Hashing the private copy means the bytes checked are,
+# by construction, the bytes consumed.
+#
+# The copy lives in its own mktemp -d (0700, this build's user), not under
+# $BUILD: that is the fixed path agent/target, shared by every build of this
+# checkout and rm -rf'd by each, so it is neither private nor per-invocation. A
+# private copy also means a concurrent build's mismatch cleanup (the rm -f
+# below) can no longer delete a jar this build already verified. Two builds
+# still race on agent/target itself; that predates #48 and is not addressed.
+# flock was ruled out: it only orders cooperating processes, and the adversary
+# here does not cooperate.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+BB_VERIFIED="$STAGE/byte-buddy-verified.jar"
+
+# A failed copy is a failed read, not a mismatch: same answer as an unhashable
+# jar below -- fail closed, keep the jar, claim nothing about it.
+if ! cp -- "$BB_JAR" "$BB_VERIFIED"; then
+  echo "could not read $BB_JAR, cannot verify it" >&2
+  exit 1
+fi
+
 # Hash the file directly instead of piping "<hash>  <path>" into `sha256sum -c`.
 # That line format is a parser: it reads the filename back out using coreutils'
 # own escaping rules, so a $BB_JAR holding a newline is split and the check runs
@@ -46,7 +73,7 @@ fi
 # Failing to hash is not a mismatch: an unreadable file or an I/O error says
 # nothing about the bytes, so it lands where a missing sha256sum lands above --
 # fail closed, keep the jar, claim nothing about it.
-if ! BB_ACTUAL="$(sha256sum < "$BB_JAR" | cut -d' ' -f1)" || [ -z "$BB_ACTUAL" ]; then
+if ! BB_ACTUAL="$(sha256sum < "$BB_VERIFIED" | cut -d' ' -f1)" || [ -z "$BB_ACTUAL" ]; then
   echo "could not read $BB_JAR, cannot verify it" >&2
   exit 1
 fi
@@ -74,12 +101,12 @@ echo ">> package dreamconnect-boot.jar"
 jar --create --file "$DIST/dreamconnect-boot.jar" -C "$BUILD/boot" .
 
 echo ">> compile agent classes"
-javac "${EXPORTS[@]}" -cp "$BB_JAR:$BUILD/boot" -d "$BUILD/agent" \
+javac "${EXPORTS[@]}" -cp "$BB_VERIFIED:$BUILD/boot" -d "$BUILD/agent" \
   $(find "$HERE/src" -name '*.java')
 
 echo ">> assemble dreamconnect-agent.jar (shade ByteBuddy + embed boot jar)"
 # shade only net/** from ByteBuddy (skip its module-info / META-INF)
-( cd "$BUILD/agent" && unzip -oq "$BB_JAR" 'net/*' )
+( cd "$BUILD/agent" && unzip -oq "$BB_VERIFIED" 'net/*' )
 cp "$DIST/dreamconnect-boot.jar" "$BUILD/agent/dreamconnect-boot.jar"
 
 cat > "$BUILD/manifest.txt" <<'EOF'
