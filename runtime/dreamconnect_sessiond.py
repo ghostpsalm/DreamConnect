@@ -121,11 +121,18 @@ def registered_uids(registry_dir=REGISTRY_DIR):
     return sorted(int(n) for n in names if n.isdigit())
 
 
+# What Java's String.trim() strips: every code point at or below U+0020, and
+# nothing else. str.strip() is not this set -- it strips Unicode whitespace such
+# as \xa0 and 　 that trim() keeps, and keeps \x00-\x08 and \x0e-\x1f that
+# trim() strips (#94).
+_JAVA_TRIM = "".join(map(chr, range(0x21)))
+
+
 def entry_display(registry_dir, uid):
     """The display one entry names, "" if it names none, None if there is no
-    entry at all.
+    entry at all, or none the agent could read.
 
-    Parsed the way the agent parses it (Bridge.java:228-232), all three rules:
+    Parsed the way the agent parses it (Bridge.parseRegistryEntry), all three rules:
     a key is only what precedes the *first* `=` on the line, the key is trimmed
     before it is compared, and a value that is blank after trimming is skipped
     -- so the last *non-blank* `display=` wins. The first rule is the one a
@@ -136,22 +143,38 @@ def entry_display(registry_dir, uid):
     tokens each and are kept because the alternative is two parsers of one
     format whose agreement rests on an invariant held in another language (#66).
 
+    The line rules are matched down to the characters (#94), for the same
+    reason. The agent reads the file as UTF-8 (Files.readString), splits on
+    `\\n` alone and trims with String.trim(). So the file is opened as UTF-8
+    with `newline=""` -- universal newlines would turn a `\\r` into a line break
+    before any split ran -- and split with `split("\\n")`, not splitlines(),
+    which also breaks on `\\r`, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85`,
+    `\\u2028` and `\\u2029`. Trimming uses `_JAVA_TRIM`. None of those shapes
+    is one render_registry_entry writes, which emits a single `display=%s`
+    line; the point is that agreement does not depend on that. Whole-entry
+    validity is NOT mirrored: the agent drops an entry with no uid/user/shm/
+    socket or a non-numeric uid, and this still reads its display.
+
     A missing entry is None rather than an error because register@'s ExecStop
     removes it, so it can vanish between the listdir and this read; on a 30s
     timer that race is routine, and an exception would take every other
-    account's reconcile down with it. Blank is unset, as in #50.
+    account's reconcile down with it. An entry that is not UTF-8 is None for
+    the same reason, and because the agent ignores it too: readString throws
+    and the entry is skipped. UnicodeDecodeError is a ValueError, not an
+    OSError, so it needs its own clause. Blank is unset, as in #50.
     """
     try:
-        with open(os.path.join(registry_dir, str(uid))) as f:
+        with open(os.path.join(registry_dir, str(uid)),
+                  encoding="utf-8", newline="") as f:
             text = f.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     display = ""
-    for line in text.splitlines():
+    for line in text.split("\n"):
         key, sep, value = line.partition("=")
-        if not sep or key.strip() != "display":
+        if not sep or key.strip(_JAVA_TRIM) != "display":
             continue
-        value = value.strip()
+        value = value.strip(_JAVA_TRIM)
         if value:
             display = value
     return display
@@ -160,7 +183,7 @@ def entry_display(registry_dir, uid):
 def published_display(uid, runtime_root=RUNTIME_ROOT):
     """The display that session publishes now, or None if it publishes nothing.
 
-    install-lib.sh's `session_display` (:1214-1222) in Python, and deliberately
+    install-lib.sh's `session_display` in Python, and deliberately
     the same rule: the first `DISPLAY=` line wins, anchored at the start of the
     line so an `XDISPLAY=` line is not a DISPLAY. The two halves read one file
     and must agree about which line is the answer, or the supervisor decides an

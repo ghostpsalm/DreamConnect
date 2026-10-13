@@ -117,7 +117,7 @@ BACKSTAGE_UID = 992
 
 
 def entry_text(uid, display, user="backstage", label="backstage"):
-    """Exactly what install-lib.sh's render_registry_entry emits (:1177-1185).
+    """Exactly what install-lib.sh's render_registry_entry emits.
 
     Written out in full rather than reduced to the one line under test: the
     reader has to find `display=` among the other keys, which is the part a
@@ -135,8 +135,13 @@ def write_entry(registry_dir, uid, display, **kw):
 
 def write_entry_text(registry_dir, uid, text):
     """An entry written verbatim, for shapes `render_registry_entry` cannot
-    emit -- a key with leading whitespace, or two `display=` lines (#66)."""
-    with open(os.path.join(registry_dir, str(uid)), "w") as f:
+    emit -- a key with leading whitespace, or two `display=` lines (#66).
+
+    UTF-8 with `newline=""`, so the bytes on disk are exactly `text`: #94's
+    cases put `\\r`, `\\x85` and `\\xa0` in an entry on purpose, and neither the
+    locale's encoding nor newline translation may get to rewrite them first."""
+    with open(os.path.join(registry_dir, str(uid)), "w",
+              encoding="utf-8", newline="") as f:
         f.write(text)
 
 
@@ -329,7 +334,8 @@ class TestEntryDisplay(unittest.TestCase):
     """What the registry entry currently claims (issue #54).
 
     `display=<v>` is written once, at register-unit start
-    (install-lib.sh:1182 via dreamconnect-register.sh:118).
+    (install-lib.sh's render_registry_entry, called by dreamconnect-register.sh's
+    register_session).
     """
 
     def test_reads_the_display_line_of_a_full_entry(self):
@@ -339,7 +345,7 @@ class TestEntryDisplay(unittest.TestCase):
 
     def test_a_label_that_looks_like_a_display_is_still_a_label(self):
         # An entry's key is only what precedes the first `=` on the line
-        # (Bridge.java:228-231), and the label is free text that may contain one
+        # (Bridge.parseRegistryEntry), and the label is free text that may contain one
         # (BootTests.testParseRegistryEntry parses `label=a=b`). The agent's own parser is a
         # last-wins loop, so a reader that copies it but tests keys by substring
         # would read :9 off the label and restart register@ every 30s for a
@@ -349,14 +355,14 @@ class TestEntryDisplay(unittest.TestCase):
             self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":1")
 
     def test_a_blank_display_is_unset_not_a_value(self):
-        # "blank is unset, as in #50" -- Bridge.java:232. Reporting "" as a
+        # "blank is unset, as in #50" -- Bridge.parseRegistryEntry. Reporting "" as a
         # display would make it differ from every published value forever.
         with tempfile.TemporaryDirectory() as d:
             write_entry(d, BACKSTAGE_UID, "")
             self.assertFalse(sd.entry_display(d, BACKSTAGE_UID))
 
     def test_a_key_is_trimmed_before_it_is_compared(self):
-        # Bridge.java:230 trims the key, so ` display=:2` is a display to the
+        # Bridge.parseRegistryEntry trims the key, so ` display=:2` is a display to the
         # agent; before #66 it was not one to the supervisor. render_registry_entry
         # is the sole writer and emits `display=%s`, so no shipped entry has a
         # leading space -- the entry is built inline here because `entry_text`
@@ -367,7 +373,7 @@ class TestEntryDisplay(unittest.TestCase):
             self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
 
     def test_a_later_blank_display_leaves_the_earlier_one_standing(self):
-        # Bridge.java:232 `continue`s on a blank value, so the last *non-blank*
+        # Bridge.parseRegistryEntry `continue`s on a blank value, so the last *non-blank*
         # wins; before #66 this read "" and the two parsers disagreed about the
         # same text. An entry holds one `display=` line, so again the writer
         # cannot produce this shape.
@@ -376,7 +382,7 @@ class TestEntryDisplay(unittest.TestCase):
             self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":1")
 
     def test_a_later_whitespace_only_display_is_blank_too(self):
-        # Bridge.java:231-232 trims the value and THEN skips it if empty, so a
+        # Bridge.parseRegistryEntry trims the value and THEN skips it if empty, so a
         # `display=` holding only whitespace is unset to the agent and must be to
         # the supervisor too. Without this case the strip() in front of the
         # blank test was pinned by nothing: dropping it read "   " as a display
@@ -392,6 +398,69 @@ class TestEntryDisplay(unittest.TestCase):
             write_entry_text(d, BACKSTAGE_UID, "display= :2 \n")
             self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
 
+    # #94: the agent splits on "\n" alone and trims with String.trim(). Every
+    # case below is a shape render_registry_entry cannot write; each pins one
+    # character on which str.splitlines()/str.strip() disagree with Java.
+
+    def test_a_carriage_return_does_not_end_a_line(self):
+        # split("\n") leaves `:1\rdisplay=:2` as one line whose key is `display`,
+        # and trim() keeps the inner \r. splitlines() -- or open()'s universal
+        # newlines, before any split -- would make two lines and read `:2`.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display=:1\rdisplay=:2\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID),
+                             ":1\rdisplay=:2")
+
+    def test_a_unicode_line_separator_does_not_end_a_line(self):
+        # The same for the separators only splitlines() knows: \x0b, \x0c,
+        # \x1c-\x1e, \x85,  ,  . Java breaks on none of them.
+        for sep in ("\x0b", "\x0c", "\x1c", "\x1d", "\x1e",
+                    "\x85", " ", " "):
+            with self.subTest(sep=repr(sep)), tempfile.TemporaryDirectory() as d:
+                write_entry_text(d, BACKSTAGE_UID, f"display=:1{sep}display=:2\n")
+                self.assertEqual(sd.entry_display(d, BACKSTAGE_UID),
+                                 f":1{sep}display=:2")
+
+    def test_unicode_whitespace_is_not_trimmed(self):
+        # trim() strips only code points <= U+0020, so a no-break space or an
+        # ideographic space stays part of the value; str.strip() would drop it.
+        for ws in ("\xa0", "　"):
+            with self.subTest(ws=repr(ws)), tempfile.TemporaryDirectory() as d:
+                write_entry_text(d, BACKSTAGE_UID, f"display={ws}:2{ws}\n")
+                self.assertEqual(sd.entry_display(d, BACKSTAGE_UID),
+                                 f"{ws}:2{ws}")
+
+    def test_control_characters_are_trimmed_from_a_value(self):
+        # trim() strips \x00 and \x01 like any other code point <= U+0020;
+        # str.strip() treats neither as whitespace and would keep them.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display=\x00:2\x01\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
+
+    def test_control_characters_are_trimmed_from_a_key(self):
+        # The key is trimmed by the same rule, so `\x00display` is `display`.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "\x00display=:2\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":2")
+
+    def test_a_crlf_line_reads_without_its_carriage_return(self):
+        # split("\n") leaves the \r on the line, and trim() removes it because
+        # it is below U+0020 -- so both languages read `:1`, but by trimming,
+        # not by splitting. Kept so that a reader which neither splits on nor
+        # trims \r is caught; the pre-#94 reader already passed it.
+        with tempfile.TemporaryDirectory() as d:
+            write_entry_text(d, BACKSTAGE_UID, "display=:1\r\n")
+            self.assertEqual(sd.entry_display(d, BACKSTAGE_UID), ":1")
+
+    def test_an_entry_that_is_not_utf8_is_none_not_an_error(self):
+        # Files.readString decodes UTF-8 and throws on a bad byte, and the agent
+        # ignores that entry. UnicodeDecodeError is not an OSError: escaping
+        # here, it would take every other account's reconcile down with it.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, str(BACKSTAGE_UID)), "wb") as f:
+                f.write(b"display=:1\xff\n")
+            self.assertIsNone(sd.entry_display(d, BACKSTAGE_UID))
+
     def test_a_missing_entry_is_none_not_an_error(self):
         # register@'s ExecStop removes the entry, so it can vanish between the
         # listdir and the read. On a 30s timer that race is routine, and an
@@ -402,7 +471,7 @@ class TestEntryDisplay(unittest.TestCase):
 
 class TestPublishedDisplay(unittest.TestCase):
     """What the session publishes now -- install-lib.sh's session_display
-    (`sed -n 's/^DISPLAY=//p' | head -n 1`, :1214-1222) in Python."""
+    (`sed -n 's/^DISPLAY=//p' | head -n 1`) in Python."""
 
     def test_reads_the_display_the_session_published(self):
         with tempfile.TemporaryDirectory() as d:
@@ -411,7 +480,7 @@ class TestPublishedDisplay(unittest.TestCase):
 
     def test_an_xdisplay_line_is_not_a_display(self):
         # session_display's own stated reason for anchoring: "an `XDISPLAY=`
-        # line is not a DISPLAY" (install-lib.sh:1216). Both halves read the
+        # line is not a DISPLAY" (install-lib.sh's session_display). Both halves read the
         # same file, so they have to agree about which line is the answer.
         with tempfile.TemporaryDirectory() as d:
             write_envfile(d, BACKSTAGE_UID,
