@@ -122,6 +122,7 @@ real system.
 | `gate-lib.sh` | sourced by `run-tests.sh` and `test_gate_verdict.sh` | Holds **definitions only** like `install-lib.sh`. `section` prints `== <name> ==` and `suite_failed`/`suite_verdict` print `FAILED (exit N) <name>`, all off one variable, so a suite's header and its verdict cannot disagree. |
 | `agent/fixture-lib.sh` | sourced by `agent/test_fixture_fetch.sh` and `scripts/fetch-test-fixtures.sh` | Holds **definitions only** like `install-lib.sh`. It finds its sibling `build.sh` via `BASH_SOURCE[0]`, not `$0` or the cwd, because both callers source it by absolute path from different directories. |
 | `test-harness-lib.sh` | sourced by every `test_*.sh` harness, tested in `test_install.sh` | Holds **definitions only**. `case_line` is the one place a shell case's result line is formatted, so four harnesses cannot drift into four forms. |
+| `runtime/dc_testrunner.py` | run by `run-tests.sh` on every Python suite, tested in `runtime/test_dc_testrunner.py` | The one place a Python case's result line is formatted. The suites are untouched and still run alone with `python3 runtime/test_x.py`; the installer copies `runtime/` by name, so the runner never ships. |
 
 Two rails in `test_install.sh` that must not be removed: it **refuses to run as root**, because slices
 drive `useradd`/`userdel` and `dconf` and a test that forgets a fixture override must not be able to
@@ -159,8 +160,19 @@ there would rename the check. BootTests prints these through `checkLine`; the sh
 result word — `fail()` prints `assertion failed:`, `skip()` prints `skipped:`, a harness that cannot
 start prints `cannot run:` — and must not be an indented copy of a check line, since the parser allows
 leading whitespace. `test_every_shell_harness_prints_its_cases_through_case_line` holds every
-`test_*.sh` to this, so a new harness is covered the day it is added. The Python suites still print
-unittest's own lines, which parse as nothing; only their `== … ==` sections are checks.
+`test_*.sh` to this, so a new harness is covered the day it is added.
+
+The Python suites print the same form through `runtime/dc_testrunner.py` (#87); unittest's own
+`name (qualifier) ... ok` lines parse as nothing, and `run-tests.sh` used to `tail` them besides. The
+runner points **fd** 1 and 2 — not merely `sys.stdout` — at a capture file, so neither a `print`, an
+`os.write` nor a child process can put a phantom check line on stdout; a failing case's output is shown
+above its line with every line prefixed (`  output: `, `  traceback: `, `    | `). Subtests fold into
+their test, a class or module fixture's failure is charged to every case it owns, and a suite exits 0
+only if nothing failed **and** at least one case passed — an import error, a module-level `SkipTest`,
+no cases, or every case skipped is `cannot run:` and red. A suite is run as
+`python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_x.py"`, never `-m unittest` or through
+`tail`; `test_every_python_suite_is_run_through_the_shared_runner` holds every `runtime/test_*.py`
+that imports `unittest` to it.
 
 **Shell**: `set -euo pipefail`. Refuse bad input in the function's own voice and `return 1` — never let
 it reach arithmetic, where `set -u` aborts the shell and the caller's `|| die` never runs.
