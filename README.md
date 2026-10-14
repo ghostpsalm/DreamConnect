@@ -124,7 +124,10 @@ manufacture a graphical session for the bridge to attach to — never to make th
 login screen viewable, which Mutter forbids outright — and it cost you a box
 booting to an unlocked desktop. Backstage creates that session directly, so
 autologin was removed rather than kept as an option. It is in the git history if
-you ever need it back.
+you ever need it back. If your box was installed back when autologin existed, the
+box still logs in automatically and `--uninstall` will not undo that. See
+[troubleshooting](docs/troubleshooting.md#upgraded-box-still-logs-in-automatically--customconfdreamconnectbak-left-behind)
+for the manual cleanup.
 
 > **This runs code as root.** Piping to `sudo bash` trusts GitHub + TLS with no
 > further integrity check. If you'd rather read it first:

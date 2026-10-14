@@ -88,6 +88,61 @@ re-run it once the first has finished. The kernel drops the lock when the holder
 exits, including on a crash or a kill, so there is never a stale lock to clear by
 hand.
 
+## Upgraded box still logs in automatically / `custom.conf.dreamconnect.bak` left behind
+
+Only a box first installed **before** GDM autologin was removed from DreamConnect
+(see the README) can show this. That installer set GDM to log the desktop user in
+automatically at boot. Before its first edit it copied the GDM config to
+`custom.conf.dreamconnect.bak`. Today's installer has no autologin code at all,
+so `--uninstall` reverts neither change. This box therefore still boots straight
+to an unlocked desktop. **That is the part worth fixing.** The leftover `.bak`
+file is only clutter.
+
+This cleanup is manual by decision (issue #22), not an `--uninstall` step. The
+steps below follow from what the old installer wrote. They have not been run on a
+real upgraded box.
+
+1. Find the config. The old installer used the first of these two files that
+   existed:
+
+   ```sh
+   ls -l /etc/gdm/custom.conf* /etc/gdm3/custom.conf* 2>/dev/null
+   ```
+
+   Fedora uses `/etc/gdm`; Debian and Ubuntu use `/etc/gdm3`. Name the one that
+   holds `custom.conf.dreamconnect.bak`, because the later steps use it:
+
+   ```sh
+   conf=/etc/gdm/custom.conf    # or /etc/gdm3/custom.conf
+   ```
+
+2. In that file's `[daemon]` section, delete only the two lines the installer
+   added: `AutomaticLoginEnable=true` and `AutomaticLogin=<user>`. Leave every
+   other line alone.
+
+3. Check the backup for autologin settings of its own:
+
+   ```sh
+   grep -n 'AutomaticLogin' "$conf.dreamconnect.bak"
+   ```
+
+   A plain, uncommented `AutomaticLogin*` line in its `[daemon]` section is a
+   setting this box had *before* DreamConnect was installed. If you want it
+   back, copy that line back into `[daemon]`. Lines that start with `#` are
+   GDM's stock comments, and putting them back is optional.
+
+4. Delete the backup:
+
+   ```sh
+   sudo rm "$conf.dreamconnect.bak"
+   ```
+
+**Do not restore the `.bak` over `custom.conf` wholesale.** The backup is a copy
+of the config from the day of the *first* install. Copying it back would also undo
+every change made to the live config since then for other reasons.
+
+The change takes effect at the next GDM start, which is the next reboot.
+
 ## Checking status
 
 ```sh
