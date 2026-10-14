@@ -88,6 +88,28 @@ re-run it once the first has finished. The kernel drops the lock when the holder
 exits, including on a crash or a kill, so there is never a stale lock to clear by
 hand.
 
+## `--uninstall` kept `install.state` for an adopted display-host account
+
+When `DREAMCONNECT_HOST_ACCOUNT` named an account that already existed, the
+installer adopted it rather than creating it (`CREATED_ACCOUNT=0` in
+`/etc/dreamconnect/install.state`). `--uninstall` never deletes an adopted
+account, and it keeps `install.state`, because that file is the only record of
+which account this box was configured for. The account may be served by LDAP or
+SSSD, and a lookup through a degraded source cannot prove it is gone.
+
+While the file names that account, an install under a *different* account is
+refused, and running `--uninstall` again does not clear it. A second run is
+safe: the first one restored the account's own AccountsService, dconf and
+`environment.d` files, and a second one deletes a file only if it still holds
+exactly what the installer wrote. One residual remains: an original file whose
+bytes match the installer's own output cannot be told apart from it, so a
+second run still deletes it. Once the adopted
+account is no longer meant to be the display host, delete the file by hand:
+
+```sh
+sudo rm /etc/dreamconnect/install.state
+```
+
 ## Checking status
 
 ```sh

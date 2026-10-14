@@ -110,7 +110,8 @@ uninstall() {
     target_name="$HOST_ACCOUNT"
     target_uid="$HOST_UID"
     # `|| true` on the pipeline: passwd_entry now exits non-zero for an account
-    # that is absent (1) as well as one it could not look up (2), and under
+    # that is absent (1), one it could not look up (2), and one absent from
+    # `files` while another passwd source went unproven (3, #65), and under
     # `set -o pipefail` an unguarded assignment would abort --uninstall on
     # exactly the hand-deleted account it exists to clean up after. An empty
     # home is what every path below already expects when there is no entry, and
@@ -246,7 +247,12 @@ uninstall() {
     # refusal would abort the uninstall before the account deletion below.
     remove_accountsservice_marker "$HOST_ACCOUNT" \
       || echo "!! could not revert the AccountsService marker for $HOST_ACCOUNT — continuing"
-    local account_removed=1
+    # Set only by a removal that succeeded. It used to default to 1, so an adopted
+    # account (CREATED_ACCOUNT=0), which this branch never removes, had its
+    # install.state deleted anyway while the account itself stayed live (#65).
+    # The owner ruled that the record outlives an adopted account: it is the only
+    # thing naming the account this box was configured for.
+    local account_removed=0
     if [ "$CREATED_ACCOUNT" = "1" ]; then
       # If the host account ever does hold the active session, detect_user
       # returns it and rail 3 would refuse to remove the very account this
@@ -257,10 +263,12 @@ uninstall() {
       [ "$protect_arg" != "$HOST_ACCOUNT" ] || protect_arg=""
       if uninstall_host_account "$HOST_ACCOUNT" "$protect_arg" "$target_uid"; then
         echo ">> removed display-host account $HOST_ACCOUNT"
+        account_removed=1
       else
         echo "!! could not remove display-host account $HOST_ACCOUNT — left in place, check manually"
-        account_removed=0
       fi
+    else
+      echo ">> display-host account $HOST_ACCOUNT was adopted, not created, by the installer — left in place"
     fi
     # The state file is the only thing that says this account is ours: rails 5/6
     # read it. Deleting it after a failed removal (userdel exits 8 while the
@@ -268,8 +276,13 @@ uninstall() {
     # unremovable by this tool, so keep it and let a re-run retry.
     if [ "$account_removed" = "1" ]; then
       rm -f "$(install_state_file)"
-    else
+    elif [ "$CREATED_ACCOUNT" = "1" ]; then
       echo "!! state preserved at $(install_state_file) so a future --uninstall can retry account removal"
+    else
+      # A later install under a DIFFERENT account is refused while this file
+      # names $HOST_ACCOUNT, and "run --uninstall first" cannot clear it: only
+      # the operator knows when an adopted account is no longer wanted.
+      echo "!! state preserved at $(install_state_file): it records $HOST_ACCOUNT, which is still live; delete that file by hand once $HOST_ACCOUNT is no longer meant to be the display host"
     fi
   fi
   # End of the critical section: both exits from the branch above have settled

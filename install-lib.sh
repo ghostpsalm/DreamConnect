@@ -14,6 +14,21 @@ run() {
   if [ "${DC_DRY_RUN:-}" = "1" ]; then echo "DRY: $*"; else "$@"; fi
 }
 
+# True if <path> is a regular file holding exactly the bytes on stdin. The
+# revert functions ask this before deleting a file that has no .dreamconnect.bak
+# beside it: "no backup" alone does not prove the file is ours. An adopted
+# account keeps install.state (#65), so a second --uninstall is a supported
+# path, and by then the first one has already moved the human's original back
+# over our copy and consumed the backup. Comparing against what the writer
+# wrote is the one signal that survives that, and needs no record of its own.
+file_holds() {  # path  (expected content on stdin)
+  [ -f "$1" ] && cmp -s - "$1"
+}
+
+# What ensure_host_account writes to AccountsService, in one place so the
+# remover compares against exactly the bytes the writer wrote.
+accountsservice_marker_content() { printf '[User]\nSystemAccount=true\n'; }
+
 # Run a command quietly, and show everything it printed if — and only if — it
 # fails. install.sh built the agent with `bash agent/build.sh >/dev/null`, which
 # threw stdout away on the failure path too: a ByteBuddy checksum mismatch
@@ -182,7 +197,7 @@ resolve_host_identity() {
     1) echo "error: no such account: $name" >&2; return 1 ;;
     # A failed lookup is not an absence, and the uid is exactly what must not be
     # guessed here: a fabricated one points the root JVM at a socket path nothing
-    # will ever bind.
+    # will ever bind. Status 3 (another source unproven, #65) is the same: no uid.
     *) echo "error: cannot resolve account $name: the passwd lookup failed" >&2; return 1 ;;
   esac
   uid="$(echo "$entry" | cut -d: -f3)"
@@ -198,14 +213,50 @@ resolve_host_identity() {
   echo "$name $uid $home /run/user/$uid/dreamconnect.sock"
 }
 
+# The passwd sources NSS consults, one per line, in nsswitch.conf order: the
+# first `passwd:` line, with `#` comments and `[STATUS=action]` items removed.
+# No file, no passwd line, or a passwd line naming nothing is glibc's own default
+# and answers `files`. A file that is there and cannot be read is exit 1: which
+# sources serve this box is then unknown, and guessing `files` would be the
+# per-key probe of #65 again. DC_NSSWITCH_CONF replaces the real path, so the
+# tests can name the sources without depending on this machine's.
+passwd_nss_sources() {
+  local conf="${DC_NSSWITCH_CONF:-/etc/nsswitch.conf}" line srcs=""
+  local db_re='^[[:space:]]*passwd[[:space:]]*:(.*)$' action_re='^(.*)\[[^]]*\](.*)$'
+  local -a list
+  if [ -e "$conf" ]; then
+    [ -r "$conf" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"
+      [[ "$line" =~ $db_re ]] || continue
+      srcs="${BASH_REMATCH[1]}"
+      # Actions are not sources: `[NOTFOUND=return]` probed as a service would
+      # never answer, and read as a dead source on every box that uses one.
+      while [[ "$srcs" =~ $action_re ]]; do
+        srcs="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+      done
+      break
+    done < "$conf" || return 1
+  fi
+  # read -a rather than an unquoted expansion, which would also glob.
+  read -ra list <<< "$srcs" || true
+  [ "${#list[@]}" -gt 0 ] || list=(files)
+  printf '%s\n' "${list[@]}"
+}
+
 # One passwd(5) entry, matched on the whole name, printed verbatim, and a status
-# that says which of three things happened:
+# that says which of four things happened:
 #
 #   0  found — the entry is on stdout
-#   1  absent — the passwd source answered and there is no such account; empty
+#   1  absent — every passwd source answered and there is no such account; empty
 #      stdout and nothing on stderr, because absence is an answer, not an error
 #   2  the lookup itself FAILED — a broken NSS module, a down LDAP/SSSD backend,
 #      no getent at all; empty stdout and a stderr line naming the account
+#   3  absent from `files`, which answered, while at least one other configured
+#      source could not be proven alive (#65). Empty stdout, nothing on stderr:
+#      an account created by useradd lives in `files`, so for it this IS an
+#      absence, and only a caller that knows where the account came from can
+#      tell whether it may be trusted
 #
 # The third status is issue #30. This function used to answer with stdout alone,
 # so "not there" and "could not tell" were the same empty string and every caller
@@ -215,23 +266,31 @@ resolve_host_identity() {
 #
 # getent's exit 2 is the ambiguity itself — it is both its documented "key not
 # found" and what a backend that answered nothing returns — so it is classified
-# by a second lookup of a key every usable passwd source must hold. root
-# answering means the source is alive and this account really is gone; root not
-# answering means nothing was established. The probe is deliberately NOT `getent
-# -s files`, and deliberately not a read of /etc/passwd: the display-host account
-# can be one the installer adopted rather than created (CREATED_ACCOUNT=0) and so
-# can live in LDAP or SSSD, and corroborating against the local file would report
-# it absent while userdel still refuses to remove it — issue #30 inverted.
+# by asking each configured source, alone (`getent -s <source>`), for root. One
+# probe of the whole chain was #30's answer and was per-key, not per-source
+# (#65): with `passwd: files sss` and SSSD down, `files` answers root, the chain
+# looked healthy, and an LDAP host account was reported absent. Per source, a
+# source that answers root is alive and its "not found" is real; one that does
+# not has established nothing. So: every source alive is 1; `files` alive but
+# another unproven is 3; anything else is 2.
 #
-# Residual hole, not closable through getent: SSSD down while `files` is healthy
-# leaves the root probe answering, so an LDAP host account still classifies as
-# absent. Narrowing it needs a per-source answer getent does not expose, and the
-# only local alternative is the /etc/passwd read ruled out above.
+# An unproven source is not necessarily a dead one. SSSD filters root out by
+# default (filter_users = root), so a perfectly healthy `sss` never answers the
+# probe and a box that lists it gets 3 for every absent name. That is why 3 is
+# its own status rather than 2: it is the most this lookup can say there, and the
+# callers that know whether the account is local decide what it is worth.
+#
+# Still deliberately not a read of /etc/passwd: the display-host account can be
+# one the installer adopted rather than created (CREATED_ACCOUNT=0) and so can
+# live in LDAP or SSSD, and corroborating against the local file would report it
+# absent while userdel still refuses to remove it — issue #30 inverted. Residual,
+# not closable here: a source that answers root while failing for other keys
+# (`compat` with a dead NIS `+` entry) still reads as alive.
 #
 # DC_PASSWD_DB, if set, is read as a passwd file instead of getent passwd (a test
 # fixture only, never a production path) and answers on the same three-way scale.
 passwd_entry() {
-  local name="$1" entry rc=0
+  local name="$1" entry rc=0 sources src alive=0 dead=0 files_alive=0
   if [ -n "${DC_PASSWD_DB:-}" ]; then
     # Readability is checked ahead of awk rather than read off its status: awk's
     # own fatal message names the FILE, and a caller refusing a removal has to be
@@ -257,8 +316,17 @@ passwd_entry() {
   # and a success with no output are states getent does not use for a key it
   # looked up and did not find, so none of them establish that the account is
   # gone.
-  if [ "$rc" -eq 2 ] && getent passwd root >/dev/null 2>&1; then
-    return 1
+  if [ "$rc" -eq 2 ] && sources="$(passwd_nss_sources)"; then
+    while IFS= read -r src; do
+      if getent -s "$src" passwd root >/dev/null 2>&1; then
+        alive=$((alive + 1))
+        [ "$src" != files ] || files_alive=1
+      else
+        dead=$((dead + 1))
+      fi
+    done <<< "$sources"
+    [ "$alive" -eq 0 ] || [ "$dead" -ne 0 ] || return 1
+    [ "$files_alive" -eq 0 ] || return 3
   fi
   echo "error: passwd lookup for $name failed: the passwd source did not answer" >&2
   return 2
@@ -504,6 +572,7 @@ host_account_removable() {  # name protected_user
     # Distinct from absence on purpose. Every rail below reads a field of $entry,
     # and there is no entry: a lookup that failed has not established that this
     # account is gone, and `userdel -r` is not a thing to attempt on a guess.
+    # Status 3 (another source unproven, #65) lands here too: no entry either way.
     *) echo "refusing to remove $name: the passwd lookup failed, so whether it exists is unknown" >&2
        return 1 ;;
   esac
@@ -683,7 +752,12 @@ ensure_host_account() {  # name
     echo "error: refusing to create display-host account '$name': the passwd lookup failed, so it may already exist" >&2
     return 1; }
 
-  if [ "$rc" -eq 1 ]; then
+  # Status 3 creates, exactly as 1 does: absent from `files`, which answered, with
+  # another source unproven. Refusing it instead would refuse every fresh install
+  # on a healthy sss or ldap box, because SSSD never answers the root probe
+  # (passwd_entry). The cost is a known residual (#65): a DEAD sss source can
+  # hide an LDAP account of this name, and useradd then shadows it locally.
+  if [ "$rc" -eq 1 ] || [ "$rc" -eq 3 ]; then
     # The comment is one argument: split, the GECOS becomes "DreamConnect" and
     # host_account_removable() would refuse to remove the account we created.
     run useradd --system --create-home --comment "DreamConnect display host" "$name"
@@ -711,7 +785,7 @@ ensure_host_account() {  # name
   # installed as a full overwrite: a re-run leaves byte-identical content, never
   # a second [User] section for AccountsService to pick between.
   tmp="$(mktemp)"
-  printf '[User]\nSystemAccount=true\n' > "$tmp"
+  accountsservice_marker_content > "$tmp"
   run install -D -m 0644 "$tmp" "$dir/$name"
   rm -f "$tmp"
 }
@@ -719,8 +793,11 @@ ensure_host_account() {  # name
 # Undo: the AccountsService side of ensure_host_account, and nothing else.
 # A backup means the account had a file before we clobbered it, and --uninstall
 # owes it back rather than deleting it; no backup means we wrote the file from
-# scratch and removing it leaves the box as it was. Neither present is the
-# never-configured box, and a silent success.
+# scratch and removing it leaves the box as it was — but only if the file still
+# holds our marker. A repeat --uninstall of an adopted account (#65 keeps its
+# install.state) finds the human's original restored and the backup consumed,
+# and must leave it; so must a first one finding a file someone rewrote since.
+# Neither present is the never-configured box, and a silent success.
 remove_accountsservice_marker() {  # name
   local name="${1:-}" conf
 
@@ -747,8 +824,10 @@ remove_accountsservice_marker() {  # name
 
   if [ -f "$conf.dreamconnect.bak" ]; then
     run mv -f "$conf.dreamconnect.bak" "$conf"
-  elif [ -f "$conf" ]; then
+  elif accountsservice_marker_content | file_holds "$conf"; then
     run rm -f "$conf"
+  elif [ -f "$conf" ]; then
+    echo "note: left $conf in place: it is not the marker the installer wrote" >&2
   fi
 }
 
@@ -1110,7 +1189,7 @@ configure_no_idle_lock() {  # name home
   # user-db:user keeps the account's own dconf writes readable; system-db:<name>
   # is what makes the keyfile below apply. A full overwrite, like every other
   # file this installer owns.
-  printf 'user-db:user\nsystem-db:%s\n' "$name" > "$dir/profile/$name"
+  no_idle_lock_profile_content "$name" > "$dir/profile/$name"
 
   # lock-delay and idle-delay are "type u" in the installed GNOME schemas, hence
   # uint32; the sleep-inactive-*-type enums are strings. Suspending would be the
@@ -1129,25 +1208,7 @@ configure_no_idle_lock() {  # name home
   # makes the app switcher "chug" on a CPU-contended box. Measured: disabling
   # them roughly halves the shell + capture CPU during an app switch and makes
   # the transition instant. Eye-candy is a poor trade on a headless admin desktop.
-  cat > "$dir/db/$name.d/00-display-host" <<'EOF'
-[org/gnome/desktop/screensaver]
-lock-enabled=false
-idle-activation-enabled=false
-lock-delay=uint32 0
-
-[org/gnome/desktop/session]
-idle-delay=uint32 0
-
-[org/gnome/settings-daemon/plugins/power]
-sleep-inactive-ac-type='nothing'
-sleep-inactive-battery-type='nothing'
-
-[org/gnome/desktop/interface]
-enable-animations=false
-
-[org/gnome/shell]
-favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.DiskUtility.desktop', 'ca.desrt.dconf-editor.desktop', 'org.gnome.Logs.desktop', 'dreamconnect-services.desktop', 'org.gnome.SystemMonitor.desktop', 'dreamconnect-sysinfo.desktop', 'firewall-config.desktop', 'org.gnome.TextEditor.desktop']
-EOF
+  no_idle_lock_keyfile_content > "$dir/db/$name.d/00-display-host"
 
   # Without DCONF_PROFILE in the session's environment dconf loads its default
   # profile and the db above is inert.
@@ -1166,8 +1227,8 @@ EOF
       cp -a "$p" "$p.dreamconnect.bak"
     fi
   done
-  printf 'DCONF_PROFILE=%s\n' "$name" > "$home/.config/environment.d/dconf-profile.conf"
-  printf 'yes\n' > "$home/.config/gnome-initial-setup-done"
+  no_idle_lock_envd_content "$name" > "$home/.config/environment.d/dconf-profile.conf"
+  no_idle_lock_gis_content > "$home/.config/gnome-initial-setup-done"
 
   # Two admin tools the dash pins that GNOME ships no GUI for: a services list
   # and a system-information dump. They open in the session's terminal
@@ -1212,6 +1273,35 @@ EOF
 
   run dconf update
 }
+
+# What configure_no_idle_lock writes, one function per file, so that
+# remove_no_idle_lock deletes a file only while it still holds exactly these
+# bytes (file_holds) and never a restored original that merely has no backup
+# beside it any more.
+no_idle_lock_keyfile_content() {
+  cat <<'EOF'
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+lock-delay=uint32 0
+
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+
+[org/gnome/desktop/interface]
+enable-animations=false
+
+[org/gnome/shell]
+favorite-apps=['org.gnome.Nautilus.desktop', 'org.gnome.Ptyxis.desktop', 'org.gnome.DiskUtility.desktop', 'ca.desrt.dconf-editor.desktop', 'org.gnome.Logs.desktop', 'dreamconnect-services.desktop', 'org.gnome.SystemMonitor.desktop', 'dreamconnect-sysinfo.desktop', 'firewall-config.desktop', 'org.gnome.TextEditor.desktop']
+EOF
+}
+no_idle_lock_profile_content() { printf 'user-db:user\nsystem-db:%s\n' "$1"; }  # name
+no_idle_lock_envd_content()    { printf 'DCONF_PROFILE=%s\n' "$1"; }              # name
+no_idle_lock_gis_content()     { printf 'yes\n'; }
 
 # The drop-in configure_no_idle_lock writes into <home>/.config/environment.d is
 # only ever read by `systemd --user` AT MANAGER START, and install.sh starts that
@@ -1312,10 +1402,17 @@ remove_no_idle_lock() {  # name home
   # configure_no_idle_lock clobbered it and --uninstall owes it back; no backup
   # means we wrote it and removing it leaves /etc/dconf as it was; neither is the
   # never-configured box, and `rm -f` is already silent about it.
+  #
+  # "No backup" deletes only a file still holding exactly what we wrote
+  # (file_holds): a repeat --uninstall of an adopted account (#65 keeps its
+  # install.state) finds the box's original already restored and its backup
+  # consumed. The same rule holds for all four files below.
   if [ -f "$dir/profile/$name.dreamconnect.bak" ]; then
     mv -f "$dir/profile/$name.dreamconnect.bak" "$dir/profile/$name"
-  else
+  elif no_idle_lock_profile_content "$name" | file_holds "$dir/profile/$name"; then
     rm -f "$dir/profile/$name"
+  elif [ -f "$dir/profile/$name" ]; then
+    echo "note: left $dir/profile/$name in place: it is not the profile the installer wrote" >&2
   fi
 
   # The keyfile's backup lives outside <name>.d, so restoring it is a move back
@@ -1328,8 +1425,10 @@ remove_no_idle_lock() {  # name home
   if [ -f "$dir/db/$name.d.dreamconnect.bak" ]; then
     mkdir -p "$dir/db/$name.d"
     mv -f "$dir/db/$name.d.dreamconnect.bak" "$dir/db/$name.d/00-display-host"
-  else
+  elif no_idle_lock_keyfile_content | file_holds "$dir/db/$name.d/00-display-host"; then
     rm -f "$dir/db/$name.d/00-display-host"
+  elif [ -f "$dir/db/$name.d/00-display-host" ]; then
+    echo "note: left $dir/db/$name.d/00-display-host in place: it is not the keyfile the installer wrote" >&2
   fi
   # dconf update compiles <name>.d/ into a binary db/<name> beside it, but never
   # deletes that binary once its source directory is gone — so an outright
@@ -1359,8 +1458,13 @@ remove_no_idle_lock() {  # name home
              "$home/.config/gnome-initial-setup-done"; do
       if [ -f "$p.dreamconnect.bak" ]; then
         mv -f "$p.dreamconnect.bak" "$p"
-      elif [ -f "$p" ]; then
+      elif { case "$p" in
+               */dconf-profile.conf) no_idle_lock_envd_content "$name" ;;
+               *)                    no_idle_lock_gis_content ;;
+             esac; } | file_holds "$p"; then
         rm -f "$p"
+      elif [ -f "$p" ]; then
+        echo "note: left $p in place: it is not what the installer wrote" >&2
       fi
     done
     # Our own dash launchers — never a pre-existing file, so always just removed.
@@ -1385,6 +1489,10 @@ remove_no_idle_lock() {  # name home
 # before userdel, or a still-running session holds its files open.
 uninstall_host_account() {  # name protected_user uid
   local name="$1" protected="${2:-}" uid="${3:-}" rc=0
+  # read_install_state sets these in the caller's scope; declared here so the
+  # recorded values stay inside this function. HOST_UID is read and unused: the
+  # uid this function acts on is still the argument.
+  local HOST_ACCOUNT HOST_UID CREATED_ACCOUNT
 
   # The account issue #21 is about: removed outside this tool before --uninstall
   # ever ran. host_account_removable would refuse it — correctly, for a caller
@@ -1404,12 +1512,25 @@ uninstall_host_account() {  # name protected_user uid
   # (issue #30). install.sh clears install.state only on our 0, so that answer
   # orphaned a live account — linger and markers still set — with no record left
   # to retry the removal from.
+  #
+  # And an absence is only certain for an account this installer CREATED (#65).
+  # useradd puts it in `files`, and both statuses that say "not there" — 1, and
+  # 3 (absent from `files`, another source unproven) — rest on `files` having
+  # answered. An adopted account (CREATED_ACCOUNT=0) may live in LDAP or SSSD,
+  # where a dead backend reads exactly like absence; so may an account no state
+  # file vouches for at all. Neither is ever "already gone": refuse, and the
+  # non-zero status keeps install.state.
   if [ -n "$name" ]; then
     passwd_entry "$name" >/dev/null || rc=$?
     case "$rc" in
-      1)
-        echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
-        return 0 ;;
+      1|3)
+        read_install_state
+        if [ "$HOST_ACCOUNT" = "$name" ] && [ "$CREATED_ACCOUNT" = "1" ]; then
+          echo "note: display-host account '$name' is already gone from the passwd source; nothing to remove" >&2
+          return 0
+        fi
+        echo "refusing to remove '$name': the passwd lookup cannot be trusted to show it is gone — install state does not record that the installer created it, so it may live in a passwd source that did not answer; leaving the install state in place" >&2
+        return 1 ;;
       # Not a refusal by host_account_removable's rails and not an absence: the
       # question was never answered. Nothing destructive is attempted, and the
       # non-zero status is what keeps install.state alive for a retry once the

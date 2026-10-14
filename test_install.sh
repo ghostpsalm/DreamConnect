@@ -4091,6 +4091,81 @@ test_accountsservice_marker_round_trips_a_preexisting_file() {
     "install-then-uninstall leaves exactly the original file, no backup residue"
 }
 
+# #65 keeps install.state for an adopted account, so --uninstall can run twice.
+# The first restores the human's original from .bak and consumes the backup; the
+# second then saw "no backup, file present" and took that as our marker, deleting
+# the very file the first run had given back.
+test_remove_accountsservice_marker_leaves_a_restored_original_on_a_second_uninstall() {
+  local dir f orig
+  require_remove_accountsservice_marker "second uninstall" || return 0
+  dir="$TMP/as-rm-twice"; mkdir -p "$dir"
+  f="$dir/dreamconnect-host"; orig="$TMP/as-rm-twice-orig"
+
+  plant_preexisting_accountsservice_file "$f.dreamconnect.bak"
+  cp "$f.dreamconnect.bak" "$orig"
+  accountsservice_marker_content > "$f"
+
+  run_remove_marker "$dir" dreamconnect-host
+  assert_eq "$REMOVE_MARKER_RC" "0" "the first uninstall exits 0 (stderr: $REMOVE_MARKER_OUT)"
+  run_remove_marker "$dir" dreamconnect-host
+  assert_eq "$REMOVE_MARKER_RC" "0" "the second uninstall exits 0 (stderr: $REMOVE_MARKER_OUT)"
+  assert_file_exists "$f" "the restored original survives a second uninstall"
+  cmp -s "$orig" "$f" \
+    || fail "the restored original is still byte-identical after a second uninstall"
+}
+
+# The same bug in the other four files remove_no_idle_lock reverts, both halves:
+# the /etc/dconf pair and the two home files, each restored by the first
+# uninstall and each left alone by the second.
+test_remove_no_idle_lock_leaves_restored_originals_on_a_second_uninstall() {
+  local d home shims prof key envf gisf snap p f
+  require_no_idle_lock "second uninstall" || return 0
+  read -r d home <<<"$(idle_fixture idle-rm-twice)"
+  shims="$TMP/shims-idle-rm-twice"; make_dconf_shim "$shims" >/dev/null
+  prof="$d/profile/dreamconnect-host"
+  key="$d/db/dreamconnect-host.d/00-display-host"
+  envf="$home/.config/environment.d/dconf-profile.conf"
+  gisf="$home/.config/gnome-initial-setup-done"
+  snap="$TMP/idle-rm-twice-orig"; mkdir -p "$snap"
+
+  plant_preexisting_dconf_system_files "$d" dreamconnect-host
+  plant_preexisting_home_files "$home"
+  cp "$prof" "$snap/prof"; cp "$key" "$snap/key"
+  cp "$envf" "$snap/envf"; cp "$gisf" "$snap/gisf"
+
+  run_configure "$d" dreamconnect-host "$home" "$shims"
+  run_remove    "$d" dreamconnect-host "$home" "$shims"
+  assert_eq "$IDLE_RC" "0" "the first uninstall exits 0 (stderr: $IDLE_OUT)"
+  run_remove    "$d" dreamconnect-host "$home" "$shims"
+  assert_eq "$IDLE_RC" "0" "the second uninstall exits 0 (stderr: $IDLE_OUT)"
+
+  for p in prof key envf gisf; do
+    eval "f=\$$p"
+    assert_file_exists "$f" "the restored $p original survives a second uninstall"
+    cmp -s "$snap/$p" "$f" \
+      || fail "the restored $p original is byte-identical after a second uninstall"
+  done
+}
+
+# The other side of the content check: a file with no backup that does NOT hold
+# what the installer wrote is somebody else's, even on a first uninstall, and is
+# left with a note rather than deleted. Our own content is still removed — the
+# existing "removes a marker we created" cases pin that half.
+test_remove_accountsservice_marker_leaves_a_foreign_file_without_a_backup() {
+  local dir f orig
+  require_remove_accountsservice_marker "foreign file" || return 0
+  dir="$TMP/as-rm-foreign"; mkdir -p "$dir"
+  f="$dir/dreamconnect-host"; orig="$TMP/as-rm-foreign-orig"
+  plant_preexisting_accountsservice_file "$f"
+  cp "$f" "$orig"
+
+  run_remove_marker "$dir" dreamconnect-host
+  assert_eq "$REMOVE_MARKER_RC" "0" "leaving a foreign file exits 0"
+  cmp -s "$orig" "$f" || fail "a foreign AccountsService file with no backup is left untouched"
+  assert_contains "$REMOVE_MARKER_OUT" "not the marker the installer wrote" \
+    "leaving it says why"
+}
+
 # Defects #3 and #5 at the LAST unguarded seam. remove_accountsservice_marker is
 # the one function added for slice 6b that never validates its own argument, and
 # it is driven from install.sh's uninstall() with $HOST_ACCOUNT read off a state
@@ -5601,13 +5676,15 @@ test_valid_home_dir_rejects_dotdot_components() {
 
 # /etc/dconf as configure_no_idle_lock leaves it, planted by hand rather than by
 # calling configure: this test is about the REMOVAL contract, and the contents of
-# these two files are already pinned by the slice-5 tests above.
+# these two files are already pinned by the slice-5 tests above. Planted through
+# the library's own content functions, not an abbreviation: remove_no_idle_lock
+# deletes a file with no backup only while it holds exactly what configure wrote
+# (#65), so a shortened keyfile here would read as somebody else's and be kept.
 plant_configured_dconf_tree() {  # dconf_dir name
   local d="$1" name="$2"
   mkdir -p "$d/profile" "$d/db/$name.d"
-  printf 'user-db:user\nsystem-db:%s\n' "$name" > "$d/profile/$name"
-  printf '[org/gnome/desktop/screensaver]\nlock-enabled=false\n' \
-    > "$d/db/$name.d/00-display-host"
+  no_idle_lock_profile_content "$name" > "$d/profile/$name"
+  no_idle_lock_keyfile_content > "$d/db/$name.d/00-display-host"
 }
 
 # THE ISSUE'S CASE. Both halves of the contract at once: the /etc/dconf revert
@@ -10411,6 +10488,280 @@ userdel" "control: an account that IS there still gets the full removal, in orde
     "state gate: install.sh:$rmline is not inside the conditional at line $gline (indented ${#rmindent}, the conditional ${#gindent}) — the state-file deletion has to be gated on the removal having succeeded, or issue #30's failed lookup takes install.state with it"
 }
 
+# --- issue #65: the root probe was per-key, not per-source ---------------------
+#
+# #30 classified getent's ambiguous exit 2 by probing `getent passwd root`. With
+# `passwd: files sss` and a dead SSSD, `files` answers root, the probe says NSS
+# is healthy, and an LDAP-backed adopted account (CREATED_ACCOUNT=0) is reported
+# absent: uninstall_host_account returns 0 and install.state goes with it.
+#
+# CONTRACT UNDER TEST, from the issue's requirements and the owner's ruling (C3):
+#
+#   uninstall_host_account: "no entry" returns 0 only when install.state records
+#     HOST_ACCOUNT=<name> and CREATED_ACCOUNT=1. Otherwise non-zero, nothing run,
+#     install.state byte-identical, and the message names an untrusted lookup.
+#   passwd_entry, getent exit 2, each source in DC_NSSWITCH_CONF probed alone
+#     with `getent -s <source> passwd root`: every source answers => 1; `files`
+#     answers and another does not => 3; otherwise => 2.
+#   install.sh: install.state is deleted only after a CREATED account was
+#     actually removed; an adopted one keeps it.
+
+# The issue's shim, byte for byte: `files` is healthy, the sss source is dead.
+# It ignores which service `-s` named, so root answers whatever is probed.
+make_issue65_getent_shim() {  # dir -> echoes the dir
+  mkdir -p "$1"
+  cat > "$1/getent" <<'EOF'
+#!/bin/sh
+# getent shim: local `files` is healthy, the sss source is dead.
+# Skip a leading "-s <service>" the way real getent accepts it.
+[ "$1" = "-s" ] && shift 2
+[ "$1" = "passwd" ] || exit 2
+case "$2" in
+  root) echo "root:x:0:0:root:/root:/bin/bash"; exit 0 ;;
+  *)    echo "getent: sssd backend unavailable" >&2; exit 2 ;;
+esac
+EOF
+  chmod +x "$1/getent"
+  echo "$1"
+}
+
+# A getent that honours `-s`: root answers only from the services listed in
+# <dir>/alive, and every other key is exit 2 from everywhere. Each probed service
+# is logged to <dir>/probes, so a test can see which sources were asked.
+make_source_aware_getent_shim() {  # dir alive_services... -> echoes the dir
+  local d="$1"; shift
+  mkdir -p "$d"
+  : > "$d/alive"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@" > "$d/alive"
+  : > "$d/probes"
+  cat > "$d/getent" <<'EOF'
+#!/usr/bin/env bash
+here="$(dirname "$0")"
+svc=""
+if [ "${1:-}" = "-s" ]; then svc="$2"; shift 2; echo "$svc" >> "$here/probes"; fi
+[ "${1:-}" = passwd ] && [ "${2:-}" = root ] || exit 2
+if [ -n "$svc" ]; then
+  grep -qxF -- "$svc" "$here/alive" || exit 2
+else
+  [ -s "$here/alive" ] || exit 2
+fi
+echo "root:x:0:0:root:/root:/bin/bash"
+EOF
+  chmod +x "$d/getent"
+  echo "$d"
+}
+
+make_nsswitch_fixture() {  # path passwd_line -> echoes the path
+  mkdir -p "$(dirname "$1")"
+  printf '# fixture\nshadow:    files\n%s\ngroup:     files\n' "$2" > "$1"
+  echo "$1"
+}
+
+# The issue's proof, verbatim: root resolves, the target does not, the account
+# was adopted. The control is the same call with CREATED_ACCOUNT=1: an account
+# useradd made lives in `files`, which answered, so its absence is real (#21).
+test_uninstall_host_account_refuses_an_adopted_account_the_lookup_cannot_find() {
+  local shim conf state before shims log
+  require_uninstall_host_account "#65 adopted" || return 0
+  shim="$(make_issue65_getent_shim "$TMP/getent-65-issue")"
+  conf="$(make_nsswitch_fixture "$TMP/nss-65-issue/nsswitch.conf" 'passwd:    files sss')"
+  state="$TMP/state-65-adopted/install.state"
+  write_state_fixture "$state" ldaphost 987 0
+  cp "$state" "$state.before"
+
+  shims="$TMP/shims-65-adopted"; log="$(make_uninstall_shims "$shims" 0)"
+  DC_NSSWITCH_CONF="$conf" run_uninstall_via_getent "" "$shim" "$shims" "$state" ldaphost '' 987
+  [ "$UNINSTALL_RC" -ne 127 ] || { fail "#65 adopted: exit 127, not a result"; return 0; }
+  [ "$UNINSTALL_RC" -ne 0 ] || fail \
+    "#65 adopted: uninstall_host_account returned 0 for an adopted account whose passwd source did not answer — install.sh would delete install.state for an account that is still live"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" \
+    "#65 adopted: not one of disable-linger, terminate-user or userdel was executed"
+  cmp -s "$state" "$state.before" || fail \
+    "#65 adopted: install.state is not byte-identical after the call"
+  assert_contains "$UNINSTALL_OUT" "ldaphost" "#65 adopted: the refusal names the account"
+  assert_contains "$UNINSTALL_OUT" "cannot be trusted" \
+    "#65 adopted: the refusal names an untrusted lookup"
+  assert_not_contains "$UNINSTALL_OUT" "already gone" \
+    "#65 adopted: the refusal does not claim the account is gone"
+
+  # No state file at all vouches for nothing either.
+  shims="$TMP/shims-65-nostate"; log="$(make_uninstall_shims "$shims" 0)"
+  DC_NSSWITCH_CONF="$conf" run_uninstall_via_getent "" "$shim" "$shims" \
+    "$TMP/state-65-nostate/install.state" ldaphost '' 987
+  [ "$UNINSTALL_RC" -ne 0 ] || fail "#65 no state file: returned 0 for an account nothing records as created"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "#65 no state file: nothing was executed"
+
+  # Control: the same lookup, for an account the installer created.
+  state="$TMP/state-65-created/install.state"
+  write_state_fixture "$state" ldaphost 987 1
+  shims="$TMP/shims-65-created"; log="$(make_uninstall_shims "$shims" 0)"
+  DC_NSSWITCH_CONF="$conf" run_uninstall_via_getent "" "$shim" "$shims" "$state" ldaphost '' 987
+  assert_eq "$UNINSTALL_RC" "0" \
+    "#65 control: a created account the sources report absent is still nothing-to-remove, exit 0"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "#65 control: and still runs nothing"
+}
+
+# passwd_entry's per-source classification, as a table.
+test_passwd_entry_probes_each_configured_source_separately() {
+  local conf shim i
+  declare -F passwd_entry >/dev/null || { fail "passwd_entry() is not defined"; return 0; }
+  #            nsswitch passwd line                              alive    expected
+  local -a lines=('passwd: files sss'        'passwd: files'  'passwd: files sss' 'passwd: files sss'
+                  'passwd: sss files'        'passwd:  files [NOTFOUND=return] sss # ldap'
+                  'passwd:'                  'hosts: files')
+  local -a alive=('files'                    'files'          'files sss'         ''
+                  'sss'                      'files sss'
+                  'files'                    'files')
+  local -a want=(3 1 1 2 2 1 1 1)
+  local -a labels=('files alive, sss dead: absent from files with another source unproven'
+                   'files only, alive: absent'
+                   'files and sss both alive: absent'
+                   'every source dead: the lookup failed'
+                   'only sss alive, files dead: the lookup failed, never 3'
+                   'an action item and a comment are not sources'
+                   'an empty passwd line is the glibc default, files'
+                   'no passwd line is the glibc default, files')
+  for i in "${!lines[@]}"; do
+    conf="$(make_nsswitch_fixture "$TMP/nss-65-table-$i/nsswitch.conf" "${lines[$i]}")"
+    # shellcheck disable=SC2086
+    shim="$(make_source_aware_getent_shim "$TMP/getent-65-table-$i" ${alive[$i]})"
+    DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" ldaphost
+    assert_eq "$PE_RC" "${want[$i]}" "#65 passwd_entry: ${labels[$i]}"
+    assert_eq "$PE_OUT" "" "#65 passwd_entry: ${labels[$i]}: empty stdout"
+  done
+
+  # Status 3 is not an error: nothing on stderr. Status 2 still names the account.
+  conf="$(make_nsswitch_fixture "$TMP/nss-65-quiet/nsswitch.conf" 'passwd: files sss')"
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-quiet" files)"
+  DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" ldaphost
+  assert_eq "$PE_ERR" "" "#65 passwd_entry: status 3 is silent"
+  assert_eq "$(cat "$shim/probes")" "files
+sss" "#65 passwd_entry: each configured source is probed alone, in order"
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-loud")"
+  DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" ldaphost
+  assert_contains "$PE_ERR" "ldaphost" "#65 passwd_entry: status 2 names the account"
+
+  # The action item really is not probed.
+  conf="$(make_nsswitch_fixture "$TMP/nss-65-action/nsswitch.conf" 'passwd: files [NOTFOUND=return] sss')"
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-action" files sss)"
+  DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" ldaphost
+  assert_eq "$(cat "$shim/probes")" "files
+sss" "#65 passwd_entry: an action item is never probed as a service"
+
+  # No nsswitch.conf at all: files, the glibc default.
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-nofile" files)"
+  DC_NSSWITCH_CONF="$TMP/nss-65-there-is-no-such-file" try_passwd_entry "$shim" "" ldaphost
+  assert_eq "$PE_RC" "1" "#65 passwd_entry: no nsswitch.conf is the glibc default, files"
+
+  # One that is there and cannot be read: which sources serve this box is unknown.
+  conf="$(make_nsswitch_fixture "$TMP/nss-65-unreadable/nsswitch.conf" 'passwd: files')"
+  chmod 000 "$conf"
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-unreadable" files)"
+  DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" ldaphost
+  chmod 600 "$conf"
+  assert_eq "$PE_RC" "2" "#65 passwd_entry: an unreadable nsswitch.conf is a failed lookup"
+
+  # A found account is unchanged: no source is probed at all.
+  shim="$(make_getent_shim "$TMP/getent-65-found" serving "$(make_removal_passwd_db)")"
+  DC_NSSWITCH_CONF="$conf" try_passwd_entry "$shim" "" dreamconnect-host
+  assert_eq "$PE_RC" "0" "#65 passwd_entry: a found account is still exit 0"
+}
+
+# Status 3 at every caller: trusted only for an account the installer created,
+# refused where an entry is needed, and still a create in ensure_host_account —
+# SSSD never answers the root probe, so refusing there would refuse every fresh
+# install on a healthy sss box.
+test_status_3_at_every_passwd_entry_call_site() {
+  local conf shim state before shims log asdir
+  require_uninstall_host_account "#65 status 3" || return 0
+  require_ensure_host_account "#65 status 3" || return 0
+  conf="$(make_nsswitch_fixture "$TMP/nss-65-sites/nsswitch.conf" 'passwd: files sss')"
+  shim="$(make_source_aware_getent_shim "$TMP/getent-65-sites" files)"
+  # Local and exported: run_under_set_e's child shell needs it, and it must not
+  # outlive this test.
+  local DC_NSSWITCH_CONF="$conf"; export DC_NSSWITCH_CONF
+
+  state="$TMP/state-65-sites-adopted/install.state"
+  write_state_fixture "$state" ldaphost 987 0
+  cp "$state" "$state.before"
+  shims="$TMP/shims-65-sites-adopted"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$shim" "$shims" "$state" ldaphost '' 987
+  [ "$UNINSTALL_RC" -ne 0 ] || fail "#65 status 3, adopted: uninstall_host_account returned 0"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "#65 status 3, adopted: nothing was executed"
+  cmp -s "$state" "$state.before" || fail "#65 status 3, adopted: install.state changed"
+
+  state="$TMP/state-65-sites-created/install.state"
+  write_state_fixture "$state" ldaphost 987 1
+  shims="$TMP/shims-65-sites-created"; log="$(make_uninstall_shims "$shims" 0)"
+  run_uninstall_via_getent "" "$shim" "$shims" "$state" ldaphost '' 987
+  assert_eq "$UNINSTALL_RC" "0" \
+    "#65 status 3, created: absent from files, where useradd put it — nothing to remove, exit 0"
+  assert_eq "$(cat "$log" 2>/dev/null || true)" "" "#65 status 3, created: nothing was executed"
+
+  run_under_set_e "$shim" "" "$state" 'host_account_removable ldaphost kogies'
+  [ "$SETE_RC" -ne 0 ] || fail "#65 status 3: host_account_removable authorised a removal with no entry"
+  assert_contains "$SETE_ERR" "lookup failed" "#65 status 3: host_account_removable refuses as a failed lookup"
+
+  run_under_set_e "$shim" "" "$state" 'resolve_host_identity ldaphost kogies'
+  [ "$SETE_RC" -ne 0 ] || fail "#65 status 3: resolve_host_identity resolved an account with no entry"
+  assert_contains "$SETE_ERR" "ldaphost" "#65 status 3: resolve_host_identity refuses, naming the account"
+
+  asdir="$TMP/as-65-sites"; mkdir -p "$asdir"
+  run_ensure_dry_via_getent "$shim" "$asdir" ldaphost
+  assert_eq "$ENSURE_RC" "0" "#65 status 3: ensure_host_account still creates, exit 0"
+  assert_contains "$(dry_lines_for useradd)" "ldaphost" "#65 status 3: ensure_host_account reaches useradd"
+}
+
+# The owner's ruling (C3), executed rather than read: install.sh's account block,
+# from `local account_removed=` through the conditional that deletes
+# install.state, is cut out of uninstall() and run against stubs. install.sh
+# itself cannot run here (root, real systemd, top-level work on sourcing).
+STATE_BLOCK_OUT=""
+run_uninstall_state_block() {  # created_account uninstall_rc state_file -> STATE_BLOCK_OUT
+  local sh start rmline gate gindent end
+  sh="$HERE/install.sh"
+  start="$(first_code_line "$sh" 'local account_removed=')"
+  rmline="$(first_code_line "$sh" 'rm -f.*install_state_file' "${start:-0}")"
+  [ -n "$start" ] && [ -n "$rmline" ] || { STATE_BLOCK_OUT="cannot run: block not found"; return 1; }
+  gate="$(awk -v s="$start" -v e="$rmline" \
+    'NR > s && NR < e && $0 ~ /^[[:space:]]*if[[:space:]]/ { g = $0 } END { print g }' "$sh")"
+  gindent="${gate%%[![:space:]]*}"
+  end="$(awk -v s="$rmline" -v f="${gindent}fi" 'NR > s && $0 == f { print NR; exit }' "$sh")"
+  [ -n "$end" ] || { STATE_BLOCK_OUT="cannot run: block end not found"; return 1; }
+  STATE_BLOCK_OUT="$(
+    CREATED_ACCOUNT="$1" HOST_ACCOUNT=ldaphost PROTECTED_USER=kogies target_uid=987 \
+    UH_RC="$2" STATE="$3" bash -c '
+      install_state_file() { echo "$STATE"; }
+      uninstall_host_account() { echo "CALLED uninstall_host_account $*"; return "$UH_RC"; }
+      block() { eval "$1"; }
+      block "$(cat)"
+    ' < <(sed -n "${start},${end}p" "$sh") 2>&1)"
+}
+
+test_install_sh_keeps_install_state_for_an_adopted_account() {
+  local state
+  state="$TMP/state-65-block/install.state"
+  [ -f "$HERE/install.sh" ] || { fail "install.sh is present"; return 0; }
+
+  write_state_fixture "$state" ldaphost 987 0
+  run_uninstall_state_block 0 0 "$state" || { fail "#65 state block: $STATE_BLOCK_OUT"; return 0; }
+  assert_file_exists "$state" \
+    "#65 adopted account: install.state survives uninstall — the account was never removed"
+  assert_not_contains "$STATE_BLOCK_OUT" "CALLED uninstall_host_account" \
+    "#65 adopted account: an adopted account is still never removed"
+  assert_contains "$STATE_BLOCK_OUT" "state preserved" \
+    "#65 adopted account: the operator is told the state was kept"
+
+  # Controls: a created account that was removed clears the state; one whose
+  # removal failed keeps it.
+  write_state_fixture "$state" ldaphost 987 1
+  run_uninstall_state_block 1 0 "$state" || { fail "#65 state block: $STATE_BLOCK_OUT"; return 0; }
+  assert_file_absent "$state" "#65 control: a created account that was removed clears install.state"
+  write_state_fixture "$state" ldaphost 987 1
+  run_uninstall_state_block 1 1 "$state" || { fail "#65 state block: $STATE_BLOCK_OUT"; return 0; }
+  assert_file_exists "$state" "#65 control: a created account whose removal failed keeps install.state"
+}
+
 # --- issue #32: the installer lock -------------------------------------------
 #
 # WHY THIS SLICE EXISTS: nothing serialised install.state's read
@@ -11290,6 +11641,9 @@ for CURRENT in \
   test_remove_accountsservice_marker_removes_a_marker_we_created \
   test_remove_accountsservice_marker_is_a_no_op_when_nothing_exists \
   test_accountsservice_marker_round_trips_a_preexisting_file \
+  test_remove_accountsservice_marker_leaves_a_restored_original_on_a_second_uninstall \
+  test_remove_no_idle_lock_leaves_restored_originals_on_a_second_uninstall \
+  test_remove_accountsservice_marker_leaves_a_foreign_file_without_a_backup \
   test_remove_accountsservice_marker_refuses_malformed_account_names \
   test_ensure_host_account_refuses_malformed_account_names \
   test_library_defines_host_account_installable \
@@ -11409,6 +11763,10 @@ for CURRENT in \
   test_passwd_entry_tells_an_absent_account_from_a_failed_lookup \
   test_a_failed_passwd_lookup_refuses_at_every_call_site \
   test_uninstall_host_account_refuses_a_failed_lookup_and_keeps_install_state \
+  test_uninstall_host_account_refuses_an_adopted_account_the_lookup_cannot_find \
+  test_passwd_entry_probes_each_configured_source_separately \
+  test_status_3_at_every_passwd_entry_call_site \
+  test_install_sh_keeps_install_state_for_an_adopted_account \
   test_library_defines_the_install_lock_functions \
   test_the_install_lock_lives_beside_the_state_file \
   test_a_second_run_cannot_take_the_installer_lock \
