@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run DreamConnect's unit tests: the Java bootstrap classes and the Python
-# daemon command parser. No external test frameworks required.
+# Run DreamConnect's unit tests: the Java bootstrap classes, the Python suites,
+# and the shell harnesses. No external test frameworks required.
 # -E so the ERR trap below is inherited by functions and subshells, which keeps
 # its reach uniform rather than dependent on how a suite happens to be invoked.
 # In every shape this script uses today the parent would fire the trap anyway --
@@ -55,20 +55,30 @@ fi
 
 echo
 section "Python daemon tests"
-python3 -m unittest -v "$HERE/runtime/test_daemon.py" 2>&1 | tail -20 \
-  || python3 "$HERE/runtime/test_daemon.py"
+# Every Python suite goes through runtime/dc_testrunner.py, which prints each
+# case as `ok  : <id>` / `FAIL  : <id> # ...` / `SKIP  : <id>` (#87). unittest's
+# own lines parse as nothing, and these used to be piped through `tail` besides,
+# so not one Python case was a check: a deleted or weakened one left its section
+# as green as before. Nothing is truncated, and the daemon suite is no longer
+# re-run on failure, which split a failing case's output across two runs.
+# runtime/test_dc_testrunner.py holds this file to it, a fifth suite included.
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_daemon.py"
 
 echo
 section "Python session-discovery tests"
-python3 "$HERE/runtime/test_discovery.py" 2>&1 | tail -6
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_discovery.py"
 
 echo
 section "Python supervisor tests"
-python3 "$HERE/runtime/test_sessiond.py" 2>&1 | tail -6
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_sessiond.py"
 
 echo
 section "Python greeter tests"
-python3 "$HERE/runtime/test_greeter.py" 2>&1 | tail -6
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_greeter.py"
+
+echo
+section "Python test runner tests"
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_dc_testrunner.py"
 
 echo
 section "Installer shell tests"
