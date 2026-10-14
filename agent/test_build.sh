@@ -270,7 +270,7 @@ reads_like_an_unrunnable_verifier() {  # text
 # its HERE=... line and mkdir/rm for the steps before verification; the compile
 # and package tools are included so that a build.sh which wrongly sailed past
 # verification would fail on its own merits rather than on a missing tool.
-BUILD_SH_TOOLS="dirname mkdir rm cp cat ls find javac jar unzip"
+BUILD_SH_TOOLS="dirname mkdir mktemp rm cp cat ls find javac jar unzip"
 
 toolbox_without_sha256sum() {  # sandbox -> prints a PATH dir
   local sb="$1" box t real
@@ -486,6 +486,110 @@ test_a_correctly_hashed_cached_jar_still_builds() {
     "correctly hashed cached jar: the agent jar is still assembled"
 }
 
+# Cases G and H -- issue #48. Verification is worth nothing if the bytes it
+# checked are not the bytes consumed. build.sh used to hash lib/'s jar and then
+# read the same path again for javac and unzip, so anyone able to write lib/ in
+# between got unhashed classes shaded into an agent that runs as root.
+#
+# The window is opened deterministically, the way the issue's breaker did it: a
+# sandbox `javac` that, on its first call (the boot compile, which is after
+# verification and before either read of the jar), acts on lib/'s jar and then
+# execs the real javac with its arguments untouched. The real javac is named by
+# absolute path; a bare `javac` would find this wrapper again on the sandbox PATH.
+#
+# Both need the real fixture -- only a hash-matching jar gets past verification
+# to reach the window -- so a missing one is a failure, as in Case B (#46).
+install_javac_that_tampers_with_lib() {  # sandbox action -> sets SWAP_MARKER
+  local sb="$1" action="$2" real
+  real="$(command -v javac)"
+  SWAP_MARKER="$sb/javac-tampered"
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'if [ ! -e %q ]; then\n' "$SWAP_MARKER"
+    printf '  %s\n' "$action"
+    printf '  : > %q\n' "$SWAP_MARKER"
+    echo 'fi'
+    printf 'exec %q "$@"\n' "$real"
+  } > "$sb/bin/javac"
+  chmod +x "$sb/bin/javac"
+}
+
+# Sets FIXTURE rather than printing it: called as $(...), its fail/skip would
+# count in a subshell and be lost, and the case would read as a pass.
+full_build_prereqs() {  # -> sets FIXTURE, or fails/skips and returns 1
+  local t
+  FIXTURE="$(fixture_jar)" || {
+    fail "no $BB_JAR_NAME matching the pinned hash is available, so a post-verification swap cannot be staged (#46). Run scripts/fetch-test-fixtures.sh, or set DC_BYTEBUDDY_JAR=/path/to/$BB_JAR_NAME"
+    return 1
+  }
+  for t in javac jar unzip; do
+    command -v "$t" >/dev/null || { skip "$t not installed; cannot run a full build"; return 1; }
+  done
+}
+
+# Case G -- the issue's own reproduction. The poisoned jar is the real one plus
+# net/PWNED.class, so it would shade cleanly and compile cleanly: nothing but the
+# hash tells it apart, which is the point. The class bytes are not a valid class
+# on purpose -- neither unzip nor jar looks inside, and it never needs to load.
+test_a_jar_swapped_after_verification_never_reaches_the_agent_jar() {
+  local sb src work poisoned listing
+  full_build_prereqs || return 0
+  src="$FIXTURE"
+
+  sb="$(make_sandbox)"
+  cp "$src" "$sb/lib/$BB_JAR_NAME"
+  work="$(mktemp -d "$TMP/poison.XXXXXX")"
+  poisoned="$work/poisoned.jar"
+  cp "$src" "$poisoned"
+  mkdir -p "$work/add/net"
+  printf 'payload that was never hashed\n' > "$work/add/net/PWNED.class"
+  jar --update --file "$poisoned" -C "$work/add" net/PWNED.class \
+    || { fail "swapped jar: could not build the poisoned jar"; return 0; }
+  install_javac_that_tampers_with_lib "$sb" \
+    "cp $(printf '%q' "$poisoned") $(printf '%q' "$sb/lib/$BB_JAR_NAME")"
+
+  run_build "$sb"
+
+  # Positive control: a swap that never happened would let this case pass hollow.
+  assert_file_exists "$SWAP_MARKER" \
+    "swapped jar: the sandbox javac must have run, or no swap was ever attempted"
+  assert_ne "$(sha256sum < "$sb/lib/$BB_JAR_NAME" | cut -d' ' -f1)" "$BB_SHA256" \
+    "swapped jar: lib/ must hold the poisoned jar after the build, or the swap did not happen"
+
+  assert_eq "$RC" "0" "swapped jar: the build of the verified bytes succeeds"
+  assert_file_exists "$sb/target/dist/dreamconnect-agent.jar" \
+    "swapped jar: the agent jar is assembled from the verified bytes"
+  listing="$(unzip -l "$sb/target/dist/dreamconnect-agent.jar" 2>&1)"
+  assert_not_contains "$listing" "net/PWNED.class" \
+    "swapped jar: a class that was never hashed must never be shaded into the agent jar"
+  assert_contains "$listing" "net/bytebuddy/ByteBuddy.class" \
+    "swapped jar: ByteBuddy itself is still shaded in"
+}
+
+# Case H -- the concurrent-build half of #48: another build's mismatch cleanup
+# (`rm -f "$BB_JAR"`) deleting a jar this build has already verified. This build
+# must go on to consume what it verified, not fall over on a path that is gone.
+test_a_jar_deleted_after_verification_does_not_break_the_build() {
+  local sb src
+  full_build_prereqs || return 0
+  src="$FIXTURE"
+
+  sb="$(make_sandbox)"
+  cp "$src" "$sb/lib/$BB_JAR_NAME"
+  install_javac_that_tampers_with_lib "$sb" \
+    "rm -f $(printf '%q' "$sb/lib/$BB_JAR_NAME")"
+
+  run_build "$sb"
+
+  assert_file_exists "$SWAP_MARKER" \
+    "deleted jar: the sandbox javac must have run, or nothing was ever deleted"
+  assert_file_absent "$sb/lib/$BB_JAR_NAME" \
+    "deleted jar: lib/'s jar must be gone after the build, or the delete did not happen"
+  assert_eq "$RC" "0" "deleted jar: a jar already verified is still consumed"
+  assert_file_exists "$sb/target/dist/dreamconnect-agent.jar" \
+    "deleted jar: the agent jar is still assembled"
+}
+
 # The suite's own reporting rule (#68). Case F above still skips on a box where
 # chmod 000 leaves the jar readable, and Case B skips without javac/jar/unzip; on
 # either, the old loop named the case in the PASS list. Driven through the
@@ -579,6 +683,8 @@ for CURRENT in \
   test_a_correctly_hashed_cached_jar_still_builds \
   test_a_skipped_case_is_never_reported_as_a_pass \
   test_the_result_loop_reports_a_real_skip_as_skipped \
+  test_a_jar_swapped_after_verification_never_reaches_the_agent_jar \
+  test_a_jar_deleted_after_verification_does_not_break_the_build \
   test_the_real_agent_lib_cache_is_never_written
 do
   before=$FAILURES
