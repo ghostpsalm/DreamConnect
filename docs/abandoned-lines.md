@@ -47,8 +47,13 @@ exists, so the merge kept `main`'s deletion. The branch's other four issues
 What that leaves open: a box installed *before* autologin was removed still has
 `/etc/gdm/custom.conf.dreamconnect.bak`, still logs in automatically, and
 today's `--uninstall` reverts neither. That is an upgrade path, not a defect in
-the current installer — decide it on issue #22, rather than by resurrecting the
-code.
+the current installer. **The owner decided it on issue #22 on 2026-10-14:** it is
+a documented manual step, not new `--uninstall` code. The steps are in
+`docs/troubleshooting.md` ("Upgraded box still logs in automatically"). The six
+`test_disable_autologin_*` cases the merge left behind in `test_install.sh` were
+defined but never registered, so they never ran. They were deleted.
+`test_every_defined_test_function_is_registered` now fails the gate on any case
+defined that way.
 
 ## 2026-09-07 — the multi-session-picker line
 
