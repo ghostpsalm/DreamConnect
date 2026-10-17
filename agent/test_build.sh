@@ -514,6 +514,15 @@ install_javac_that_tampers_with_lib() {  # sandbox action -> sets SWAP_MARKER
   chmod +x "$sb/bin/javac"
 }
 
+# The fixture is verified bytes, not a file this suite owns: DC_BYTEBUDDY_JAR may
+# name a read-only, content-addressed copy (a Nix store path is 0444), and a
+# plain cp carries that mode over. A copy the window then has to overwrite must
+# be writable, as lib/'s jar is after a real download -- otherwise the staged
+# swap fails on permissions and Case G's positive control reports no swap.
+writable_copy() {  # src dest
+  cp "$1" "$2" && chmod u+w "$2"
+}
+
 # Sets FIXTURE rather than printing it: called as $(...), its fail/skip would
 # count in a subshell and be lost, and the case would read as a pass.
 full_build_prereqs() {  # -> sets FIXTURE, or fails/skips and returns 1
@@ -537,10 +546,12 @@ test_a_jar_swapped_after_verification_never_reaches_the_agent_jar() {
   src="$FIXTURE"
 
   sb="$(make_sandbox)"
-  cp "$src" "$sb/lib/$BB_JAR_NAME"
+  writable_copy "$src" "$sb/lib/$BB_JAR_NAME" \
+    || { fail "swapped jar: could not stage the verified jar in the sandbox"; return 0; }
   work="$(mktemp -d "$TMP/poison.XXXXXX")"
   poisoned="$work/poisoned.jar"
-  cp "$src" "$poisoned"
+  writable_copy "$src" "$poisoned" \
+    || { fail "swapped jar: could not stage the jar to poison"; return 0; }
   mkdir -p "$work/add/net"
   printf 'payload that was never hashed\n' > "$work/add/net/PWNED.class"
   jar --update --file "$poisoned" -C "$work/add" net/PWNED.class \
