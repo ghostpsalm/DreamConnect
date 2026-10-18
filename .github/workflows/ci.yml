@@ -39,7 +39,8 @@ jobs:
       # factory/config.json's gate_accepted_skips are checks a confined Factory gate cannot run
       # (they need sudo; the #27 sticky-bit reproductions). Accepting them there is only honest
       # while they run somewhere: this runner has passwordless sudo, so each must have run and
-      # passed here, by its exact name -- skipped, renamed or missing is red.
+      # passed here, by its exact name -- skipped, renamed or missing is red -- and nothing else
+      # may skip here either.
       - name: Accepted skips ran here
         run: |
           python3 - "$RUNNER_TEMP/gate.log" <<'PY'
@@ -54,5 +55,11 @@ jobs:
           for leg in bad:
               print(f"accepted skip did not run and pass in CI: {leg}")
           print(f"{len(accepted) - len(bad)} of {len(accepted)} accepted skips ran and passed")
-          sys.exit(1 if bad else 0)
+          # Nothing skips on this runner. The Factory matches an accepted skip by its name or a
+          # prefix of it ending at " ", ":", "(" or "-", so a new case named after an accepted one
+          # would be accepted there too: here every skip is red, whatever its name.
+          skipped = [l for l in log if l.startswith("SKIP  : ")]
+          for l in skipped:
+              print(f"skipped in CI, where every check can run: {l[len('SKIP  : '):]}")
+          sys.exit(1 if bad or skipped else 0)
           PY
