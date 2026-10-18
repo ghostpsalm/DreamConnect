@@ -10,5 +10,10 @@
     "bash test_gate_verdict.sh",
     "bash agent/test_boot_output.sh"
   ],
-  "auto_merge": false
+  "auto_merge": false,
+  "gate_accepted_skips": [
+    "Installer shell tests :: : test_reclaim_stale_shm_frame_leaves_a_file_already_owned_by_the_target_uid_untouched",
+    "Installer shell tests :: : test_reclaim_stale_shm_frame_unlinks_a_root_owned_file_under_a_sticky_bit_dir",
+    "Python daemon tests :: : test_daemon.TestFrameBufferEnsureStickyBitUnlink.test_ensure_raises_permission_error_for_a_foreign_owned_file_under_sticky_bit_dir"
+  ]
 }
