@@ -88,6 +88,51 @@ re-run it once the first has finished. The kernel drops the lock when the holder
 exits, including on a crash or a kill, so there is never a stale lock to clear by
 hand.
 
+## ScreenConnect takes up to 150 s to start after a reboot (backstage)
+
+This is the start wait (#102), and it is intended. On a backstage install, the
+ScreenConnect unit has a second drop-in, `dreamconnect-wait.conf`, beside
+`dreamconnect.conf`. Its `ExecStartPre=` holds the client until four things
+are true:
+
+- the backstage session's frame exists;
+- its daemon answers `PING`;
+- the shell has published `dreamconnect-display.env`;
+- root has registered the session.
+
+Without the wait, ScreenConnect starts before all of these. Its JVM then comes
+up with no display, and it shows nothing until somebody restarts it.
+
+The wait gives up after 150 s. ScreenConnect then starts anyway, because a
+broken bridge must not also cost you the remote way in. Its log line names
+whatever was still missing:
+
+```sh
+journalctl -b -u 'connectwisecontrol-*' | grep dreamconnect-wait
+```
+
+`install.sh` restarts the client unit, so that restart can also take up to
+150 s on a box whose daemon is not up yet. A classic (attended) install has no
+wait, because its daemon only starts at login. Re-installing in classic mode
+removes a wait left behind by an earlier backstage install.
+
+The agent also retries a session it refused, every 2 s. So a daemon that
+restarts later, or comes up after the wait gave up, is picked up without
+restarting ScreenConnect. The client log then shows `recovered from an earlier
+refusal`.
+
+## The daemon crash-loops at startup with "cannot use the shared-memory frame"
+
+This is #27's message, and since #102 it appears when the daemon **starts**.
+Before #102 it appeared when the first client attached. The daemon now creates
+its `/dev/shm` frame at startup, so the agent can see the session before
+anyone connects. A frame owned by another account that cannot be reclaimed
+therefore stops the daemon straight away, and `Restart=always` repeats it every
+2 s.
+
+The fix is unchanged: delete the frame the message names, as root, and the next
+restart succeeds.
+
 ## Upgraded box still logs in automatically / `custom.conf.dreamconnect.bak` left behind
 
 Only a box first installed **before** GDM autologin was removed from DreamConnect

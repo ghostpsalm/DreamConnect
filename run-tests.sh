@@ -77,6 +77,10 @@ section "Python greeter tests"
 python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_greeter.py"
 
 echo
+section "Python start-wait tests"
+python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_wait_ready.py"
+
+echo
 section "Python test runner tests"
 python3 "$HERE/runtime/dc_testrunner.py" "$HERE/runtime/test_dc_testrunner.py"
 

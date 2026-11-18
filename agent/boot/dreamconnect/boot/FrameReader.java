@@ -38,18 +38,35 @@ final class FrameReader {
         }
     }
 
+    /**
+     * Map the frame afresh. Everything is checked in locals and the fields are
+     * assigned only once the mapping is a real frame (#102): the daemon now
+     * publishes an empty file at startup, before its first frame, and a
+     * mapping assigned before the check left {@code map} non-null and too
+     * short to hold a header. ensure() then never remapped, its geometry read
+     * threw on every call, and pixel() stayed black after the frame was
+     * written — only pixels(), which remaps on any exception, recovered.
+     */
     private void remap() throws Exception {
         if (raf != null) try { raf.close(); } catch (Exception ignored) {}
-        raf = new RandomAccessFile(path, "r");
-        long len = raf.length();
-        map = raf.getChannel().map(FileChannel.MapMode.READ_ONLY, 0, len);
-        map.order(ByteOrder.LITTLE_ENDIAN);
-        mapInts = map.asIntBuffer();   // inherits LITTLE_ENDIAN; index i == byte 4*i
-        long magic = map.getInt(0) & 0xffffffffL;
-        if (magic != MAGIC) throw new Exception("bad magic " + Long.toHexString(magic));
-        width = map.getInt(8);
-        height = map.getInt(12);
-        stride = map.getInt(16);
+        raf = null;
+        RandomAccessFile r = new RandomAccessFile(path, "r");
+        try {
+            long len = r.length();
+            if (len < HEADER) throw new Exception("no frame yet (" + len + " bytes)");
+            MappedByteBuffer m = r.getChannel().map(FileChannel.MapMode.READ_ONLY, 0, len);
+            m.order(ByteOrder.LITTLE_ENDIAN);
+            long magic = m.getInt(0) & 0xffffffffL;
+            if (magic != MAGIC) throw new Exception("bad magic " + Long.toHexString(magic));
+            raf = r;
+            map = m;
+            mapInts = m.asIntBuffer();   // inherits LITTLE_ENDIAN; index i == byte 4*i
+            width = m.getInt(8);
+            height = m.getInt(12);
+            stride = m.getInt(16);
+        } finally {
+            if (raf != r) try { r.close(); } catch (Exception ignored) {}
+        }
     }
 
     /** ARGB of a single pixel (for Robot.getPixelColor). */

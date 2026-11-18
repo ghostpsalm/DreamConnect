@@ -230,6 +230,7 @@ public class BootTests {
                 new NamedTest("testNoNamedAwtVkNeedsTheDeletedFallback", BootTests::testNoNamedAwtVkNeedsTheDeletedFallback),
                 new NamedTest("testFrameReader", BootTests::testFrameReader),
                 new NamedTest("testFrameReaderNeverBlackMidWrite", BootTests::testFrameReaderNeverBlackMidWrite),
+                new NamedTest("testFrameReaderRecoversFromTheEmptyStartupFrame", BootTests::testFrameReaderRecoversFromTheEmptyStartupFrame),
                 new NamedTest("testCurateLogonSessions", BootTests::testCurateLogonSessions),
                 new NamedTest("testCurateKeepsEverySessionWithALiveDaemon", BootTests::testCurateKeepsEverySessionWithALiveDaemon),
                 new NamedTest("testCurateOrdersTheConfiguredSessionFirst", BootTests::testCurateOrdersTheConfiguredSessionFirst),
@@ -271,6 +272,9 @@ public class BootTests {
                 new NamedTest("testRunnerCatchesEachTestAndKeepsGoing", BootTests::testRunnerCatchesEachTestAndKeepsGoing),
                 new NamedTest("testFaultSelfTestExitsNonZeroAfterContinuing", BootTests::testFaultSelfTestExitsNonZeroAfterContinuing),
                 new NamedTest("testFaultSelfTestForkGuardFailsRatherThanSkips", BootTests::testFaultSelfTestForkGuardFailsRatherThanSkips),
+                // Resets Bridge's resolution state before and after itself, so it
+                // hands the trio below an unresolved JVM, never its temp session.
+                new NamedTest("testRefusedResolutionIsRetried", BootTests::testRefusedResolutionIsRetried),
                 // Last, and in this order: both mutate Bridge's process-wide static
                 // state (daemon/frame, and shm=/socket=/label= config). Add new tests
                 // ABOVE this line.
@@ -1360,6 +1364,48 @@ public class BootTests {
         int[] px = fr.pixels(0, 0, w, h);
         check(px[1] == 0xFF332211,
               "mid-write pixels() returns real pixels, not black", "0x" + Integer.toHexString(px[1]));
+    }
+
+    /**
+     * #102, review finding 4. The daemon publishes an empty frame at startup so
+     * the agent can see its session before the first frame arrives, which makes
+     * the 0-byte file the normal state at boot. pixel() reading it must give
+     * black, and must give the real pixel once the daemon has written a frame
+     * into that same file: remap() used to assign the too-short mapping before
+     * its check, after which ensure() never remapped and pixel() was black for
+     * good. Only pixels() recovered, through its catch.
+     */
+    private static void testFrameReaderRecoversFromTheEmptyStartupFrame() throws Exception {
+        File f = File.createTempFile("dctest-empty", ".frame");
+        f.deleteOnExit();
+        FrameReader fr = new FrameReader(f.getAbsolutePath());
+        int before = fr.pixel(1, 0);
+        check(before == 0xFF000000,
+              "pixel() on the empty startup frame is opaque black, not an exception",
+              "0x" + Integer.toHexString(before));
+
+        int w = 4, h = 2, stride = w * 4;
+        ByteBuffer bb = ByteBuffer.allocate(64 + stride * h).order(ByteOrder.LITTLE_ENDIAN);
+        bb.putInt(0, 0x31464344);
+        bb.putInt(4, 1);
+        bb.putInt(8, w);
+        bb.putInt(12, h);
+        bb.putInt(16, stride);
+        bb.putLong(24, 1);
+        bb.putLong(32, 1);
+        int off = 64 + 1 * 4;       // pixel (1,0) = 0xFF332211
+        bb.put(off, (byte) 0x11);
+        bb.put(off + 1, (byte) 0x22);
+        bb.put(off + 2, (byte) 0x33);
+        // Into the same file, as the daemon's ftruncate + header does: a new
+        // inode would let a reader recover for the wrong reason.
+        try (FileOutputStream fos = new FileOutputStream(f, true)) {
+            fos.write(bb.array());
+        }
+        int after = fr.pixel(1, 0);
+        check(after == 0xFF332211,
+              "once the daemon writes its first frame, pixel() reads it with the same reader",
+              "0x" + Integer.toHexString(after));
     }
 
     /** A stand-in for ScreenConnect's Messages$LogonSessionInfo2: the curate
@@ -3407,6 +3453,61 @@ public class BootTests {
               (attached == null ? "null" : q(attached.expectedUser())));
         check(attached != null && attached != Bridge.clientFor(FALLBACK),
               "and it is not the client for the static args reused under a new name");
+    }
+
+    /**
+     * #102. A refusal is retried, so a JVM that resolved before its session's
+     * daemon was up attaches once it is, with no restart.
+     *
+     * ScreenConnect's service JVM starts on boot before the DreamConnect
+     * daemons, and its first picker probe resolves: the registry describes the
+     * display but no frame exists yet, so resolution refuses. That refusal used
+     * to be latched for the life of the JVM, and the service showed nothing
+     * until it was restarted. Driven through resolveForThisChild itself, against
+     * a registry built here and a clock passed in, so what is pinned is the
+     * latch and not a helper.
+     *
+     * Three scenarios, three names: the refusal, the backoff that holds it, and
+     * the recovery. A check name is printed once per run (#78, #81).
+     */
+    private static void testRefusedResolutionIsRetried() throws Exception {
+        Path dir = Files.createTempDirectory("dcboot-retry");
+        Bridge.resetResolutionForTests();
+        try {
+            long myUid = uidOf(dir);
+            String me = Files.getOwner(dir).getName();
+            Path shm = dir.resolve("frame");
+            Path sock = dir.resolve("dreamconnect.sock");
+            Path entry = dir.resolve(String.valueOf(myUid));
+            Files.writeString(entry, "uid=" + myUid + "\nuser=" + me + "\ndisplay=:42\nshm=" + shm
+                    + "\nsocket=" + sock + "\nlabel=[Backstage]\n");
+            chmod(dir, "rwxr-xr-x");
+            chmod(entry, "rw-r--r--");
+
+            long t0 = 1_000_000L;
+            Bridge.resolveForThisChild(dir, myUid, ":42", t0);
+            check(Bridge.refusingForTests(),
+                  "with no frame or daemon yet, a described display's resolution refuses");
+
+            // The daemon comes up: the empty frame it publishes at startup, and its socket.
+            Files.createFile(shm);
+            try (RecordingServer srv = new RecordingServer(sock, "PONG\n")) {
+                long reads = Bridge.registryReadCount();
+                Bridge.resolveForThisChild(dir, myUid, ":42", t0 + Bridge.REFUSAL_RETRY_MS - 1);
+                check(Bridge.refusingForTests() && Bridge.registryReadCount() == reads,
+                      "a refused resolution is not retried within the backoff",
+                      "refusing=" + Bridge.refusingForTests() + " reads " + reads + " -> "
+                      + Bridge.registryReadCount());
+
+                Bridge.resolveForThisChild(dir, myUid, ":42", t0 + Bridge.REFUSAL_RETRY_MS);
+                check(!Bridge.refusingForTests() && shm.toString().equals(Bridge.shmPathForTests()),
+                      "once the frame and daemon appear, resolution attaches without a restart",
+                      "refusing=" + Bridge.refusingForTests() + " shm=" + Bridge.shmPathForTests());
+            }
+        } finally {
+            Bridge.resetResolutionForTests();
+            rmTree(dir);
+        }
     }
 
     /**

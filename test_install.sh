@@ -7133,6 +7133,96 @@ test_agent_dropin_tolerates_a_missing_display_env_file() {
     "the display env file must be optional ('-'), or a classic install fails to start SC"
 }
 
+# --- issue #102: ScreenConnect waits for the backstage daemon at boot ---------
+# The client unit starts before the backstage shell and daemon, so its JVM read
+# no display env and resolved its session before any frame existed. Backstage
+# gets an ExecStartPre= wait; classic does not, because there the daemon comes
+# up only at login and every boot would sit out the whole timeout.
+
+render_sc_dropins() {  # dir backstage -> status of install_sc_dropins
+  install_sc_dropins "$1" "$HERE/systemd" /opt/dreamconnect 1234 \
+    /dev/shm/dreamconnect.frame.1234 ",label=[Backstage]" "$2"
+}
+
+test_install_sc_dropins_writes_the_wait_for_backstage() {
+  local dir wait
+  dir="$(mktemp -d -p "$TMP")/sc.service.d"
+  render_sc_dropins "$dir" 1 || { fail "install_sc_dropins refused a valid backstage call"; return 0; }
+  assert_file_exists "$dir/dreamconnect.conf" "the agent drop-in is written"
+  wait="$dir/dreamconnect-wait.conf"
+  assert_file_exists "$wait" "backstage gets the start wait"
+  [ -f "$wait" ] || return 0
+  assert_not_contains "$(cat "$wait")" "@" "every placeholder in the wait is substituted"
+  assert_not_contains "$(cat "$dir/dreamconnect.conf")" "@" \
+    "every placeholder in the agent drop-in is substituted"
+  local pre
+  pre="$(grep '^ExecStartPre=' "$wait" || true)"
+  assert_contains "$pre" "ExecStartPre=-" "the wait never fails the unit ('-')"
+  assert_contains "$pre" "/opt/dreamconnect/runtime/dreamconnect_wait_ready.py" \
+    "it runs the script install.sh deploys"
+  assert_contains "$pre" "--uid 1234 " "it waits for this install's account"
+  assert_contains "$pre" "--shm /dev/shm/dreamconnect.frame.1234 " \
+    "on the frame the daemon and agent share"
+  assert_contains "$pre" "--socket /run/user/1234/dreamconnect.sock " \
+    "on the socket the agent drop-in names"
+  assert_contains "$pre" "--display-env /run/user/1234/dreamconnect-display.env " \
+    "and on the env file the agent drop-in reads"
+  assert_contains "$(grep '^EnvironmentFile=' "$dir/dreamconnect.conf")" \
+    "/run/user/1234/dreamconnect-display.env" \
+    "the env file waited on is the one ScreenConnect reads"
+}
+
+test_install_sc_dropins_writes_no_wait_for_classic_and_removes_a_stale_one() {
+  local dir
+  dir="$(mktemp -d -p "$TMP")/sc.service.d"
+  render_sc_dropins "$dir" 1 || { fail "precondition: the backstage render failed"; return 0; }
+  assert_file_exists "$dir/dreamconnect-wait.conf" "precondition: a backstage wait exists"
+  render_sc_dropins "$dir" 0 || { fail "install_sc_dropins refused a valid classic call"; return 0; }
+  assert_file_exists "$dir/dreamconnect.conf" "classic still gets the agent drop-in"
+  assert_file_absent "$dir/dreamconnect-wait.conf" \
+    "a classic re-install removes the backstage wait, or every boot waits for a login"
+}
+
+test_install_sc_dropins_refuses_what_would_render_a_broken_wait() {
+  local dir
+  dir="$(mktemp -d -p "$TMP")/sc.service.d"
+  install_sc_dropins "$dir" "$HERE/systemd" /opt/dreamconnect "" /dev/shm/f "" 1 2>/dev/null \
+    && fail "an empty uid was accepted"
+  install_sc_dropins "$dir" "$HERE/systemd" /opt/dreamconnect "12a" /dev/shm/f "" 1 2>/dev/null \
+    && fail "a non-numeric uid was accepted"
+  install_sc_dropins "$dir" "$HERE/systemd" /opt/dreamconnect 1234 /dev/shm/f "" yes 2>/dev/null \
+    && fail "a backstage flag other than 0 or 1 was accepted"
+  assert_file_absent "$dir/dreamconnect-wait.conf" "a refused call writes nothing"
+}
+
+# Both numbers from the template itself, never restated: TimeoutStartSec= covers
+# the whole start, ExecStartPre= included, so a wait that can run to its
+# --timeout must fit inside it with room for ScreenConnect's own start.
+test_the_sc_start_timeout_outlasts_the_wait() {
+  local conf wait_s start_s
+  conf="$HERE/systemd/dreamconnect-wait.conf"
+  assert_file_exists "$conf" "the wait drop-in template is present"
+  [ -f "$conf" ] || return 0
+  wait_s="$(sed -n 's/^ExecStartPre=.*--timeout \([0-9][0-9]*\).*/\1/p' "$conf")"
+  start_s="$(sed -n 's/^TimeoutStartSec=\([0-9][0-9]*\)$/\1/p' "$conf")"
+  [ -n "$wait_s" ] || { fail "the wait names no numeric --timeout"; return 0; }
+  [ -n "$start_s" ] || { fail "the wait drop-in sets no numeric TimeoutStartSec="; return 0; }
+  [ "$start_s" -gt "$wait_s" ] \
+    || fail "TimeoutStartSec=$start_s does not outlast --timeout $wait_s: systemd would kill the start mid-wait"
+}
+
+test_install_sh_deploys_the_wait_and_installs_the_dropins_through_the_library() {
+  local sh
+  sh="$HERE/install.sh"
+  [ -f "$sh" ] || { fail "install.sh is missing"; return 0; }
+  [ -n "$(first_code_line "$sh" 'install .*runtime/dreamconnect_wait_ready[.]py')" ] \
+    || fail "install.sh never deploys runtime/dreamconnect_wait_ready.py, which the wait runs"
+  [ -n "$(first_code_line "$sh" '^[[:space:]]*install_sc_dropins ')" ] \
+    || fail "install.sh does not write the ScreenConnect drop-ins through install_sc_dropins"
+  [ -n "$(first_code_line "$sh" 'rm -f .*dreamconnect-wait[.]conf|dreamconnect-wait[.]conf"$')" ] \
+    || fail "uninstall leaves the start wait behind on the ScreenConnect unit"
+}
+
 # --- slice 10c: the X-probe wrapper is display-number agnostic ---------------
 # ScreenConnect's startup probes every X display it can find cookies for, with
 # no timeout of its own, so one display that accepts connections and never
@@ -10798,6 +10888,11 @@ for CURRENT in \
   test_backstage_unit_template_placeholders_are_all_substituted_by_install_sh \
   test_backstage_unit_does_not_depend_on_a_graphical_session \
   test_agent_dropin_tolerates_a_missing_display_env_file \
+  test_install_sc_dropins_writes_the_wait_for_backstage \
+  test_install_sc_dropins_writes_no_wait_for_classic_and_removes_a_stale_one \
+  test_install_sc_dropins_refuses_what_would_render_a_broken_wait \
+  test_the_sc_start_timeout_outlasts_the_wait \
+  test_install_sh_deploys_the_wait_and_installs_the_dropins_through_the_library \
   test_sourcing_is_side_effect_free \
   test_library_defines_the_installer_functions \
   test_run_executes_the_command_by_default \
