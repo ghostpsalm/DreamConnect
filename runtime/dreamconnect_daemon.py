@@ -146,6 +146,30 @@ class FrameBuffer:
         log(f"reclaimed stale frame {self.path} (was owned by uid {owner})")
         return os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
 
+    def publish(self):
+        """Create the frame now, empty, before any client has attached (#102).
+
+        The agent attaches only to a session whose frame already exists as a
+        regular file owned by this uid (usableShm, #51), and ensure() used to be
+        the only thing that created it -- which runs only once a client is
+        attached. /dev/shm is a tmpfs, so after every reboot neither side moved
+        first, and the agent refused the session forever.
+
+        Empty, not a header: geometry is unknown until the first frame, and the
+        agent reads a file shorter than the header as "no frame yet". A frame
+        that already exists keeps its length -- truncating it would pull the
+        pages out from under an agent that still has the previous run's frame
+        mapped, and ensure() rewrites it on the first frame either way. Through
+        _open_frame so a stale frame from another account is still reclaimed,
+        and a foreign one that cannot be now fails here, at startup, with #27's
+        message rather than when the first client attaches.
+        """
+        fd = self._open_frame()
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+
     def ensure(self, width, height, stride):
         if (width, height, stride) == (self.width, self.height, self.stride) and self.mm:
             return
@@ -998,6 +1022,11 @@ def main():
     # process exits non-zero and systemd sees the failure it should.
     session = None
     try:
+        # First, so the agent can see this session as soon as the daemon is
+        # up rather than only after a client attaches (#102), and inside the
+        # try so a frame that cannot be claimed still exits through the guarded
+        # path with nothing to release.
+        frame.publish()
         if args.greeter:
             # Greeter mode owns no Mutter session, so it needs no session bus —
             # it is an RDP client of the local remote-login service. Importing

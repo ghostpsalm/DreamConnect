@@ -1539,3 +1539,37 @@ reclaim_stale_shm_frame() {  # path target_uid
   [ "$(stat -c '%u' "$path")" != "$target_uid" ] && run rm -f "$path"
   return 0
 }
+
+# --- ScreenConnect drop-ins (issue #102) ---------------------------------------
+# install_sc_dropins dropin_dir template_dir install_dir uid shm agent_extra backstage
+#
+# Renders the agent drop-in (dreamconnect.conf) always, and the start wait
+# (dreamconnect-wait.conf) only when backstage is 1. A classic install also
+# removes a wait left by an earlier backstage install of the same box: there the
+# daemon comes up only at login, so a stale wait would hold every boot for its
+# whole timeout. Writes files only; the caller reloads and restarts, as before.
+#
+# The uid is checked here rather than trusted: it lands in a path that a root
+# ExecStartPre= reads, and an empty or non-numeric one would render a drop-in
+# that waits on /run/user//... for the full timeout on every boot.
+install_sc_dropins() {
+  local dir="$1" tpl="$2" install_dir="$3" uid="$4" shm="$5" extra="$6" backstage="$7"
+  is_uid "$uid" || { echo "install_sc_dropins: not a uid: '$uid'" >&2; return 1; }
+  case "$backstage" in
+    0|1) ;;
+    *) echo "install_sc_dropins: backstage must be 0 or 1, got '$backstage'" >&2; return 1 ;;
+  esac
+  [ -n "$install_dir" ] && [ -n "$shm" ] \
+    || { echo "install_sc_dropins: install dir and shm path are required" >&2; return 1; }
+  install -d "$dir" || return 1
+  sed -e "s#@INSTALL_DIR@#$install_dir#g" -e "s#@UID@#$uid#g" \
+      -e "s#@SHM_PATH@#$shm#g" -e "s#@AGENT_EXTRA@#$extra#g" \
+      "$tpl/dreamconnect-agent.conf" > "$dir/dreamconnect.conf" || return 1
+  if [ "$backstage" = "1" ]; then
+    sed -e "s#@INSTALL_DIR@#$install_dir#g" -e "s#@UID@#$uid#g" \
+        -e "s#@SHM_PATH@#$shm#g" \
+        "$tpl/dreamconnect-wait.conf" > "$dir/dreamconnect-wait.conf" || return 1
+  else
+    rm -f "$dir/dreamconnect-wait.conf" || return 1
+  fi
+}

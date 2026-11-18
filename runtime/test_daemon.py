@@ -923,6 +923,18 @@ class _FakeLoop:
         pass
 
 
+class _StubFrameBuffer:
+    """What main() needs of a FrameBuffer before any frame exists: publish().
+    Records the calls, so a test can see the frame was published and when."""
+
+    def __init__(self, path, events=None):
+        self.path = path
+        self.events = events if events is not None else []
+
+    def publish(self):
+        self.events.append(("publish", self.path))
+
+
 class TestMainReleasesTheSessionOnEveryExit(unittest.TestCase):
     """Issue #55, the half the reported symptom came from.
 
@@ -951,7 +963,7 @@ class TestMainReleasesTheSessionOnEveryExit(unittest.TestCase):
         loop = _FakeLoop(on_run)
         patches = [
             patch.object(d.Gst, "init", lambda *a: None),
-            patch.object(d, "FrameBuffer", lambda path: None),
+            patch.object(d, "FrameBuffer", _StubFrameBuffer),
             patch.object(d, "ControlServer", control_server),
             patch.object(d.Gio, "bus_get_sync",
                          bus_get or (lambda *a: bus)),
@@ -1056,6 +1068,123 @@ class TestMainReleasesTheSessionOnEveryExit(unittest.TestCase):
             d.main()
         self.assertIn("session bus", str(caught.exception),
                       "the cleanup masked the failure that actually happened")
+
+
+class TestFrameBufferPublish(unittest.TestCase):
+    """#102: the frame exists from daemon startup, before any client attaches.
+
+    The agent attaches only to a session whose frame is already a regular file
+    owned by the daemon's uid (#51's usableShm), and the daemon used to create
+    it only in ensure(), once a client was attached. /dev/shm is a tmpfs, so
+    after a reboot neither side moved first.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dreamconnect-test-")
+        self.path = os.path.join(self.dir, "frame")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_publish_creates_an_empty_owner_only_frame(self):
+        d.FrameBuffer(self.path).publish()
+        st = os.lstat(self.path)
+        self.assertTrue(stat.S_ISREG(st.st_mode), "the frame is a regular file")
+        self.assertEqual(st.st_uid, os.getuid(), "owned by the daemon's own uid")
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        self.assertEqual(st.st_size, 0,
+                         "empty: there is no geometry to put in a header yet, and "
+                         "the agent reads a short file as no frame")
+
+    def test_publish_narrows_an_inherited_wide_mode(self):
+        with open(self.path, "wb"):
+            pass
+        os.chmod(self.path, 0o644)
+        d.FrameBuffer(self.path).publish()
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600,
+                         "a frame left world-readable is the screen for anyone")
+
+    def test_publish_reclaims_a_frame_it_cannot_open(self):
+        # The #27 stand-in for "owned by another uid", as TestFrameBufferReclaim.
+        with open(self.path, "wb") as f:
+            f.write(b"stale")
+        os.chmod(self.path, 0o000)
+        d.FrameBuffer(self.path).publish()
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+
+    def test_publish_leaves_an_existing_frame_whole(self):
+        # An agent may still have the previous run's frame mapped; shrinking the
+        # file under it would fault its reads. ensure() rewrites it on frame one.
+        with open(self.path, "wb") as f:
+            f.write(b"\x01" * d.HEADER_SIZE)
+        os.chmod(self.path, 0o600)
+        d.FrameBuffer(self.path).publish()
+        self.assertEqual(os.stat(self.path).st_size, d.HEADER_SIZE)
+
+    def test_the_first_frame_after_publish_is_a_real_frame(self):
+        fb = d.FrameBuffer(self.path)
+        fb.publish()
+        fb.write(b"\xff" * 32, 4, 2, 16)
+        with open(self.path, "rb") as f:
+            magic = f.read(4)
+        self.assertEqual(magic, d.MAGIC)
+        self.assertEqual(os.stat(self.path).st_size, d.HEADER_SIZE + 32)
+
+
+class TestMainPublishesTheFrame(unittest.TestCase):
+    """#102, driven through the real main(): the frame is published before the
+    session is even created, so a daemon whose capture is slow to come up -- or
+    never does -- is still visible to the agent as a session."""
+
+    REAL_FRAMEBUFFER = d.FrameBuffer   # taken before any test patches it
+
+    def _drive(self, argv, **kw):
+        return TestMainReleasesTheSessionOnEveryExit._drive(self, argv, **kw)
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dreamconnect-test-")
+        self.shm = os.path.join(self.dir, "dreamconnect.frame.test")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_main_creates_the_frame_before_the_session_exists(self):
+        seen = []
+
+        def bus_get(*_a):
+            seen.append(os.path.exists(self.shm))
+            raise RuntimeError("fake: no session bus")
+
+        self._drive(["--virtual", "1280x720", "--socket", SOCK, "--shm", self.shm],
+                    bus_get=bus_get)
+        # The real FrameBuffer, over _drive's stub: what is pinned is the file.
+        p = patch.object(d, "FrameBuffer", self.REAL_FRAMEBUFFER)
+        p.start()
+        self.addCleanup(p.stop)
+        with self.assertRaises(RuntimeError):
+            d.main()
+        self.assertEqual(seen, [True],
+                         "the frame did not exist when the session was being created")
+        self.assertEqual(stat.S_IMODE(os.stat(self.shm).st_mode), 0o600)
+
+    def test_a_frame_that_cannot_be_claimed_fails_at_startup(self):
+        # Review finding 5: the #27 failure moves from first attach to startup.
+        # The error propagates (systemd sees it) and nothing else was started.
+        events = []
+        bus_calls = []
+
+        class Unclaimable(_StubFrameBuffer):
+            def publish(self):
+                raise PermissionError("fake: frame owned by uid 0")
+
+        self._drive(["--virtual", "1280x720", "--socket", SOCK, "--shm", self.shm],
+                    bus_get=lambda *a: bus_calls.append(a))
+        p = patch.object(d, "FrameBuffer", lambda path: Unclaimable(path, events))
+        p.start()
+        self.addCleanup(p.stop)
+        with self.assertRaises(PermissionError):
+            d.main()
+        self.assertEqual(bus_calls, [], "no session was started behind a dead frame")
 
 
 class TestHeadlessCaptureFallback(unittest.TestCase):

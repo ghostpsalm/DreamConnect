@@ -193,7 +193,8 @@ uninstall() {
       || echo "!! could not clear DCONF_PROFILE from $HOST_ACCOUNT's user manager — continuing"
   fi
   if [ -n "$SC_UNIT" ]; then
-    rm -f "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
+    rm -f "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf" \
+          "/etc/systemd/system/$SC_UNIT.d/dreamconnect-wait.conf"
     rmdir "/etc/systemd/system/$SC_UNIT.d" 2>/dev/null || true
     systemctl daemon-reload
     systemctl restart "$SC_UNIT" || true
@@ -510,6 +511,8 @@ echo ">> deploying to $INSTALL_DIR"
 install -d -o root -g root -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/runtime"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_daemon.py" "$INSTALL_DIR/runtime/"
 install -o root -g root -m 0755 "$HERE/runtime/dreamconnect-backstage-env.sh" "$INSTALL_DIR/runtime/"
+# Run as root by the ScreenConnect unit's ExecStartPre= (backstage, #102).
+install -o root -g root -m 0755 "$HERE/runtime/dreamconnect_wait_ready.py" "$INSTALL_DIR/runtime/"
 # The session-switch CLI (backstage <-> on-demand user sessions). Only useful in
 # backstage mode — it repoints SC between the backstage account and a user's
 # session — so it is deployed and put on PATH only there.
@@ -682,11 +685,13 @@ if [ "$DREAMCONNECT_FPS" -gt 0 ]; then
 fi
 if [ -n "$SC_UNIT" ]; then
   echo ">> installing agent drop-in on $SC_UNIT"
-  install -d "/etc/systemd/system/$SC_UNIT.d"
-  sed -e "s#@INSTALL_DIR@#$INSTALL_DIR#g" -e "s#@UID@#$USER_UID#g" \
-      -e "s#@SHM_PATH@#$SHM_PATH#g" -e "s#@AGENT_EXTRA@#$AGENT_EXTRA#g" \
-      "$HERE/systemd/dreamconnect-agent.conf" \
-      > "/etc/systemd/system/$SC_UNIT.d/dreamconnect.conf"
+  # Backstage also gets the start wait (#102): ScreenConnect starts on boot
+  # before the backstage shell and daemon, and must not read the display env or
+  # resolve its session until they are up. The restart below runs that wait too,
+  # so it can take up to its timeout when the daemon is not up yet.
+  install_sc_dropins "/etc/systemd/system/$SC_UNIT.d" "$HERE/systemd" "$INSTALL_DIR" \
+      "$USER_UID" "$SHM_PATH" "$AGENT_EXTRA" "$BACKSTAGE" \
+    || die "could not write the ScreenConnect drop-ins under /etc/systemd/system/$SC_UNIT.d"
   systemctl daemon-reload
   systemctl restart "$SC_UNIT"
 else

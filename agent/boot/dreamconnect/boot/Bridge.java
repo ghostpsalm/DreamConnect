@@ -211,6 +211,15 @@ public final class Bridge {
     // no frames, no input — rather than route either to a session that is not
     // the one the operator selected.
     private static volatile boolean attachRefused;
+    // When the last refusal happened, on resolveForThisChild's clock. A refusal
+    // is NOT final (#102): ScreenConnect's service JVM starts on boot before the
+    // DreamConnect daemons have published a frame, resolves on its first picker
+    // probe, and used to latch that refusal for its whole life — the service
+    // stayed blind until someone restarted it. Retried at most this often, so a
+    // daemon that never comes up costs one registry read and a PING per entry
+    // every two seconds rather than one per Robot call.
+    private static volatile long refusedAtMs;
+    static final long REFUSAL_RETRY_MS = 2000;
 
     /**
      * One registry entry's text as a session, or null if it does not describe
@@ -429,12 +438,27 @@ public final class Bridge {
      *
      * A discovery failure leaves the configured shm=/socket= args in place: a
      * box with one daemon, or a discovery that throws, behaves as it always did.
-     * A refusal (see resolveEndpoint) instead attaches to nothing at all.
+     * A refusal (see resolveEndpoint) instead attaches to nothing at all — for
+     * now. It is retried, no more often than REFUSAL_RETRY_MS, until a
+     * resolution succeeds; only a success (or a discovery failure, which keeps
+     * the configured args as it always did) is final.
      */
     private static synchronized void resolveForThisChild() {
+        resolveForThisChild(java.nio.file.Path.of(REGISTRY_DIR), ROOT_UID,
+                System.getenv("DISPLAY"), System.nanoTime() / 1_000_000L);
+    }
+
+    /**
+     * resolveForThisChild() with its inputs passed in: the registry directory
+     * and the uid that must own it, the child's display, and a monotonic now.
+     * Package-private so a test can drive a refusal and its recovery against a
+     * registry it built, without the real /run or the real clock.
+     */
+    static synchronized void resolveForThisChild(java.nio.file.Path registryDir,
+                                                 long registryOwnerUid,
+                                                 String childDisplay, long nowMs) {
         if (resolvedForChild) return;
-        resolvedForChild = true;
-        String childDisplay = System.getenv("DISPLAY");
+        if (attachRefused && nowMs - refusedAtMs < REFUSAL_RETRY_MS) return;
         // uid -1 / user null: the operator's own shm=/socket= configuration is
         // not a registry entry, so it has nothing to authenticate against.
         SessionEndpoint configured = new SessionEndpoint(
@@ -442,20 +466,43 @@ public final class Bridge {
         SessionEndpoint chosen;
         try {
             java.util.List<SessionEndpoint> registered =
-                    readRegistry(java.nio.file.Path.of(REGISTRY_DIR), ROOT_UID);
+                    readRegistry(registryDir, registryOwnerUid);
             chosen = resolveEndpoint(childDisplay, registered,
                     liveSessions(registered), configured);
         } catch (Throwable t) {
+            // A retry that throws keeps the refusal it was retrying: the
+            // registry has already described this display once, so falling back
+            // to the configured args now is the wrong-desktop answer refusal
+            // exists to prevent. Only a first resolution keeps them, as before.
+            if (attachRefused) {
+                refusedAtMs = nowMs;
+                log("registry read failed on retry (" + t + "); still refusing");
+                return;
+            }
+            resolvedForChild = true;
             log("registry read failed (" + t + "); keeping configured endpoints");
             return;
         }
         if (chosen == null) {
+            // Logged on the first refusal only: the retry would otherwise repeat
+            // this paragraph every two seconds for as long as the daemon is down,
+            // and liveSessions already names what it skipped on every pass.
+            if (!attachRefused) {
+                log("REFUSING to attach: the registry describes DISPLAY=" + childDisplay
+                        + " but nothing usable serves it (or more than one claims it). "
+                        + "Showing nothing beats showing another session's desktop "
+                        + "under this session's name. Retrying every "
+                        + REFUSAL_RETRY_MS + " ms.");
+            }
             attachRefused = true;
-            log("REFUSING to attach: the registry describes DISPLAY=" + childDisplay
-                    + " but nothing usable serves it (or more than one claims it). "
-                    + "Showing nothing beats showing another session's desktop "
-                    + "under this session's name.");
+            refusedAtMs = nowMs;
             return;
+        }
+        resolvedForChild = true;
+        if (attachRefused) {
+            attachRefused = false;
+            log("DISPLAY=" + childDisplay + " recovered from an earlier refusal: "
+                    + "its session is usable now");
         }
         if (chosen == configured) {
             log("DISPLAY=" + childDisplay + " is not described by the registry; "
@@ -1020,6 +1067,34 @@ public final class Bridge {
      * `if (daemon == null)` guard would silently keep it — wrong socket and no
      * peer check on every keystroke thereafter.
      */
+    /** Whether resolution is currently refusing, for a test to observe. */
+    static boolean refusingForTests() { return attachRefused; }
+
+    /** The frame this JVM reads, for a test to see which session it attached to. */
+    static String shmPathForTests() { return shmPath; }
+
+    /**
+     * Back to a JVM that has resolved nothing: no client, no reader, no
+     * refusal, and the shm/socket defaults. Resolution is process-wide static
+     * state, and a test that drives it would otherwise hand its leftover
+     * session to whichever test runs next, so BootTests calls this before and
+     * after. shm and socket go back to their environment defaults, so a
+     * configure()d shm=/socket= does not survive it; label= and the capture
+     * tuning do.
+     */
+    static synchronized void resetResolutionForTests() {
+        if (daemon != null) daemon.close();
+        daemon = null;
+        frame = null;
+        shmPath = defaultShm();
+        socketPath = defaultSocket();
+        sessionLabel = null;
+        logonLabel = null;
+        resolvedForChild = false;
+        attachRefused = false;
+        refusedAtMs = 0;
+    }
+
     static synchronized DaemonClient attachTo(SessionEndpoint chosen) {
         if (chosen == null) return null;
         if (daemon != null) daemon.close();
